@@ -240,15 +240,19 @@ final class AudiobookPlayer {
 
     private func configureRemoteCommands() {
         let c = MPRemoteCommandCenter.shared()
-        c.playCommand.addTarget { [weak self] _ in self?.play(); return .success }
-        c.pauseCommand.addTarget { [weak self] _ in self?.pause(); return .success }
+        // MediaPlayer invokes these handlers on a non-main thread, so hop to the
+        // main actor (the player is @MainActor) rather than calling directly —
+        // calling main-actor methods off-main trips a dispatch-queue assertion.
+        c.playCommand.addTarget { [weak self] _ in Task { @MainActor in self?.play() }; return .success }
+        c.pauseCommand.addTarget { [weak self] _ in Task { @MainActor in self?.pause() }; return .success }
         c.skipForwardCommand.preferredIntervals = [30]
-        c.skipForwardCommand.addTarget { [weak self] _ in self?.skip(30); return .success }
+        c.skipForwardCommand.addTarget { [weak self] _ in Task { @MainActor in self?.skip(30) }; return .success }
         c.skipBackwardCommand.preferredIntervals = [15]
-        c.skipBackwardCommand.addTarget { [weak self] _ in self?.skip(-15); return .success }
+        c.skipBackwardCommand.addTarget { [weak self] _ in Task { @MainActor in self?.skip(-15) }; return .success }
         c.changePlaybackPositionCommand.addTarget { [weak self] event in
-            guard let self, let e = event as? MPChangePlaybackPositionCommandEvent else { return .commandFailed }
-            self.seekWithinBook(toBookTime: e.positionTime)
+            guard let e = event as? MPChangePlaybackPositionCommandEvent else { return .commandFailed }
+            let position = e.positionTime
+            Task { @MainActor in self?.seekWithinBook(toBookTime: position) }
             return .success
         }
     }

@@ -134,12 +134,16 @@ enum PhaseZeroSelfTest {
             // Resume round-trip on the multi-file (MP3) book: jump to track 2,
             // persist, reload, expect restore.
             if let folder {
+                // Fixture folder ships a cover.jpg, so now-playing artwork is built
+                // during playback — exercises the MediaPlayer artwork path that
+                // crashed when its handler was main-actor-isolated.
+                check("MP3 folder cover extracted", folder.coverPath != nil)
                 context.insert(folder)
                 try? context.save()
                 let p1 = AudiobookPlayer()
                 p1.load(folder, context: context)
-                // Actually play briefly so the periodic time observer fires — this
-                // exercises the AVFoundation→main-actor hop that previously crashed.
+                // Actually play briefly so the periodic time observer + now-playing
+                // artwork handler fire — both previously crashed off the main actor.
                 p1.play()
                 try? await Task.sleep(for: .seconds(1.2))
                 check("Playback advances without crashing", p1.isPlaying)

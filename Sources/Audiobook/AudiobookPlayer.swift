@@ -268,9 +268,16 @@ final class AudiobookPlayer {
         if let coverRel = book?.coverPath,
            let url = try? ContainerPaths.url(forRelativePath: coverRel),
            let image = UIImage(contentsOfFile: url.path) {
-            info[MPMediaItemPropertyArtwork] = MPMediaItemArtwork(boundsSize: image.size) { _ in image }
+            info[MPMediaItemPropertyArtwork] = Self.makeArtwork(image)
         }
         MPNowPlayingInfoCenter.default().nowPlayingInfo = info
+    }
+
+    /// Build the lock-screen artwork. `nonisolated` so its request handler is NOT
+    /// main-actor-isolated — MediaPlayer invokes it on its own background queue,
+    /// and a main-actor-isolated closure would trip an executor assertion there.
+    nonisolated private static func makeArtwork(_ image: UIImage) -> MPMediaItemArtwork {
+        MPMediaItemArtwork(boundsSize: image.size) { _ in image }
     }
 
     private func updateNowPlayingElapsed() {

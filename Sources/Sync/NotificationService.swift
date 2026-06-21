@@ -1,6 +1,25 @@
 import Foundation
 import UserNotifications
 
+/// Lets download notifications appear as banners even while the app is in the
+/// foreground (iOS suppresses them otherwise). Set as the notification-center
+/// delegate once at launch.
+final class NotificationPresenter: NSObject, UNUserNotificationCenterDelegate, @unchecked Sendable {
+    static let shared = NotificationPresenter()
+
+    func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        willPresent notification: UNNotification
+    ) async -> UNNotificationPresentationOptions {
+        [.banner, .sound, .list]
+    }
+
+    /// Install the delegate. Idempotent; call early at launch.
+    static func install() {
+        UNUserNotificationCenter.current().delegate = shared
+    }
+}
+
 /// Local notifications for download start/finish. Uses `UNUserNotificationCenter`
 /// (no APNs / paid entitlement). Best-effort: failures are ignored so they never
 /// block the download pipeline.

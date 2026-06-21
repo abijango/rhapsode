@@ -27,6 +27,8 @@ struct RhapsodeApp: App {
         _sync = State(initialValue: SyncManager(source: DropboxSource(), context: container.mainContext))
         // Register the background-refresh handler before launch completes.
         BackgroundRefresh.register(container: container)
+        // Show download notifications even while the app is in the foreground.
+        NotificationPresenter.install()
     }
 
     var body: some Scene {

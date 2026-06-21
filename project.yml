@@ -1,0 +1,82 @@
+name: Rhapsode
+options:
+  bundleIdPrefix: com.naufalmir
+  deploymentTarget:
+    iOS: "26.0"
+  createIntermediateGroups: true
+
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    DEVELOPMENT_LANGUAGE: en
+    # Free provisioning during development — no paid entitlements in the MVP.
+    CODE_SIGN_STYLE: Automatic
+    # Personal team for free on-device provisioning. Persisted here so it
+    # survives `xcodegen generate` (the .xcodeproj is regenerated + gitignored).
+    DEVELOPMENT_TEAM: U92LTX7P84
+
+packages:
+  # Readium EPUB toolkit (SPM). Declared in Phase 0; integration is Phase 1 (Agent C).
+  # Products needed for an offline reflowable reader: Shared + Streamer + Navigator
+  # + the GCDWebServer adapter the navigator uses to serve EPUB resources locally.
+  Readium:
+    url: https://github.com/readium/swift-toolkit
+    exactVersion: 3.9.0
+
+targets:
+  Rhapsode:
+    type: application
+    platform: iOS
+    deploymentTarget: "26.0"
+    sources:
+      - path: Sources
+      # Sample fixtures bundled as a folder reference (preserves subdirectories
+      # so MockLibrarySource can enumerate them at runtime). Dev/testing only.
+      - path: Fixtures/SampleLibrary
+        type: folder
+        buildPhase: resources
+    dependencies:
+      - package: Readium
+        product: ReadiumShared
+      - package: Readium
+        product: ReadiumStreamer
+      - package: Readium
+        product: ReadiumNavigator
+      - package: Readium
+        product: ReadiumAdapterGCDWebServer
+    # Explicit (not auto-generated) Info.plist: the auto-generated plist only
+    # supports a whitelist of INFOPLIST_KEY_* settings, and we need arbitrary keys
+    # — UIBackgroundModes now, a CFBundleURLTypes OAuth callback scheme in Phase 1.
+    info:
+      path: SupportingFiles/Info.plist
+      properties:
+        CFBundleDisplayName: Rhapsode
+        CFBundleShortVersionString: "0.1.0"
+        CFBundleVersion: "1"
+        UILaunchScreen: {}
+        # Lock-screen / Control Center audio control needs the audio background
+        # mode. Free to declare; doing it now avoids an entitlements retrofit.
+        UIBackgroundModes:
+          - audio
+          - fetch
+        # BGTaskScheduler delta-check while the app is closed (Phase 2 fast-follow).
+        # Free feature — no paid entitlement.
+        BGTaskSchedulerPermittedIdentifiers:
+          - com.naufalmir.rhapsode.refresh
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.naufalmir.rhapsode
+        PRODUCT_NAME: Rhapsode
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        TARGETED_DEVICE_FAMILY: "1,2" # iPhone + iPad (shared SwiftUI codebase)
+        SWIFT_STRICT_CONCURRENCY: complete

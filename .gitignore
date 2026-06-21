@@ -1,0 +1,24 @@
+# Xcode project + Info.plist are generated from project.yml via `xcodegen generate`
+Rhapsode.xcodeproj/
+SupportingFiles/Info.plist
+
+# Xcode
+*.xcworkspace
+!default.xcworkspace
+xcuserdata/
+*.xcuserstate
+DerivedData/
+build/
+*.moved-aside
+*.hmap
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# Swift Package Manager
+.build/
+.swiftpm/
+Package.resolved
+
+# macOS
+.DS_Store

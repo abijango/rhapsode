@@ -154,9 +154,11 @@ final class AudiobookPlayer {
 
     private func addPeriodicObserver() {
         let interval = CMTime(seconds: 0.5, preferredTimescale: 600)
-        timeObserver = player.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak self] _ in
-            guard let self else { return }
-            MainActor.assumeIsolated { self.tick() }
+        // Deliver on whatever queue AVFoundation uses and hop to the main actor.
+        // `MainActor.assumeIsolated` here trips a dispatch-queue assertion even with
+        // queue: .main, so hop explicitly with a Task instead.
+        timeObserver = player.addPeriodicTimeObserver(forInterval: interval, queue: nil) { [weak self] _ in
+            Task { @MainActor in self?.tick() }
         }
         observeItemEnd()
     }

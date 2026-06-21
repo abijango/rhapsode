@@ -138,6 +138,12 @@ enum PhaseZeroSelfTest {
                 try? context.save()
                 let p1 = AudiobookPlayer()
                 p1.load(folder, context: context)
+                // Actually play briefly so the periodic time observer fires — this
+                // exercises the AVFoundation→main-actor hop that previously crashed.
+                p1.play()
+                try? await Task.sleep(for: .seconds(1.2))
+                check("Playback advances without crashing", p1.isPlaying)
+                p1.pause()
                 p1.jump(toTrack: 1)
                 p1.seekInTrack(to: 1.5)
                 p1.teardown()

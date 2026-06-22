@@ -162,3 +162,37 @@ Every agent must, before declaring done: `xcodegen generate` → `xcodebuild ...
 ### Model
 Sonnet builder agents are well-suited to these well-scoped implementation tasks (clear acceptance criteria + the self-test as the gate). Set `model: sonnet` per agent. Keep planning/integration/review in the orchestrator session.
 
+### Kickoff prompt (paste into a fresh session)
+
+```
+Read docs/SPEC.md, docs/ROADMAP.md (especially "Status — resume here" and
+"Parallel agent orchestration"), and the project memory files, then orchestrate
+the post-MVP build.
+
+First wave — launch these TWO Sonnet builder agents IN PARALLEL, each in its own
+git worktree (isolation: "worktree", model: sonnet):
+
+  • Agent A — Phase 3 (background sync): background URLSession (3a single-file
+    first), AppDelegate for handleEventsForBackgroundURLSession, wire
+    BGTaskScheduler (3c), and the ASCII Dropbox-API-Arg fix. Owns Sources/Sync,
+    Sources/Source. Coordinate the one project.yml line (AppDelegate) with me.
+
+  • Agent B — Phase 4a (iPad): adaptive layout (NavigationSplitView, wider grids,
+    keyboard/pointer). Owns Sources/App UI.
+
+Do NOT touch shared files (Models.swift, project.yml, RhapsodeApp.swift,
+RootTabView.swift) without routing through me. Each agent must: obey the Hard
+Constraints in the roadmap Status section (esp. Task { @MainActor } for framework
+callbacks, @preconcurrency imports, read-only Dropbox, relative paths, no
+.unique); build via `xcodegen generate` + xcodebuild for iphonesimulator26.5; run
+the self-test (-phase0selftest) green; add new self-test checks for new behavior;
+and NOT claim background/lock-screen behavior as verified (device-only — that's my
+on-device step).
+
+After both return: I merge the worktrees, run a unified build + self-test, resolve
+any conflicts, and hand back for on-device verification. Then do Phase 5 (CloudKit
+progress sync) SERIALLY — it refactors Models.swift — and Phase 4b (macOS Catalyst)
+last. Do not parallelize Phase 5.
+```
+
+

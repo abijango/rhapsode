@@ -95,12 +95,23 @@ A folder isn't one transfer. Add `groupID: String?` to `DownloadItem` (additive,
 - Pointer + hardware-keyboard affordances (page-turn keys in the reader, space = play/pause).
 - No entitlement changes.
 
-### 4b. macOS via **Mac Catalyst** (not native AppKit)
-**Key constraint:** the Readium Swift toolkit's navigator is **UIKit-based** — it runs on iOS and **Mac Catalyst**, but **not** native macOS/AppKit. So a native SwiftUI-for-macOS target can't reuse the reader. **Use Mac Catalyst** to share the entire codebase (verify Readium's current Catalyst support first — check the swift-toolkit platforms before committing).
-- `project.yml`: enable `SUPPORTS_MACCATALYST = YES`, set a macOS deployment target, add a Catalyst destination.
-- Add menu-bar `Commands`, window sizing, keyboard shortcuts, pointer support.
-- `ASWebAuthenticationSession` (Dropbox OAuth) and Keychain both work on Catalyst.
-- **Background differs on macOS:** `BGTaskScheduler` is iOS-only. On macOS, rely on the app being open (longpoll watcher) + background `URLSession` (works on Catalyst). Document the reduced "while fully closed" behavior on Mac.
+### 4b. macOS via **Mac Catalyst** (not native AppKit) — BUILT (foundation + polish)
+**Key constraint:** the Readium Swift toolkit's navigator is **UIKit-based** — it runs on iOS and **Mac Catalyst**, but **not** native macOS/AppKit. So a native SwiftUI-for-macOS target can't reuse the reader. Use Mac Catalyst to share the entire codebase.
+
+> **Gate result (2026-06-22): Readium 3.9 + the whole codebase COMPILE for Mac Catalyst with ZERO source changes** — only `SUPPORTS_MACCATALYST=YES` in project.yml. `BGTaskScheduler` even compiles on Catalyst (not the iOS-only blocker feared). Runtime self-test (ad-hoc, pre-entitlement): **57/59** — the only 2 fails were Keychain `-34018` (a signing/entitlement gap, not code). Built via a workflow (commits `7503a1a` foundation, `143b225` polish): per-module Sonnet implementer in a worktree + adversarial reviewer (build iOS+Catalyst, regression/ownership check), Haiku for the entitlement boilerplate; orchestrator ran the real 63-check integration suite + merged.
+
+**Built:**
+- `project.yml`: `SUPPORTS_MACCATALYST=YES`, one bundle id, `CODE_SIGN_ENTITLEMENTS`.
+- Keychain entitlement (`SupportingFiles/Rhapsode.entitlements`, default keychain-access-groups) targeting the `-34018`.
+- Menu-bar `Commands` (remove New Window; Library ▸ Scan Now / Cmd+R) + window sizing (`.defaultSize` 1000×720, `.windowResizability(.automatic)`), all `#if targetEnvironment(macCatalyst)`.
+- Pointer/hover affordances on cover tiles (`.hoverEffect` + `.help`); keyboard shortcuts already from 4a.
+- Headless self-test now `exit()`s in `-phase0selftest` so it's verifiable on Mac via `open -W --stdout`.
+
+**Device/signing gates (on-device step):**
+- The keychain entitlement makes the **Catalyst build require a Mac Development certificate** (free, via Xcode automatic signing — ad-hoc is now rejected). Needed to run on Mac at all and to verify the keychain fix.
+- Then visually confirm: menu works + Scan Now, window sizing/resize, reader actually **renders** a page (GCDWebServer→WKWebView — not headlessly testable), audio plays, hover affordances.
+- **Background on macOS:** `BGTaskScheduler` compiles but is effectively iOS-only at runtime; rely on the app being open (longpoll watcher) + background `URLSession`. Reduced "while fully closed" behavior on Mac.
+- Player/reader **menu commands deferred** (need `@FocusedValue` plumbing in the view files).
 
 ---
 

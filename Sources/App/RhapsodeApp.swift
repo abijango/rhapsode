@@ -66,16 +66,14 @@ struct RhapsodeApp: App {
                     .environment(sync)
                 #endif
             }
-            // Make the Mac Catalyst window freely resizable (no-op elsewhere).
-            .modifier(CatalystWindowSizing())
         }
         .modelContainer(modelContainer)
 #if targetEnvironment(macCatalyst)
         // MARK: Mac Catalyst — window sizing
-        // .defaultSize sets the initial window size. NOTE: SwiftUI's
-        // `.windowResizability` is an AppKit-backed API that is NOT honored on Mac
-        // Catalyst — resizability there is governed by `UIWindowScene.sizeRestrictions`,
-        // which `CatalystWindowSizing` (applied to the window content) sets explicitly.
+        // .defaultSize sets the initial window size. Resizability is configured at
+        // runtime in RootTabView via UIWindowScene.sizeRestrictions (see
+        // configureCatalystWindow) since the right lever/timing on Catalyst is
+        // scene-based, not a Scene modifier.
         .defaultSize(width: 1_000, height: 720)
         // MARK: Mac Catalyst — menu-bar commands
         .commands {
@@ -100,35 +98,3 @@ struct RhapsodeApp: App {
     }
 }
 
-/// Makes the Mac Catalyst window freely resizable. `.windowResizability` (AppKit)
-/// is ignored on Catalyst, so we reach the `UIWindowScene` and widen its
-/// `sizeRestrictions` directly. A no-op on iOS/iPadOS.
-private struct CatalystWindowSizing: ViewModifier {
-    func body(content: Content) -> some View {
-        #if targetEnvironment(macCatalyst)
-        content.background(CatalystWindowConfigurator())
-        #else
-        content
-        #endif
-    }
-}
-
-#if targetEnvironment(macCatalyst)
-/// Sets the host `UIWindowScene`'s size restrictions once the view is in the
-/// window hierarchy: a sane minimum and an unbounded maximum (min < max ⇒
-/// resizable; the default can leave the window pinned).
-private struct CatalystWindowConfigurator: UIViewRepresentable {
-    func makeUIView(context: Context) -> UIView { ConfiguringView() }
-    func updateUIView(_ uiView: UIView, context: Context) {}
-
-    final class ConfiguringView: UIView {
-        override func didMoveToWindow() {
-            super.didMoveToWindow()
-            guard let restrictions = window?.windowScene?.sizeRestrictions else { return }
-            restrictions.minimumSize = CGSize(width: 600, height: 480)
-            restrictions.maximumSize = CGSize(width: CGFloat.greatestFiniteMagnitude,
-                                              height: CGFloat.greatestFiniteMagnitude)
-        }
-    }
-}
-#endif

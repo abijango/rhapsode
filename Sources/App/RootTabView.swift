@@ -1,4 +1,7 @@
 import SwiftUI
+#if targetEnvironment(macCatalyst)
+import UIKit
+#endif
 
 // MARK: - Layout enum
 
@@ -75,12 +78,37 @@ struct RootTabView: View {
         .onChange(of: scenePhase, initial: true) { _, phase in
             if phase == .active {
                 Task { await sync.ensureWatching() }
+                #if targetEnvironment(macCatalyst)
+                // Apply now, and once more after the scene settles — sizeRestrictions
+                // is often unavailable at the first .active tick (the source of the
+                // earlier "window won't resize"), so the delayed pass is load-bearing.
+                Self.configureCatalystWindow()
+                Task { @MainActor in
+                    try? await Task.sleep(for: .milliseconds(500))
+                    Self.configureCatalystWindow()
+                }
+                #endif
             } else {
                 sync.stopWatching()
                 if phase == .background { BackgroundRefresh.schedule() }
             }
         }
     }
+
+    #if targetEnvironment(macCatalyst)
+    /// Make the Mac Catalyst window freely resizable. On Catalyst the window is a
+    /// `UIWindowScene` whose `sizeRestrictions` govern resizing (SwiftUI's
+    /// `.windowResizability` Scene modifier does not control it here); widen them to
+    /// a sane minimum and a large maximum. Must run after the scene is active —
+    /// `sizeRestrictions` can be nil earlier (see the delayed retry at the call site).
+    static func configureCatalystWindow() {
+        for ws in UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene }) {
+            guard let r = ws.sizeRestrictions else { continue }
+            r.minimumSize = CGSize(width: 600, height: 480)
+            r.maximumSize = CGSize(width: 10_000, height: 10_000)
+        }
+    }
+    #endif
 
     // MARK: Compact (iPhone)
 

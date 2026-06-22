@@ -9,6 +9,7 @@ xcuserdata/
 *.xcuserstate
 DerivedData/
 build/
+build-cat/
 *.moved-aside
 *.hmap
 *.ipa

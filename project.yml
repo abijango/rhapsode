@@ -89,3 +89,6 @@ targets:
         # incl. Readium's UIKit navigator (no native AppKit reader exists).
         SUPPORTS_MACCATALYST: "YES"
         DERIVE_MACCATALYST_PRODUCT_BUNDLE_IDENTIFIER: "NO"
+        # Phase 4b (macOS Catalyst) — Keychain entitlement for storing the Dropbox
+        # OAuth token. Resolves Keychain -34018 (errSecMissingEntitlement) errors.
+        CODE_SIGN_ENTITLEMENTS: SupportingFiles/Rhapsode.entitlements

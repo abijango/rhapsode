@@ -25,6 +25,10 @@ struct CoverTile: View {
                     }
                 }
                 .clipShape(RoundedRectangle(cornerRadius: DS.Radius.cover))
+                // Pointer/hover affordance: system highlight on iPad pointer and Mac Catalyst.
+                // No-op on touch (iPhone). Uses .automatic so the system chooses
+                // the most appropriate effect for the context.
+                .hoverEffect(.automatic)
 
             Text(title)
                 .font(.subheadline)
@@ -37,6 +41,16 @@ struct CoverTile: View {
                     .lineLimit(1)
             }
         }
+        // Tooltip shown on pointer hover (iPad pointer + Mac Catalyst); ignored on touch.
+        .help(tooltipText)
+    }
+
+    /// Tooltip string: "Title — Author" when an author is present, otherwise just the title.
+    private var tooltipText: String {
+        if let subtitle, !subtitle.isEmpty {
+            return "\(title) — \(subtitle)"
+        }
+        return title
     }
 
     private var coverImage: UIImage? {

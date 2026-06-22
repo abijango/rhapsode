@@ -66,5 +66,32 @@ struct RhapsodeApp: App {
             #endif
         }
         .modelContainer(modelContainer)
+#if targetEnvironment(macCatalyst)
+        // MARK: Mac Catalyst — window sizing
+        // Give the window a comfortable default size when first opened on macOS.
+        // .automatic lets the user freely resize; .contentSize would pin the window
+        // to its content's ideal size and can over-constrain a navigation/split UI.
+        .defaultSize(width: 1_000, height: 720)
+        .windowResizability(.automatic)
+        // MARK: Mac Catalyst — menu-bar commands
+        .commands {
+            // Remove the "New Window" item — this app is a single-library browser
+            // and a second window adds no meaningful value for now.
+            CommandGroup(replacing: .newItem) { }
+
+            // Library menu: manual Scan Now accessible from the menu bar.
+            // scanNow() is @MainActor and guards against double-runs internally.
+            // NOTE: Player/reader commands (play-pause, page-turn) are intentionally
+            // omitted — driving AudiobookPlayer/EbookReader from menu items requires
+            // @FocusedValue bindings injected in PlayerView/ReaderView, which are
+            // not owned by this file. Left as future work.
+            CommandMenu("Library") {
+                Button("Scan Now") {
+                    Task { @MainActor in await sync.scanNow() }
+                }
+                .keyboardShortcut("r", modifiers: .command)
+            }
+        }
+#endif
     }
 }

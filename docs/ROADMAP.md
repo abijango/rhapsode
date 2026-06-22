@@ -13,6 +13,18 @@ Recommended order: **3 → 4a (iPad) → 5 (sync) → 4b (macOS)**. Rationale at
 
 ---
 
+## Status — resume here (as of end of Phase 2)
+
+**Built + working in-app (Phases 0–2):** connect Dropbox, manual Scan now, foreground auto-detect (longpoll watcher), download queue (`DownloadsView`), foreground notifications, cover art, delete (with file removal), Readium reader, audiobook player. All green on the 38-check headless self-test (`-phase0selftest`). Build/run commands + constraints live in the memory files (`rhapsode-build-workflow`, `rhapsode-phase-constraints`).
+
+**Pending on-device verification (simulator can't show these):** lock-screen / Control-Center Now Playing controls; true background downloads; `BGTaskScheduler` firing. Plus a user-side check: live **M4B + MP3-folder** download from real Dropbox (only single-file EPUB confirmed live so far).
+
+**Loose ends (small):** ASCII-escape the `Dropbox-API-Arg` header (non-ASCII filenames 400); strip DEBUG scaffolding (`PhaseZeroSelfTest`, `DebugReaderHarness`, 🐞 buttons, `Fixtures/`, `RHAPSODE-SYNC` logs) from Release.
+
+**Hard constraints (do not regress):** Dropbox HTTP-not-SDK + App-folder + read-only scopes; relative paths only via `ContainerPaths`; no `@Attribute(.unique)`; `@preconcurrency import` for non-Swift-6 libs (Readium, BackgroundTasks); **all framework callbacks hop via `Task { @MainActor }`** (AVPlayer observers, remote commands, MediaPlayer artwork must be `nonisolated`) — three playback crashes came from violating this.
+
+---
+
 ## Cross-cutting prerequisites (do these regardless)
 
 - **ASCII-escape the `Dropbox-API-Arg` header.** Dropbox requires this header be ASCII; non-ASCII paths (accented author/title) currently 400. Harmless to defer in the foreground, but in the **background** a silent 400 is much worse to debug — fix it as part of Phase 3. Add a JSON `\uXXXX` escaper in `DropboxSource.downloadFile`/`rpc`.
@@ -119,3 +131,34 @@ Two devices on the same iCloud account: listen on A, confirm position appears on
 4. **Phase 4b (macOS Catalyst)** — gated on verifying Readium's Catalyst support; benefits from sync already existing.
 
 Items 5 and 4b can swap depending on whether a Mac or sync matters more to you.
+
+---
+
+## Parallel agent orchestration (for a fresh session)
+
+This codebase is now safe to build with **parallel agents** (it has commit history, an objective test gate, and clean module boundaries). Best practice:
+
+### Isolation
+- **Give each agent its own git worktree** (`isolation: "worktree"` on the Agent tool). Each agent runs its own `xcodegen generate` + `xcodebuild`, so there's no contention over the generated `.xcodeproj` / `build/` (this was the blocker that forced Phase 1 to be sequential — there were no commits then; now there are).
+- The orchestrator (main session) owns the **merge + integration build + on-device verification**.
+
+### Partition by disjoint file ownership
+Shared/foundational files must have a **single owner** or be edited only by the orchestrator at integration: `Sources/Model/Models.swift`, `project.yml`, `Sources/App/RhapsodeApp.swift`, `Sources/App/RootTabView.swift`. If two agents both need one, that work is **not** parallel — serialize it or have the orchestrator land the shared change first (contract-first, like Phase 1's `LibrarySource`).
+
+### What can run in parallel vs must serialize
+- **First wave (parallel-safe, disjoint areas):**
+  - **Agent A → Phase 3 (background sync):** `Sources/Sync/*`, a new `BackgroundDownloader`, a new `AppDelegate`, `DropboxSource.downloadRequest(...)`, the ASCII-header fix. Touches `project.yml` only for the AppDelegate adaptor — coordinate that one line with the orchestrator.
+  - **Agent B → Phase 4a (iPad):** `Sources/App/*` layout (split view, adaptive grids). Mostly UI; disjoint from the Sync layer.
+- **Serialize after the wave:**
+  - **Phase 5 (CloudKit)** — starts with the schema-compat refactor to `Models.swift` (shared, foundational) + new `PlaybackProgress`; do it alone/first in its phase. Its write-point edits touch `AudiobookPlayer`/`EbookReader`.
+  - **Phase 4b (macOS Catalyst)** — small, gated on verifying Readium Catalyst support.
+
+### Brief every agent (fresh agents have zero context)
+Each prompt must point at: `docs/SPEC.md`, this roadmap, and the two memory files — and restate the **Hard constraints** from the Status section above. Don't assume; the `Task { @MainActor }` and `@preconcurrency` rules in particular are non-obvious and caused real crashes.
+
+### Acceptance gate (objective, per agent)
+Every agent must, before declaring done: `xcodegen generate` → `xcodebuild ... build` succeeds → run the self-test (`-phase0selftest`) green, and **add new self-test checks** for new behavior. State the device-only caveat in each prompt so agents don't over-claim background/CloudKit/lock-screen as "verified" — those are the orchestrator's on-device step.
+
+### Model
+Sonnet builder agents are well-suited to these well-scoped implementation tasks (clear acceptance criteria + the self-test as the gate). Set `model: sonnet` per agent. Keep planning/integration/review in the orchestrator session.
+

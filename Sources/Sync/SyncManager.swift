@@ -15,15 +15,20 @@ final class SyncManager {
     let source: LibrarySource
     private let context: ModelContext
     private let notifier = NotificationService()
+    /// Cross-device progress sync (Phase 5). Defaults to a no-op so the mock /
+    /// background-refresh call sites need no change; the app injects
+    /// `DropboxProgressSync`.
+    private let progress: ProgressSync
 
     private(set) var isScanning = false
     var lastError: String?
 
     private var watcher: Task<Void, Never>?
 
-    init(source: LibrarySource, context: ModelContext) {
+    init(source: LibrarySource, context: ModelContext, progress: ProgressSync = NoopProgressSync()) {
         self.source = source
         self.context = context
+        self.progress = progress
     }
 
     // MARK: Foreground auto-detect (longpoll watcher)
@@ -55,6 +60,71 @@ final class SyncManager {
         }
         startWatching()
         Self.log("watcher started")
+        // Pull any progress other devices wrote while we were away.
+        await pullAndMergeProgress()
+    }
+
+    // MARK: Cross-device progress sync (Phase 5)
+
+    /// Push the current local resume position for one audiobook to the cloud.
+    /// Call after the player has persisted locally (e.g. on leaving the player).
+    func pushAudiobookProgress(sourcePath: String) async {
+        guard let book = (try? context.fetch(FetchDescriptor<Audiobook>()))?
+            .first(where: { $0.sourcePath == sourcePath }) else { return }
+        let now = Date()
+        book.progressUpdatedAt = now
+        try? context.save()
+        let p = PlaybackProgress(
+            key: sourcePath, kind: .audiobooks,
+            lastTrackIndex: book.lastTrackIndex, lastOffsetSeconds: book.lastOffsetSeconds,
+            readingLocatorJSON: nil, updatedAt: now)
+        do { try await progress.push(p) }
+        catch { Self.log("pushAudiobookProgress failed: \(error.localizedDescription)") }
+    }
+
+    /// Push the current local reading position for one book to the cloud.
+    func pushBookProgress(relPath: String) async {
+        guard let b = (try? context.fetch(FetchDescriptor<Book>()))?
+            .first(where: { $0.fileRelPath == relPath }) else { return }
+        let now = Date()
+        b.progressUpdatedAt = now
+        try? context.save()
+        let p = PlaybackProgress(
+            key: relPath, kind: .books,
+            lastTrackIndex: 0, lastOffsetSeconds: 0,
+            readingLocatorJSON: b.readingLocator, updatedAt: now)
+        do { try await progress.push(p) }
+        catch { Self.log("pushBookProgress failed: \(error.localizedDescription)") }
+    }
+
+    /// Pull every remote progress record and apply each to the matching local
+    /// model iff the remote is newer (last-writer-wins). Safe to call on launch /
+    /// foreground; a missing sync folder or no write scope simply yields nothing.
+    func pullAndMergeProgress() async {
+        guard let remotes = try? await progress.pullAll(), !remotes.isEmpty else { return }
+        for p in remotes { applyRemoteProgress(p) }
+        try? context.save()
+        Self.log("pulled \(remotes.count) progress record(s)")
+    }
+
+    /// Apply one remote record to its matching local model when it wins LWW.
+    /// Match is by the stable container-relative key (`sourcePath` / `fileRelPath`).
+    private func applyRemoteProgress(_ p: PlaybackProgress) {
+        switch p.kind {
+        case .audiobooks:
+            guard let book = (try? context.fetch(FetchDescriptor<Audiobook>()))?
+                .first(where: { $0.sourcePath == p.key }),
+                  p.isNewer(than: book.progressUpdatedAt) else { return }
+            book.lastTrackIndex = p.lastTrackIndex
+            book.lastOffsetSeconds = p.lastOffsetSeconds
+            book.progressUpdatedAt = p.updatedAt
+        case .books:
+            guard let b = (try? context.fetch(FetchDescriptor<Book>()))?
+                .first(where: { $0.fileRelPath == p.key }),
+                  p.isNewer(than: b.progressUpdatedAt) else { return }
+            b.readingLocator = p.readingLocatorJSON
+            b.progressUpdatedAt = p.updatedAt
+        }
     }
 
     private func watchLoop() async {

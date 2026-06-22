@@ -9,6 +9,7 @@ import UIKit
 struct ReaderView: View {
     let book: Book
     @Environment(\.modelContext) private var modelContext
+    @Environment(SyncManager.self) private var sync
     @State private var reader = EbookReader()
     @State private var showSettings = false
     @State private var showTOC = false
@@ -35,6 +36,13 @@ struct ReaderView: View {
             }
         }
         .task { await reader.open(book, context: modelContext) }
+        .onDisappear {
+            // The reader persists the locator locally on every page turn; push the
+            // latest for cross-device resume. Capture the key (String) before the
+            // actor hop — the Book model is not Sendable.
+            let key = book.fileRelPath
+            Task { await sync.pushBookProgress(relPath: key) }
+        }
         // Hardware-keyboard page-turn keys (iPad + Mac Catalyst).
         // These are additive — pressing keys is a no-op on iPhone where no keyboard
         // is attached. The shortcuts live on hidden buttons so they don't appear in

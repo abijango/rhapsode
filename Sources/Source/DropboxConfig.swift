@@ -20,8 +20,12 @@ enum DropboxConfig {
     /// Custom URL scheme component of `redirectURI`, for ASWebAuthenticationSession.
     static let callbackScheme = "rhapsode"
 
-    /// Narrowest scopes that still allow list + longpoll + download.
-    static let scopes = ["files.metadata.read", "files.content.read"]
+    /// Scopes: read access for list + longpoll + download, plus **app-folder write**
+    /// (`files.content.write`) for cross-device progress sync (Phase 5) — used only
+    /// to write small progress JSON files under `/.rhapsode-sync` in the app folder.
+    /// Still App-folder-scoped (never Full Dropbox). Existing connections made before
+    /// this scope was added must reconnect to grant write.
+    static let scopes = ["files.metadata.read", "files.content.read", "files.content.write"]
 
     /// The two watched roots inside the app folder (App-folder access makes these
     /// look root-relative to the Dropbox API).

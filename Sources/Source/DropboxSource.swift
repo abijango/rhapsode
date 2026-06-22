@@ -106,6 +106,41 @@ actor DropboxSource: LibrarySource {
         return req
     }
 
+    // MARK: Progress sync (app-folder read/write)
+
+    /// Overwrite a small file in the app folder. Used by `DropboxProgressSync` to
+    /// store cross-device progress. Requires the `files.content.write` scope; if the
+    /// connected token predates that scope, Dropbox returns a missing-scope error
+    /// (surfaced as `.network`) — the caller swallows it until the user reconnects.
+    func writeFile(_ data: Data, to path: String) async throws {
+        let token = try await validAccessToken()
+        var req = URLRequest(url: URL(string: DropboxConfig.contentBase + "/files/upload")!)
+        req.httpMethod = "POST"
+        req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        req.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
+        let arg = String(data: try JSONEncoder().encode(
+            UploadArg(path: Self.apiPath(path), mode: "overwrite", mute: true, autorename: false)),
+                         encoding: .utf8)!
+        req.setValue(Self.asciiEscapeJSON(arg), forHTTPHeaderField: "Dropbox-API-Arg")
+        let (respData, response) = try await session.upload(for: req, from: data)
+        try Self.checkOK(response, respData)
+    }
+
+    /// Read a file's bytes from the app folder. Returns nil if it doesn't exist
+    /// (Dropbox answers 409 `path/not_found` for a missing download target).
+    func readFile(at path: String) async throws -> Data? {
+        let token = try await validAccessToken()
+        var req = URLRequest(url: URL(string: DropboxConfig.contentBase + "/files/download")!)
+        req.httpMethod = "POST"
+        req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        let arg = String(data: try JSONEncoder().encode(DownloadArg(path: Self.apiPath(path))), encoding: .utf8)!
+        req.setValue(Self.asciiEscapeJSON(arg), forHTTPHeaderField: "Dropbox-API-Arg")
+        let (data, response) = try await session.data(for: req)
+        if let http = response as? HTTPURLResponse, http.statusCode == 409 { return nil }
+        try Self.checkOK(response, data)
+        return data
+    }
+
     // MARK: Token
 
     private func validAccessToken() async throws -> String {
@@ -212,6 +247,7 @@ private struct CreateFolderArg: Encodable { let path: String; let autorename: Bo
 private struct CreateFolderResult: Decodable { let metadata: Metadata }
 private struct GetLatestCursorResult: Decodable { let cursor: String }
 private struct DownloadArg: Encodable { let path: String }
+private struct UploadArg: Encodable { let path: String; let mode: String; let mute: Bool; let autorename: Bool }
 private struct LongpollArg: Encodable { let cursor: String; let timeout: Int }
 private struct LongpollResult: Decodable { let changes: Bool }
 

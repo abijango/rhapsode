@@ -28,7 +28,13 @@ struct RhapsodeApp: App {
             fatalError("Failed to create ModelContainer: \(error)")
         }
         modelContainer = container
-        _sync = State(initialValue: SyncManager(source: DropboxSource(), context: container.mainContext))
+        // Share one DropboxSource between the library pipeline and progress sync so
+        // token refresh stays serialized through a single actor.
+        let dropbox = DropboxSource()
+        _sync = State(initialValue: SyncManager(
+            source: dropbox,
+            context: container.mainContext,
+            progress: DropboxProgressSync(source: dropbox)))
         // Register the background-refresh handler before launch completes.
         BackgroundRefresh.register(container: container)
         // Wire the container into BackgroundDownloader so its delegate callbacks

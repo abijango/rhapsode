@@ -261,6 +261,7 @@ enum PhaseZeroSelfTest {
 
         failures += await runPhase3Checks(context: context)
         failures += runPhase4aChecks()
+        failures += await runPhase5Checks(context: context)
         print("\(tag): DONE — \(failures == 0 ? "ALL PASS" : "\(failures) FAILED")")
     }
 
@@ -419,6 +420,98 @@ enum PhaseZeroSelfTest {
         // the compact minimum so the adaptive grid actually uses more columns.
         check("DS.Shelf: regular minWidth > compact minWidth",
               DS.Shelf.minCoverWidthRegular > DS.Shelf.minCoverWidth)
+
+        return failures
+    }
+
+    // -------------------------------------------------------------------------
+    // Phase 5 — Cross-device progress sync (Dropbox app-folder) checks
+    // -------------------------------------------------------------------------
+    /// Headlessly testable Phase 5 invariants. Uses an in-memory `MockProgressSync`
+    /// (the real `DropboxProgressSync` network path is device/live-only, like the
+    /// rest of the Dropbox layer). Returns number of failures.
+    static func runPhase5Checks(context: ModelContext) async -> Int {
+        var failures = 0
+        func check(_ name: String, _ condition: Bool) {
+            print("\(tag): \(condition ? "PASS" : "FAIL") — \(name)")
+            if !condition { failures += 1 }
+        }
+
+        let old = Date(timeIntervalSince1970: 1_000)
+        let new = Date(timeIntervalSince1970: 2_000)
+
+        // PlaybackProgress JSON round-trips (the cross-device + Android wire format).
+        let sample = PlaybackProgress(
+            key: "Audiobooks/Sync Tëst.m4b", kind: .audiobooks,
+            lastTrackIndex: 3, lastOffsetSeconds: 42.5,
+            readingLocatorJSON: nil, updatedAt: new)
+        if let data = try? PlaybackProgress.encoder.encode(sample),
+           let back = try? PlaybackProgress.decoder.decode(PlaybackProgress.self, from: data) {
+            check("P5: PlaybackProgress JSON round-trips", back == sample)
+        } else {
+            check("P5: PlaybackProgress JSON round-trips", false)
+        }
+
+        // Last-writer-wins decision.
+        check("P5: isNewer when local nil",   sample.isNewer(than: nil))
+        check("P5: isNewer when remote newer", sample.isNewer(than: old))
+        check("P5: not newer when local newer", !sample.isNewer(than: Date(timeIntervalSince1970: 3_000)))
+
+        // Remote file path: stable, ASCII, .json, and distinct per key.
+        let pathA = DropboxProgressSync.path(for: "Audiobooks/Foo.m4b")
+        let pathA2 = DropboxProgressSync.path(for: "Audiobooks/Foo.m4b")
+        let pathB = DropboxProgressSync.path(for: "Books/Bar.epub")
+        check("P5: sync path is stable for a key", pathA == pathA2)
+        check("P5: sync path differs per key", pathA != pathB)
+        check("P5: sync path is ASCII .json under folder",
+              pathA.hasPrefix(DropboxProgressSync.folder + "/") && pathA.hasSuffix(".json")
+              && pathA.allSatisfy { $0.isASCII })
+
+        // SyncManager merge: a newer remote record updates the matching local model.
+        do {
+            for a in try context.fetch(FetchDescriptor<Audiobook>()) { context.delete(a) }
+            try? context.save()
+
+            let key = "Audiobooks/MergeTest.m4b"
+            let local = Audiobook(title: "Merge Test", sourcePath: key,
+                                  lastTrackIndex: 0, lastOffsetSeconds: 0,
+                                  progressUpdatedAt: old)
+            context.insert(local)
+            try context.save()
+
+            let newerRemote = PlaybackProgress(
+                key: key, kind: .audiobooks,
+                lastTrackIndex: 5, lastOffsetSeconds: 99, readingLocatorJSON: nil, updatedAt: new)
+            let mock = MockProgressSync(seed: [newerRemote])
+            let sync = SyncManager(source: MockLibrarySource(), context: context, progress: mock)
+            await sync.pullAndMergeProgress()
+            check("P5: newer remote progress applied to local", local.lastTrackIndex == 5)
+
+            // Older remote must NOT clobber a newer local position.
+            local.lastTrackIndex = 8
+            local.progressUpdatedAt = Date(timeIntervalSince1970: 4_000)
+            try context.save()
+            let staleMock = MockProgressSync(seed: [PlaybackProgress(
+                key: key, kind: .audiobooks,
+                lastTrackIndex: 1, lastOffsetSeconds: 0, readingLocatorJSON: nil,
+                updatedAt: new)])
+            let sync2 = SyncManager(source: MockLibrarySource(), context: context, progress: staleMock)
+            await sync2.pullAndMergeProgress()
+            check("P5: older remote does not overwrite newer local", local.lastTrackIndex == 8)
+
+            // push guard: pushing an older record must not clobber a newer stored one.
+            let guardMock = MockProgressSync(seed: [newerRemote])
+            try? await guardMock.push(PlaybackProgress(
+                key: key, kind: .audiobooks,
+                lastTrackIndex: 1, lastOffsetSeconds: 0, readingLocatorJSON: nil, updatedAt: old))
+            let stored = try await guardMock.pullAll().first { $0.key == key }
+            check("P5: push guard keeps newer record", stored?.lastTrackIndex == 5)
+
+            for a in try context.fetch(FetchDescriptor<Audiobook>()) { context.delete(a) }
+            try? context.save()
+        } catch {
+            check("P5: merge pipeline threw: \(error)", false)
+        }
 
         return failures
     }

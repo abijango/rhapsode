@@ -44,6 +44,10 @@ final class Audiobook {
     /// Resume position: offset within the current track.
     var lastOffsetSeconds: Double
     var totalDuration: Double
+    /// When this book's progress was last changed locally (or applied from a remote
+    /// sync). Drives last-writer-wins for cross-device progress sync (Phase 5).
+    /// Optional with a nil default — additive, CloudKit-safe lightweight migration.
+    var progressUpdatedAt: Date?
 
     init(
         id: UUID = UUID(),
@@ -54,7 +58,8 @@ final class Audiobook {
         tracks: [AudiobookTrack] = [],
         lastTrackIndex: Int = 0,
         lastOffsetSeconds: Double = 0,
-        totalDuration: Double = 0
+        totalDuration: Double = 0,
+        progressUpdatedAt: Date? = nil
     ) {
         self.id = id
         self.title = title
@@ -65,6 +70,7 @@ final class Audiobook {
         self.lastTrackIndex = lastTrackIndex
         self.lastOffsetSeconds = lastOffsetSeconds
         self.totalDuration = totalDuration
+        self.progressUpdatedAt = progressUpdatedAt
     }
 
     /// Tracks in playback order. Always sort by `order` — never rely on the
@@ -112,6 +118,9 @@ final class Book {
     var fileRelPath: String
     /// Readium `Locator` serialized as JSON; nil until first opened.
     var readingLocator: String?
+    /// When the reading position was last changed locally (or applied from a remote
+    /// sync). Drives last-writer-wins for cross-device progress sync (Phase 5).
+    var progressUpdatedAt: Date?
 
     init(
         id: UUID = UUID(),
@@ -119,7 +128,8 @@ final class Book {
         author: String? = nil,
         coverPath: String? = nil,
         fileRelPath: String,
-        readingLocator: String? = nil
+        readingLocator: String? = nil,
+        progressUpdatedAt: Date? = nil
     ) {
         self.id = id
         self.title = title
@@ -127,6 +137,7 @@ final class Book {
         self.coverPath = coverPath
         self.fileRelPath = fileRelPath
         self.readingLocator = readingLocator
+        self.progressUpdatedAt = progressUpdatedAt
     }
 }
 

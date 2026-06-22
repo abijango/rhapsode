@@ -7,6 +7,7 @@ import UIKit
 struct PlayerView: View {
     let audiobook: Audiobook
     @Environment(\.modelContext) private var modelContext
+    @Environment(SyncManager.self) private var sync
     @State private var player = AudiobookPlayer()
     @State private var showTracks = false
     @State private var scrubbing = false
@@ -37,7 +38,13 @@ struct PlayerView: View {
         .navigationTitle(audiobook.title)
         .navigationBarTitleDisplayMode(.inline)
         .onAppear { player.load(audiobook, context: modelContext) }
-        .onDisappear { player.teardown() }
+        .onDisappear {
+            player.teardown()   // persists the final position locally
+            // Then push it for cross-device resume. Capture the key (a String) up
+            // front — the Audiobook model is not Sendable across the actor hop.
+            let key = audiobook.sourcePath
+            Task { await sync.pushAudiobookProgress(sourcePath: key) }
+        }
         .sheet(isPresented: $showTracks) {
             TrackListView(player: player)
         }

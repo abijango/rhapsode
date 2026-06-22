@@ -48,6 +48,10 @@ final class Audiobook {
     /// sync). Drives last-writer-wins for cross-device progress sync (Phase 5).
     /// Optional with a nil default — additive, CloudKit-safe lightweight migration.
     var progressUpdatedAt: Date?
+    /// Cadence (silence-trimming) per-book tier override, as `CadenceSettings.Preset.rawValue`
+    /// ("default"/"more"/"aggressive"). `nil` → inherit the global default tier. Resolve via
+    /// `effectiveCadenceTier`. Additive optional → lightweight, CloudKit-safe migration.
+    var cadenceTier: String?
 
     init(
         id: UUID = UUID(),
@@ -59,7 +63,8 @@ final class Audiobook {
         lastTrackIndex: Int = 0,
         lastOffsetSeconds: Double = 0,
         totalDuration: Double = 0,
-        progressUpdatedAt: Date? = nil
+        progressUpdatedAt: Date? = nil,
+        cadenceTier: String? = nil
     ) {
         self.id = id
         self.title = title
@@ -71,6 +76,7 @@ final class Audiobook {
         self.lastOffsetSeconds = lastOffsetSeconds
         self.totalDuration = totalDuration
         self.progressUpdatedAt = progressUpdatedAt
+        self.cadenceTier = cadenceTier
     }
 
     /// Tracks in playback order. Always sort by `order` — never rely on the
@@ -204,5 +210,6 @@ enum AppSchema {
         Book.self,
         WatchedFolder.self,
         DownloadItem.self,
+        TrimmedRendition.self,
     ]
 }

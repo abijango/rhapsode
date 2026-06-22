@@ -1,4 +1,5 @@
 import AVFoundation
+import CadenceKit
 import Foundation
 import MediaPlayer
 import SwiftData
@@ -28,6 +29,18 @@ final class AudiobookPlayer {
     private var endObserver: NSObjectProtocol?
     private var context: ModelContext?
     private var lastPersist = Date(timeIntervalSince1970: 0)
+
+    // MARK: Cadence (WP5)
+    /// Source↔trimmed map for the file currently loaded into `player`. `nil` ⇒ the loaded file
+    /// IS the original (identity mapping). Set in `loadCurrentItem`: per-file for multi-file
+    /// books, once for the single shared M4B file. All position math stays source-domain; we map
+    /// only at the `player` boundary via `srcToPlayer` / `playerToSrc`.
+    private var activeMap: CadenceTimelineMap?
+
+    /// Source-domain time → the time to hand `player.seek` (trimmed time when a trim is loaded).
+    private func srcToPlayer(_ source: Double) -> Double { activeMap?.toTrimmed(source) ?? source }
+    /// A time read from `player` → source-domain time.
+    private func playerToSrc(_ playerTime: Double) -> Double { activeMap?.toSource(playerTime) ?? playerTime }
 
     var currentTrack: AudiobookTrack? { tracks.indices.contains(currentIndex) ? tracks[currentIndex] : nil }
     var trackDuration: Double { currentTrack?.duration ?? 0 }
@@ -87,7 +100,7 @@ final class AudiobookPlayer {
         if isSingleFile {
             seekSingleFile(to: prefixSums[currentIndex] + clamped)
         } else {
-            player.seek(to: cmTime(clamped))
+            player.seek(to: cmTime(srcToPlayer(clamped)))
             offsetInTrack = clamped
         }
         updateNowPlaying()
@@ -110,8 +123,19 @@ final class AudiobookPlayer {
     // MARK: Item loading
 
     private func loadCurrentItem(seekTo offset: Double) {
-        guard let track = currentTrack,
-              let url = try? ContainerPaths.url(forRelativePath: track.fileRelPath) else { return }
+        guard let track = currentTrack else { return }
+        // Cadence source selection: trimmed rendition when one is valid, else the original.
+        // Set `activeMap` BEFORE any srcToPlayer/seek below (the multi-file branch seeks at once).
+        let url: URL
+        if let trimmed = trimmedSource(for: track.fileRelPath) {
+            url = trimmed.url
+            activeMap = trimmed.map
+        } else if let original = try? ContainerPaths.url(forRelativePath: track.fileRelPath) {
+            url = original
+            activeMap = nil
+        } else {
+            return
+        }
         if isSingleFile {
             // Load the shared file once; seek to absolute book position.
             if player.currentItem == nil {
@@ -120,13 +144,40 @@ final class AudiobookPlayer {
             seekSingleFile(to: prefixSums[currentIndex] + offset)
         } else {
             player.replaceCurrentItem(with: AVPlayerItem(url: url))
-            player.seek(to: cmTime(offset))
+            player.seek(to: cmTime(srcToPlayer(offset)))
             observeItemEnd()
         }
     }
 
+    /// The trimmed rendition to play for `relPath`, if the feature is on and a valid rendition's
+    /// audio is present on disk; else `nil` (play the original). Touches `lastUsedAt` for LRU.
+    private func trimmedSource(for relPath: String) -> (url: URL, map: CadenceTimelineMap)? {
+        guard let book, let context else { return nil }
+        return Self.selectTrimmedSource(bookID: book.id, relPath: relPath,
+                                        tier: book.effectiveCadenceTier.rawValue, context: context)
+    }
+
+    /// Pure selection contract (testable without an `AVPlayer`): feature on + a rendition matching
+    /// the validity key (fingerprint + versions + tier, not evicted) whose `.m4a` exists on disk +
+    /// a decodable timeline map. Any miss ⇒ `nil`.
+    static func selectTrimmedSource(bookID: UUID, relPath: String, tier: String,
+                                    context: ModelContext) -> (url: URL, map: CadenceTimelineMap)? {
+        guard CadencePreferences.isEnabled,
+              let srcURL = try? ContainerPaths.url(forRelativePath: relPath),
+              let fingerprint = CadenceFingerprint.of(fileAt: srcURL),
+              let rendition = (try? context.fetch(FetchDescriptor<TrimmedRendition>()))?
+                  .first(where: { $0.bookID == bookID && $0.sourceFileRelPath == relPath }),
+              rendition.isValid(forFingerprint: fingerprint, tier: tier),
+              let url = try? ContainerPaths.cacheURL(forRelativePath: rendition.trimmedRelPath),
+              FileManager.default.fileExists(atPath: url.path),
+              let map = try? JSONDecoder().decode(CadenceTimelineMap.self, from: rendition.timelineMapBlob)
+        else { return nil }
+        rendition.lastUsedAt = Date()
+        return (url, map)
+    }
+
     private func seekSingleFile(to bookTime: Double) {
-        player.seek(to: cmTime(bookTime), toleranceBefore: .zero, toleranceAfter: .zero)
+        player.seek(to: cmTime(srcToPlayer(bookTime)), toleranceBefore: .zero, toleranceAfter: .zero)
         recomputeIndex(forBookTime: bookTime)
     }
 
@@ -142,7 +193,7 @@ final class AudiobookPlayer {
                 currentIndex = idx
                 loadCurrentItem(seekTo: off)
             } else {
-                player.seek(to: cmTime(off))
+                player.seek(to: cmTime(srcToPlayer(off)))
             }
             offsetInTrack = off
         }
@@ -177,8 +228,9 @@ final class AudiobookPlayer {
     }
 
     private func tick() {
-        let now = player.currentTime().seconds
-        guard now.isFinite else { return }
+        let playerNow = player.currentTime().seconds
+        guard playerNow.isFinite else { return }
+        let now = playerToSrc(playerNow)   // map player (possibly trimmed) time → source domain
         if isSingleFile {
             recomputeIndex(forBookTime: now)
         } else {
@@ -214,7 +266,7 @@ final class AudiobookPlayer {
     }
 
     private var bookTime: Double {
-        isSingleFile ? player.currentTime().seconds : prefixSums[currentIndex] + offsetInTrack
+        isSingleFile ? playerToSrc(player.currentTime().seconds) : prefixSums[currentIndex] + offsetInTrack
     }
 
     var totalDuration: Double { book?.totalDuration ?? prefixSums.last.map { $0 + (tracks.last?.duration ?? 0) } ?? 0 }
@@ -301,3 +353,17 @@ final class AudiobookPlayer {
         return sums
     }
 }
+
+#if DEBUG
+/// Test seam for the WP5 headless self-test — exercises the REAL seek/read paths so it catches a
+/// missed mapping site or an inverted direction (a pure map test cannot). Not compiled in release.
+extension AudiobookPlayer {
+    var debugItemReady: Bool { player.currentItem?.status == .readyToPlay }
+    var debugIsTrimmed: Bool { activeMap != nil }
+    /// Raw time on the loaded (possibly trimmed) `player` — for asserting it lands at `toTrimmed(S)`.
+    var debugPlayerTimeSeconds: Double { player.currentTime().seconds }
+    /// Source-domain position via the read path (`playerToSrc`) — for asserting it round-trips to S.
+    var debugBookTime: Double { bookTime }
+    func debugSeek(toSourceTime t: Double) { seekWithinBook(toBookTime: t) }
+}
+#endif

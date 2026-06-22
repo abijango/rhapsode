@@ -40,6 +40,9 @@ struct RhapsodeApp: App {
         // Wire the container into BackgroundDownloader so its delegate callbacks
         // can reach SwiftData. Must happen before any background tasks fire.
         BackgroundDownloader.shared.container = container
+        // Wire the Cadence render coordinator (WP4); it drains anything enqueued before
+        // configuration once the container arrives.
+        Task { await CadenceRenderCoordinator.shared.configure(container: container) }
         // Show download notifications even while the app is in the foreground.
         NotificationPresenter.install()
         // Reconcile any downloads that were in-flight when the app was last killed.

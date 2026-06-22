@@ -262,6 +262,8 @@ enum PhaseZeroSelfTest {
         failures += await runPhase3Checks(context: context)
         failures += runPhase4aChecks()
         failures += await runPhase5Checks(context: context)
+        failures += runCadenceChecks()
+        failures += await runCadenceCoordinatorChecks(context: context)
         print("\(tag): DONE — \(failures == 0 ? "ALL PASS" : "\(failures) FAILED")")
         // Headless mode only (run() is invoked solely under `-phase0selftest`):
         // exit so stdout flushes (C `exit` flushes stdio; the app otherwise never

@@ -315,11 +315,16 @@ final class SyncManager {
     private func importItem(at dest: URL, kind: FolderKind) async throws {
         switch kind {
         case .audiobooks:
-            context.insert(try await AudiobookImporter.makeAudiobook(fromLocal: dest))
+            let audiobook = try await AudiobookImporter.makeAudiobook(fromLocal: dest)
+            context.insert(audiobook)
+            try context.save()
+            // Cadence: render-on-import (WP4). No-op unless the feature is enabled.
+            let bookID = audiobook.id
+            Task { await CadenceRenderCoordinator.shared.enqueue(bookID: bookID) }
         case .books:
             context.insert(try await EbookImporter.makeBook(fromLocal: dest))
+            try context.save()
         }
-        try context.save()
     }
 
     // MARK: Dedup helpers

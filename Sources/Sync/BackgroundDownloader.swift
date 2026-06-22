@@ -187,9 +187,12 @@ extension BackgroundDownloader: URLSessionDownloadDelegate {
         Task { @MainActor in
             guard let ctx = self.container?.mainContext else { return }
             do {
+                var newAudiobookID: UUID?
                 switch kind {
                 case .audiobooks:
-                    ctx.insert(try await AudiobookImporter.makeAudiobook(fromLocal: destURL))
+                    let audiobook = try await AudiobookImporter.makeAudiobook(fromLocal: destURL)
+                    ctx.insert(audiobook)
+                    newAudiobookID = audiobook.id
                 case .books:
                     ctx.insert(try await EbookImporter.makeBook(fromLocal: destURL))
                 }
@@ -199,6 +202,11 @@ extension BackgroundDownloader: URLSessionDownloadDelegate {
                     item.bytesReceived = item.totalBytes
                     item.state = .done
                     try? ctx.save()
+                }
+
+                // Cadence: render-on-download (WP4). No-op unless the feature is enabled.
+                if let bookID = newAudiobookID {
+                    Task { await CadenceRenderCoordinator.shared.enqueue(bookID: bookID) }
                 }
 
                 let notifier = NotificationService()

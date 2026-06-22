@@ -38,6 +38,35 @@ enum ContainerPaths {
         try mediaRoot().appendingPathComponent(relativePath)
     }
 
+    /// Subdirectory under Caches that holds Cadence's trimmed renditions.
+    private static let cadenceCacheDirName = "Cadence"
+
+    /// Absolute URL of the Cadence trimmed-rendition cache, created on first access.
+    ///
+    /// Unlike source media (Application Support, never purged), trimmed renditions are a
+    /// **regenerable, evictable cache** (spec §7) — so they live under Caches, which the OS
+    /// may purge under storage pressure. The App-Support rule governs source-of-truth media;
+    /// it does not apply here. Renditions store a path **relative to this root** (resolved via
+    /// `cacheURL(forRelativePath:)`), mirroring the media-root convention.
+    static func cadenceCacheRoot() throws -> URL {
+        let caches = try FileManager.default.url(
+            for: .cachesDirectory,
+            in: .userDomainMask,
+            appropriateFor: nil,
+            create: true
+        )
+        let root = caches.appendingPathComponent(cadenceCacheDirName, isDirectory: true)
+        if !FileManager.default.fileExists(atPath: root.path) {
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        }
+        return root
+    }
+
+    /// Resolve a rendition's stored relative path to an absolute URL within the Cadence cache.
+    static func cacheURL(forRelativePath relativePath: String) throws -> URL {
+        try cadenceCacheRoot().appendingPathComponent(relativePath)
+    }
+
     /// Convert an absolute URL back to a media-root-relative path for storage.
     /// Returns nil if `url` is not inside the media root.
     static func relativePath(for url: URL) throws -> String? {

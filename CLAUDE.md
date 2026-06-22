@@ -1,2 +1,3 @@
 HTTP-API-not-SDK for Dropbox, **App-folder access (paths relative to app folder, never Full Dropbox)**, Application-Support-not-Caches for files, relative-paths-in-SwiftData, no paid entitlements in the MVP.
 - Agents B and C develop against Agent A's mock so they don't block on real OAuth.
+- **Dropbox scopes:** read (`files.metadata.read` + `files.content.read`) for library list/longpoll/download, plus **app-folder write** (`files.content.write`) added in Phase 5 — used ONLY to write small progress JSON files under `/.rhapsode-sync` for cross-device progress sync. Still App-folder-scoped (never Full Dropbox); chosen over CloudKit so the sync layer ports to the planned Android client unchanged.

@@ -59,6 +59,8 @@ protocol LibrarySource {
 
 MVP ships one conformer: `DropboxSource`, using `files/list_folder`, `files/list_folder/continue`, `files/list_folder/longpoll`, `files/download`. Scopes: `files.metadata.read`, `files.content.read`. App registered with **App folder** access; all paths are relative to the app folder root (Dropbox namespaces them automatically, so the API sees `/Audiobooks` and `/Books`).
 
+> **Post-MVP (Phase 5) scope change:** cross-device progress sync adds `files.content.write` and uses `files/upload` + `files/download` to read/write small progress JSON files under `/.rhapsode-sync` in the app folder. This deliberately relaxes the original "read-only scopes" rule — chosen over CloudKit because the Dropbox app folder is the one place every device (including the planned Android client) can read shared state via plain HTTP, with no paid Apple account. Still App-folder-scoped, never Full Dropbox. See `docs/ROADMAP.md` Phase 5.
+
 ## Data model (SwiftData)
 
 Keep progress fields isolated and use stable `UUID`s; store **relative** container paths, never absolute URLs (so a future CloudKit sync is a toggle, not a rewrite).

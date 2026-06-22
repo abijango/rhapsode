@@ -104,31 +104,32 @@ A folder isn't one transfer. Add `groupID: String?` to `DownloadItem` (additive,
 
 ---
 
-## Phase 5 — Cross-device progress sync (CloudKit)
+## Phase 5 — Cross-device progress sync (Dropbox app folder) — BUILT
 
 **Goal:** start an audiobook on iPhone, resume at the same spot on iPad/Mac; same for EPUB reading position.
 
-### Prerequisites
-- **Paid Apple Developer account + iCloud (CloudKit) capability.** This is the point where the MVP's "no paid entitlements" rule is intentionally lifted (it was a dev-time constraint, not a product one).
-- **Make the SwiftData schema CloudKit-compatible.** Phase 0 already did the hard part (no `.unique`, stable UUIDs, optional `AudiobookTrack.audiobook`). Remaining: SwiftData-over-CloudKit requires every stored attribute to be **optional or have a default**, and to-one relationships optional. Audit `AppSchema` — e.g. `Audiobook.title`, `sourcePath`, `Book.fileRelPath` are currently non-optional with no default and must be adjusted. Do this refactor **before** enabling CloudKit.
+> **Decision (2026-06-22): Dropbox app-folder sync, NOT CloudKit.** Rationale: cross-device sync means writing shared state somewhere every device reads. CloudKit is Apple-only (zero Android story — you'd build a second backend later) and needs a paid Apple Developer account. The Dropbox app folder ports to the planned **Android** client unchanged (plain HTTP + JSON, per the SPEC's own portability rationale) and needs no paid account. Cost: broaden the scope to include **app-folder write** (`files.content.write`) — still narrow, never Full Dropbox. The earlier "keep Dropbox read-only / use CloudKit" rejection below was written before weighting Android; Android being a real goal flips the decision. A server is out (violates "no server/webhook/push").
 
 ### Design: sync *progress*, not files
-Media files are **not** synced — they're re-downloaded from Dropbox per device (offline-first; Dropbox is the source of truth). Crucially, the **Dropbox-relative paths are identical across devices** (same app folder), so `Audiobook.sourcePath` / `Book.fileRelPath` are **stable cross-device keys**.
+Media files are **not** synced — they're re-downloaded from Dropbox per device (offline-first; Dropbox is the source of truth). The **container-relative paths are identical across devices** (same app folder, same import logic), so `Audiobook.sourcePath` / `Book.fileRelPath` are **stable cross-device keys**.
 
-**Recommended approach — a dedicated synced `PlaybackProgress` model** (lighter and more robust than mirroring the whole library):
-- Fields: `key: String` (the stable Dropbox-relative path), `kind`, `lastTrackIndex`, `lastOffsetSeconds`, `readingLocatorJSON: String?`, `updatedAt: Date`.
-- Synced via CloudKit private database: `ModelConfiguration(..., cloudKitDatabase: .private("iCloud.com.naufalmir.rhapsode"))`.
-- Each device still builds its own library locally from Dropbox (scan/watch). Library presence "syncs" implicitly because every device reads the same folder — only *progress* needs the cloud.
-- **Write points already exist:** `AudiobookPlayer.persist()` and `EbookReader.persist(locator:)` — extend them to also upsert `PlaybackProgress(key:…, updatedAt: now)`.
-- **Merge:** on remote change, apply to the matching local `Audiobook`/`Book` (by key) **iff** the remote `updatedAt` is newer (last-writer-wins). Acceptable for single-user multi-device; note the simultaneous-playback-on-two-devices edge (LWW may lose a few seconds).
+**Implemented:**
+- `PlaybackProgress` **wire struct** (Codable, NOT a SwiftData model): `key`, `kind`, `lastTrackIndex`, `lastOffsetSeconds`, `readingLocatorJSON?`, `updatedAt`. Local source of truth stays in `Audiobook`/`Book`.
+- `ProgressSync` protocol + `DropboxProgressSync` conformer (one JSON file per item under `/.rhapsode-sync`, named by SHA-256 of the key; read-before-write LWW guard) + `NoopProgressSync` (default) + `MockProgressSync` (tests). This is the seam that ports to Android.
+- `DropboxSource.writeFile`/`readFile` (`files/upload` overwrite + `files/download`, 409→nil).
+- Schema: additive optional `progressUpdatedAt: Date?` on `Audiobook` + `Book` (drives LWW). **No CloudKit-compat optional-everything refactor** — not needed without `NSPersistentCloudKitContainer`.
+- Write points: `SyncManager.pushAudiobookProgress`/`pushBookProgress`, triggered by `PlayerView`/`ReaderView` `onDisappear` (player/reader untouched — they already persist locally). Pull+merge on foreground via `ensureWatching` → `pullAndMergeProgress` (LWW by `progressUpdatedAt`).
+- Self-test: +9 Phase 5 `P5:` checks (wire round-trip, LWW decision, path encoding, SyncManager merge both directions, push guard).
 
-*(Alternative — full `NSPersistentCloudKitContainer` mirror of the library — is heavier: it couples sync to file presence, "record arrived but file missing → trigger Dropbox download", and cover re-extraction per device. Prefer the dedicated progress entity unless full library mirror becomes a requirement.)*
+**Known gaps / device-only:**
+- Real Dropbox upload/download is live-only (self-test uses `MockProgressSync`).
+- **Push misses while the player stays open:** `onDisappear` fires on normal navigation-away (the unstructured `Task {}` survives teardown), but a book left **playing in the background** or the **app killed with the player open** won't push that session's final position until the next foreground re-sync. No periodic remote push yet.
+- **Foreground pull cost:** `pullAndMergeProgress` runs on every activation (`listFolder` + N `readFile`). Fine for a small library; with many books it's N+1 Dropbox round-trips per app open — future: pull only changed / cache a sync-folder cursor.
+- **LWW is wall-clock based:** clock skew between devices (not just simultaneous playback) can pick the wrong winner. Acceptable for single-user.
+- Existing connections must **reconnect** to grant the new `files.content.write` scope (first push 401s on a pre-Phase-5 token).
 
-### Why not sync via Dropbox?
-Writing a progress file into the Dropbox app folder would require the `files.content.write` scope — against the deliberately narrow read-only scope. CloudKit keeps Dropbox read-only and is the right tool for small private cross-device state.
-
-### Verification
-Two devices on the same iCloud account: listen on A, confirm position appears on B within seconds; repeat for EPUB locator. Test offline edits → reconcile on reconnect.
+### Verification (device-only)
+Two devices on the same Dropbox app folder: listen on A, leave the player, open the book on B → position resumes. Repeat for EPUB locator. Confirm reconnect grants `files.content.write` (first push 401s on a pre-Phase-5 token).
 
 ---
 

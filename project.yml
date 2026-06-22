@@ -85,3 +85,7 @@ targets:
         CURRENT_PROJECT_VERSION: "1"
         TARGETED_DEVICE_FAMILY: "1,2" # iPhone + iPad (shared SwiftUI codebase)
         SWIFT_STRICT_CONCURRENCY: complete
+        # Phase 4b — Mac Catalyst (feasibility probe). Shares the UIKit codebase
+        # incl. Readium's UIKit navigator (no native AppKit reader exists).
+        SUPPORTS_MACCATALYST: "YES"
+        DERIVE_MACCATALYST_PRODUCT_BUNDLE_IDENTIFIER: "NO"

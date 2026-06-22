@@ -263,6 +263,12 @@ enum PhaseZeroSelfTest {
         failures += runPhase4aChecks()
         failures += await runPhase5Checks(context: context)
         print("\(tag): DONE — \(failures == 0 ? "ALL PASS" : "\(failures) FAILED")")
+        // Headless mode only (run() is invoked solely under `-phase0selftest`):
+        // exit so stdout flushes (C `exit` flushes stdio; the app otherwise never
+        // terminates and buffered `print` output is lost) and the process yields a
+        // pass/fail code. Lets `open -W --stdout` capture the result on Mac Catalyst,
+        // where a directly-exec'd GUI binary creates no window scene.
+        exit(failures == 0 ? 0 : 1)
     }
 
     // -------------------------------------------------------------------------

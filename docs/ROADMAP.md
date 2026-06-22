@@ -13,9 +13,17 @@ Recommended order: **3 → 4a (iPad) → 5 (sync) → 4b (macOS)**. Rationale at
 
 ---
 
-## Status — resume here (as of end of Phase 2)
+## Status — resume here (Phase 3 + 4a landed)
 
-**Built + working in-app (Phases 0–2):** connect Dropbox, manual Scan now, foreground auto-detect (longpoll watcher), download queue (`DownloadsView`), foreground notifications, cover art, delete (with file removal), Readium reader, audiobook player. All green on the 38-check headless self-test (`-phase0selftest`). Build/run commands + constraints live in the memory files (`rhapsode-build-workflow`, `rhapsode-phase-constraints`).
+**Built + working in-app (Phases 0–2):** connect Dropbox, manual Scan now, foreground auto-detect (longpoll watcher), download queue (`DownloadsView`), foreground notifications, cover art, delete (with file removal), Readium reader, audiobook player.
+
+**Phase 3 (background sync, single-file) + Phase 4a (iPad adaptive layout) — DONE (2026-06-22, commits `ebffae6`, `50524a5`).** Built by two parallel Sonnet agents, integrated + verified by the orchestrator. Headless self-test now **53 checks, all green** (37 base + 12 Phase 3 `P3:` + 4 Phase 4a), confirmed on the committed tree (incl. the `UIApplicationSupportsMultipleScenes` manifest add). Build/run commands + constraints live in the memory files (`rhapsode-build-workflow`, `rhapsode-phase-constraints`).
+
+> **Coverage caveat (important for the next session):** the 53 green checks do **not** exercise the new background-download path. The mock still routes Scan→download→import through the *inline foreground* branch (so check #8 stays green), and the new `P3:` checks are pure-helper unit tests (ASCII escape, `TaskPayload` round-trip, `downloadRequest` headers, orphan detection). The entire `DropboxSource → BackgroundDownloader.enqueue → delegate` pipeline is **device-only unverified** — not partially covered. Likewise `UIApplicationSupportsMultipleScenes` is *enabled but unverified*, and multi-window is the first thing that would stress the `BackgroundDownloader.shared` / app-wide `SyncManager` single-instance assumptions.
+
+**Still device-only PENDING (orchestrator/user's on-device step):** OS suspension + background completion delivery; cold-relaunch `handleEventsForBackgroundURLSession`→`urlSessionDidFinishEvents`; `BGTaskScheduler` firing; 401-after-suspension re-enqueue; iPad hardware-keyboard shortcuts (space=play/pause, arrow=page-turn — arrows may be eaten by Readium's webview); multi-window scene stress. Plus the open MVP live check: real M4B + MP3-folder download from Dropbox.
+
+**Remaining phases:** 3b (MP3-folder background groups — needs `groupID` on `DownloadItem`, a `Models.swift` edit, do serially), 5 (CloudKit progress sync), 4b (macOS Catalyst).
 
 **Pending on-device verification (simulator can't show these):** lock-screen / Control-Center Now Playing controls; true background downloads; `BGTaskScheduler` firing. Plus a user-side check: live **M4B + MP3-folder** download from real Dropbox (only single-file EPUB confirmed live so far).
 

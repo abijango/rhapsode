@@ -7,12 +7,16 @@ import SwiftUI
 struct BooksShelfView: View {
     @Environment(\.modelContext) private var modelContext
     @Environment(SyncManager.self) private var sync
+    @Environment(\.horizontalSizeClass) private var hSizeClass
     @Query(sort: \Book.title) private var books: [Book]
     @State private var importing = false
 
-    private let columns = [
-        GridItem(.adaptive(minimum: DS.Shelf.minCoverWidth), spacing: DS.Shelf.spacing)
-    ]
+    private var columns: [GridItem] {
+        let minWidth = hSizeClass == .regular
+            ? DS.Shelf.minCoverWidthRegular
+            : DS.Shelf.minCoverWidth
+        return [GridItem(.adaptive(minimum: minWidth), spacing: DS.Shelf.spacing)]
+    }
 
     var body: some View {
         NavigationStack {

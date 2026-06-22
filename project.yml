@@ -72,6 +72,11 @@ targets:
           - UIInterfaceOrientationPortraitUpsideDown
           - UIInterfaceOrientationLandscapeLeft
           - UIInterfaceOrientationLandscapeRight
+        # Phase 4a (iPad): allow multiple windows of the app (Stage Manager,
+        # drag-to-new-window, side-by-side same-app). SwiftUI's App lifecycle
+        # manages the scenes; no UIWindowSceneSessionRole config needed.
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: true
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.naufalmir.rhapsode

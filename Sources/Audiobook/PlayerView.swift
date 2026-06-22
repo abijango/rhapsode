@@ -84,10 +84,13 @@ struct PlayerView: View {
     private var transport: some View {
         HStack(spacing: DS.Spacing.xl) {
             Button { player.skip(-15) } label: { Image(systemName: "gobackward.15") }
+            // Space bar = play/pause on hardware keyboard (iPad + Mac Catalyst).
+            // Additive — has no effect on iPhone where no keyboard is attached.
             Button { player.togglePlayPause() } label: {
                 Image(systemName: player.isPlaying ? "pause.circle.fill" : "play.circle.fill")
                     .resizable().frame(width: 64, height: 64)
             }
+            .keyboardShortcut(.space, modifiers: [])
             Button { player.skip(30) } label: { Image(systemName: "goforward.30") }
         }
         .font(.title)

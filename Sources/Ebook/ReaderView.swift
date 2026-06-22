@@ -35,6 +35,18 @@ struct ReaderView: View {
             }
         }
         .task { await reader.open(book, context: modelContext) }
+        // Hardware-keyboard page-turn keys (iPad + Mac Catalyst).
+        // These are additive — pressing keys is a no-op on iPhone where no keyboard
+        // is attached. The shortcuts live on hidden buttons so they don't appear in
+        // menus; right-arrow / left-arrow are the standard reader conventions.
+        .background {
+            Group {
+                Button("") { reader.goForward()  }.keyboardShortcut(.rightArrow, modifiers: [])
+                Button("") { reader.goBackward() }.keyboardShortcut(.leftArrow,  modifiers: [])
+            }
+            .accessibilityHidden(true)
+            .opacity(0)
+        }
         .sheet(isPresented: $showSettings) {
             ReaderSettingsSheet(settings: $reader.settings)
                 .presentationDetents([.medium])

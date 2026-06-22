@@ -71,6 +71,18 @@ final class EbookReader: NSObject {
         Task { await navigator.go(to: link) }
     }
 
+    /// Advance one page. Called by keyboard shortcut (right/space on iPad keyboard).
+    func goForward() {
+        guard let navigator else { return }
+        Task { await navigator.goForward() }
+    }
+
+    /// Go back one page. Called by keyboard shortcut (left arrow on iPad keyboard).
+    func goBackward() {
+        guard let navigator else { return }
+        Task { await navigator.goBackward() }
+    }
+
     // MARK: Locator persistence
 
     private func persist(_ locator: Locator) {

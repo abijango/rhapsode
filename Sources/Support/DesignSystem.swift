@@ -23,6 +23,9 @@ enum DS {
     enum Shelf {
         /// Minimum cover width; the grid flows as many columns as fit.
         static let minCoverWidth: CGFloat = 120
+        /// Wider minimum on iPad (regular size class) so fewer, larger covers fill
+        /// the bigger canvas rather than a sea of small tiles.
+        static let minCoverWidthRegular: CGFloat = 160
         static let coverAspect: CGFloat = 2.0 / 3.0 // width / height
         static let spacing: CGFloat = Spacing.md
     }

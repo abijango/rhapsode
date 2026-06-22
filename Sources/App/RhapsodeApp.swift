@@ -48,31 +48,35 @@ struct RhapsodeApp: App {
 
     var body: some Scene {
         WindowGroup {
-            #if DEBUG
-            if CommandLine.arguments.contains("-readerscreenshot") {
-                DebugReaderHarness()
-            } else {
+            Group {
+                #if DEBUG
+                if CommandLine.arguments.contains("-readerscreenshot") {
+                    DebugReaderHarness()
+                } else {
+                    RootTabView()
+                        .environment(sync)
+                        .task {
+                            if PhaseZeroSelfTest.isRequested {
+                                await PhaseZeroSelfTest.run(context: modelContainer.mainContext)
+                            }
+                        }
+                }
+                #else
                 RootTabView()
                     .environment(sync)
-                    .task {
-                        if PhaseZeroSelfTest.isRequested {
-                            await PhaseZeroSelfTest.run(context: modelContainer.mainContext)
-                        }
-                    }
+                #endif
             }
-            #else
-            RootTabView()
-                .environment(sync)
-            #endif
+            // Make the Mac Catalyst window freely resizable (no-op elsewhere).
+            .modifier(CatalystWindowSizing())
         }
         .modelContainer(modelContainer)
 #if targetEnvironment(macCatalyst)
         // MARK: Mac Catalyst — window sizing
-        // Give the window a comfortable default size when first opened on macOS.
-        // .automatic lets the user freely resize; .contentSize would pin the window
-        // to its content's ideal size and can over-constrain a navigation/split UI.
+        // .defaultSize sets the initial window size. NOTE: SwiftUI's
+        // `.windowResizability` is an AppKit-backed API that is NOT honored on Mac
+        // Catalyst — resizability there is governed by `UIWindowScene.sizeRestrictions`,
+        // which `CatalystWindowSizing` (applied to the window content) sets explicitly.
         .defaultSize(width: 1_000, height: 720)
-        .windowResizability(.automatic)
         // MARK: Mac Catalyst — menu-bar commands
         .commands {
             // Remove the "New Window" item — this app is a single-library browser
@@ -95,3 +99,36 @@ struct RhapsodeApp: App {
 #endif
     }
 }
+
+/// Makes the Mac Catalyst window freely resizable. `.windowResizability` (AppKit)
+/// is ignored on Catalyst, so we reach the `UIWindowScene` and widen its
+/// `sizeRestrictions` directly. A no-op on iOS/iPadOS.
+private struct CatalystWindowSizing: ViewModifier {
+    func body(content: Content) -> some View {
+        #if targetEnvironment(macCatalyst)
+        content.background(CatalystWindowConfigurator())
+        #else
+        content
+        #endif
+    }
+}
+
+#if targetEnvironment(macCatalyst)
+/// Sets the host `UIWindowScene`'s size restrictions once the view is in the
+/// window hierarchy: a sane minimum and an unbounded maximum (min < max ⇒
+/// resizable; the default can leave the window pinned).
+private struct CatalystWindowConfigurator: UIViewRepresentable {
+    func makeUIView(context: Context) -> UIView { ConfiguringView() }
+    func updateUIView(_ uiView: UIView, context: Context) {}
+
+    final class ConfiguringView: UIView {
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            guard let restrictions = window?.windowScene?.sizeRestrictions else { return }
+            restrictions.minimumSize = CGSize(width: 600, height: 480)
+            restrictions.maximumSize = CGSize(width: CGFloat.greatestFiniteMagnitude,
+                                              height: CGFloat.greatestFiniteMagnitude)
+        }
+    }
+}
+#endif

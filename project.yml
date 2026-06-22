@@ -22,6 +22,9 @@ packages:
   Readium:
     url: https://github.com/readium/swift-toolkit
     exactVersion: 3.9.0
+  # Local SPM package (CadenceLab). Path is relative to the repo root.
+  CadenceKit:
+    path: CadenceKit
 
 targets:
   Rhapsode:
@@ -44,6 +47,8 @@ targets:
         product: ReadiumNavigator
       - package: Readium
         product: ReadiumAdapterGCDWebServer
+      - package: CadenceKit
+        product: CadenceKit
     # Explicit (not auto-generated) Info.plist: the auto-generated plist only
     # supports a whitelist of INFOPLIST_KEY_* settings, and we need arbitrary keys
     # — UIBackgroundModes now, a CFBundleURLTypes OAuth callback scheme in Phase 1.

@@ -165,8 +165,10 @@ final class SyncManager {
         for job in jobs { await process(job.entry, kind: job.kind) }
     }
 
-    /// One-shot delta check (no longpoll) for `BGTaskScheduler` background refresh:
-    /// for each watched folder, pull changes since its cursor and download new files.
+    /// One-shot delta check (no longpoll) for `BGTaskScheduler` background refresh.
+    /// Pulls changes since each folder's cursor, enqueues new files into the
+    /// background `URLSession`, and returns quickly — the OS continues the actual
+    /// transfers outside the refresh window.
     func backgroundDeltaCheck() async {
         do { try await source.authenticate() } catch { return }
         let folders = (try? context.fetch(FetchDescriptor<WatchedFolder>())) ?? []
@@ -177,6 +179,8 @@ final class SyncManager {
                 folder.cursor = newCursor
                 try? context.save()
                 let kind = folder.kind
+                // Enqueue via process() — which now routes single Dropbox files to
+                // BackgroundDownloader and returns immediately.
                 await ingest(entries.filter { Self.belongs($0, to: kind) }.map { ($0, kind) })
             } catch {
                 continue
@@ -203,22 +207,37 @@ final class SyncManager {
         try? context.save()
         await notifier.notifyDownloadStarted(title: entry.name)
 
-        do {
-            let dest = try ContainerPaths.url(forRelativePath: rel)
-            try await transfer(entry, to: dest)
-            try await importItem(at: dest, kind: kind)
-            item.bytesReceived = item.totalBytes
-            item.state = .done
-            try? context.save()
-            await notifier.notifyDownloadFinished(title: entry.name)
-        } catch {
-            item.state = .failed
-            try? context.save()
-            lastError = "Failed to download \(entry.name): \(error.localizedDescription)"
+        // Route single files to the background URLSession when backed by DropboxSource;
+        // fall back to inline foreground transfer for MockLibrarySource (tests, debug).
+        // Folders are always downloaded inline (3b is deferred).
+        if let dbx = source as? DropboxSource, !entry.isFolder {
+            do {
+                let req = try await dbx.downloadRequest(for: entry.path)
+                BackgroundDownloader.shared.enqueue(request: req, item: item, destRelPath: rel)
+                // The BackgroundDownloader delegate will set .done / .failed + notify.
+            } catch {
+                item.state = .failed
+                try? context.save()
+                lastError = "Failed to enqueue \(entry.name): \(error.localizedDescription)"
+            }
+        } else {
+            do {
+                let dest = try ContainerPaths.url(forRelativePath: rel)
+                try await transfer(entry, to: dest)
+                try await importItem(at: dest, kind: kind)
+                item.bytesReceived = item.totalBytes
+                item.state = .done
+                try? context.save()
+                await notifier.notifyDownloadFinished(title: entry.name)
+            } catch {
+                item.state = .failed
+                try? context.save()
+                lastError = "Failed to download \(entry.name): \(error.localizedDescription)"
+            }
         }
     }
 
-    /// The only transfer call — swap this for a background `URLSession` later.
+    /// Foreground transfer — used by MockLibrarySource (tests) and folder entries.
     private func transfer(_ entry: RemoteEntry, to destination: URL) async throws {
         try await source.download(entry, to: destination)
     }

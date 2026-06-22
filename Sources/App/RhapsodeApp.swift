@@ -3,6 +3,10 @@ import SwiftUI
 
 @main
 struct RhapsodeApp: App {
+    /// Wires up the minimal `UIApplicationDelegate` needed for background URLSession
+    /// completion events (`handleEventsForBackgroundURLSession`).
+    @UIApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
+
     /// Single container registering the whole model set (see `AppSchema`).
     let modelContainer: ModelContainer
     /// App-wide sync/download pipeline, observed by the shelves + downloads UI.
@@ -27,8 +31,13 @@ struct RhapsodeApp: App {
         _sync = State(initialValue: SyncManager(source: DropboxSource(), context: container.mainContext))
         // Register the background-refresh handler before launch completes.
         BackgroundRefresh.register(container: container)
+        // Wire the container into BackgroundDownloader so its delegate callbacks
+        // can reach SwiftData. Must happen before any background tasks fire.
+        BackgroundDownloader.shared.container = container
         // Show download notifications even while the app is in the foreground.
         NotificationPresenter.install()
+        // Reconcile any downloads that were in-flight when the app was last killed.
+        BackgroundDownloader.shared.reconcileOnLaunch()
     }
 
     var body: some Scene {

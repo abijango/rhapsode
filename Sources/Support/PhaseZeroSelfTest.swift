@@ -259,7 +259,168 @@ enum PhaseZeroSelfTest {
             check("Sync pipeline threw: \(error)", false)
         }
 
+        failures += await runPhase3Checks(context: context)
+        failures += runPhase4aChecks()
         print("\(tag): DONE — \(failures == 0 ? "ALL PASS" : "\(failures) FAILED")")
+    }
+
+    // -------------------------------------------------------------------------
+    // Phase 3 — Background sync checks
+    // -------------------------------------------------------------------------
+    /// Headlessly testable Phase 3 invariants. Does NOT touch the live URLSession
+    /// (background session creation is a one-time per-identifier side-effect that
+    /// must not run twice in the same process). Returns number of failures.
+    static func runPhase3Checks(context: ModelContext) async -> Int {
+        var failures = 0
+        func check(_ name: String, _ condition: Bool) {
+            print("\(tag): \(condition ? "PASS" : "FAIL") — \(name)")
+            if !condition { failures += 1 }
+        }
+
+        // P3-1. ASCII-escape round-trip: non-ASCII path escapes to all-ASCII, then
+        //       decodes back to the original string via JSONSerialization.
+        do {
+            let path = "/Café/naïve résumé.epub"
+            let arg = String(data: try JSONEncoder().encode(["path": path]), encoding: .utf8)!
+            let escaped = DropboxSource.asciiEscapeJSON(arg)
+            let isAllASCII = escaped.unicodeScalars.allSatisfy { $0.value <= 127 }
+            check("P3: asciiEscapeJSON produces all-ASCII output", isAllASCII)
+
+            if let decoded = try? JSONSerialization.jsonObject(
+                with: Data(escaped.utf8)) as? [String: String] {
+                check("P3: asciiEscapeJSON decodes back to original path", decoded["path"] == path)
+            } else {
+                check("P3: asciiEscapeJSON round-trip parse succeeded", false)
+            }
+        } catch {
+            check("P3: asciiEscapeJSON threw: \(error)", false)
+        }
+
+        // P3-2. ASCII-escape is a no-op on already-ASCII strings.
+        do {
+            let ascii = "{\"path\": \"/Audiobooks/sample.m4b\"}"
+            check("P3: asciiEscapeJSON is identity on ASCII input",
+                  DropboxSource.asciiEscapeJSON(ascii) == ascii)
+        }
+
+        // P3-3. TaskPayload encode→decode round-trip (mapping that survives app kills).
+        do {
+            let id = UUID()
+            let original = TaskPayload(
+                itemID: id,
+                destRelPath: "Books/sample.epub",
+                kind: .books,
+                title: "Sample Book"
+            )
+            let data = try JSONEncoder().encode(original)
+            let decoded = try JSONDecoder().decode(TaskPayload.self, from: data)
+            check("P3: TaskPayload round-trips itemID", decoded.itemID == original.itemID)
+            check("P3: TaskPayload round-trips destRelPath", decoded.destRelPath == original.destRelPath)
+            check("P3: TaskPayload round-trips kind", decoded.kind == original.kind)
+            check("P3: TaskPayload round-trips title", decoded.title == original.title)
+        } catch {
+            check("P3: TaskPayload encode/decode threw: \(error)", false)
+        }
+
+        // P3-4. downloadRequest(for:) sets Authorization + escaped Dropbox-API-Arg.
+        //       Expiry is 1 hour in the future so validAccessToken() won't try to
+        //       refresh (which would require a network call).
+        do {
+            let kc = KeychainTokenStore(service: "selftest3.rhapsode.dropbox", account: "t3")
+            try? kc.clear()
+            let futureExpiry = Date(timeIntervalSinceNow: 3600)
+            let tokens = DropboxTokens(
+                refreshToken: "r3", accessToken: "test-access-token-p3",
+                accessTokenExpiry: futureExpiry
+            )
+            try kc.save(tokens)
+            defer { try? kc.clear() }
+
+            let dbx = DropboxSource(keychain: kc)
+            let nonASCIIPath = "/Audiobooks/Café au lait.m4b"
+            let req = try await dbx.downloadRequest(for: nonASCIIPath)
+
+            let auth = req.value(forHTTPHeaderField: "Authorization")
+            check("P3: downloadRequest sets Authorization header",
+                  auth == "Bearer test-access-token-p3")
+
+            let apiArg = req.value(forHTTPHeaderField: "Dropbox-API-Arg") ?? ""
+            let isAllASCII = apiArg.unicodeScalars.allSatisfy { $0.value <= 127 }
+            check("P3: downloadRequest Dropbox-API-Arg is ASCII", isAllASCII)
+            check("P3: downloadRequest Dropbox-API-Arg is non-empty", !apiArg.isEmpty)
+        } catch {
+            check("P3: downloadRequest threw: \(error)", false)
+        }
+
+        // P3-5. Launch-reconciliation pure logic: orphanedItems correctly identifies
+        //       items whose IDs have no corresponding live task.
+        do {
+            let liveID = UUID()
+            let orphanID = UUID()
+
+            let liveItem = DownloadItem(
+                id: liveID, remoteEntryID: "r1", title: "live",
+                kind: .books, state: .downloading
+            )
+            let orphanItem = DownloadItem(
+                id: orphanID, remoteEntryID: "r2", title: "orphan",
+                kind: .books, state: .downloading
+            )
+            let doneItem = DownloadItem(
+                id: UUID(), remoteEntryID: "r3", title: "done",
+                kind: .books, state: .done
+            )
+            context.insert(liveItem)
+            context.insert(orphanItem)
+            context.insert(doneItem)
+            try? context.save()
+
+            let liveTaskIDs: Set<UUID> = [liveID]
+            // #Predicate cannot compare enum cases; fetch all and filter in-memory.
+            let all = (try? context.fetch(FetchDescriptor<DownloadItem>())) ?? []
+            let downloading = all.filter { $0.state == .downloading }
+
+            let toFail = BackgroundDownloader.orphanedItems(
+                downloading: downloading,
+                liveTaskIDs: liveTaskIDs
+            )
+
+            check("P3: orphanedItems returns exactly 1 orphan", toFail.count == 1)
+            check("P3: orphanedItems identifies the orphan by ID",
+                  toFail.first?.id == orphanID)
+
+            context.delete(liveItem)
+            context.delete(orphanItem)
+            context.delete(doneItem)
+            try? context.save()
+        }
+
+        return failures
+    }
+
+    // -------------------------------------------------------------------------
+    // Phase 4a — iPad adaptive layout checks
+    // -------------------------------------------------------------------------
+    /// Returns the number of failures (0 = all pass).
+    static func runPhase4aChecks() -> Int {
+        var failures = 0
+        func check(_ name: String, _ condition: Bool) {
+            print("\(tag): \(condition ? "PASS" : "FAIL") — \(name)")
+            if !condition { failures += 1 }
+        }
+
+        // The RootLayoutMode resolution function is the single production branch:
+        // compact → .tabs, regular → .split, nil → .tabs (treats unknown as compact).
+        check("RootLayoutMode: compact → tabs",   RootLayoutMode.resolve(.compact)  == .tabs)
+        check("RootLayoutMode: regular → split",  RootLayoutMode.resolve(.regular)  == .split)
+        check("RootLayoutMode: nil → tabs",       RootLayoutMode.resolve(nil)        == .tabs)
+
+        // Design system: the wider regular minimum must be strictly larger than
+        // the compact minimum so the adaptive grid actually uses more columns.
+        check("DS.Shelf: regular minWidth > compact minWidth",
+              DS.Shelf.minCoverWidthRegular > DS.Shelf.minCoverWidth)
+
+        return failures
     }
 }
 #endif

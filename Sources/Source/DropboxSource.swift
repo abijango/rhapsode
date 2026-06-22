@@ -92,6 +92,20 @@ actor DropboxSource: LibrarySource {
         try await downloadFile(path: entry.path, to: destination)
     }
 
+    /// Build a fully authorised `URLRequest` for a background `URLSessionDownloadTask`.
+    /// The token is baked in at enqueue time so the background session can execute the
+    /// request without calling back into the app to refresh. If the task later fails
+    /// with a 401 (long suspension), the caller should re-enqueue with a fresh request.
+    func downloadRequest(for path: String) async throws -> URLRequest {
+        let token = try await validAccessToken()
+        var req = URLRequest(url: URL(string: DropboxConfig.contentBase + "/files/download")!)
+        req.httpMethod = "POST"
+        req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        let arg = String(data: try JSONEncoder().encode(DownloadArg(path: path)), encoding: .utf8)!
+        req.setValue(Self.asciiEscapeJSON(arg), forHTTPHeaderField: "Dropbox-API-Arg")
+        return req
+    }
+
     // MARK: Token
 
     private func validAccessToken() async throws -> String {
@@ -133,7 +147,9 @@ actor DropboxSource: LibrarySource {
         req.httpMethod = "POST"
         req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         let arg = String(data: try JSONEncoder().encode(DownloadArg(path: path)), encoding: .utf8)!
-        req.setValue(arg, forHTTPHeaderField: "Dropbox-API-Arg")
+        // Dropbox requires the Dropbox-API-Arg header to be pure ASCII; escape any
+        // non-ASCII characters (e.g. accented filenames) using JSON \uXXXX sequences.
+        req.setValue(Self.asciiEscapeJSON(arg), forHTTPHeaderField: "Dropbox-API-Arg")
 
         let (tempURL, response) = try await session.download(for: req)
         try Self.checkOK(response, Data())
@@ -158,6 +174,22 @@ actor DropboxSource: LibrarySource {
             size: e.size ?? 0,
             isFolder: e.tag == "folder"
         )
+    }
+
+    /// Escape any non-ASCII scalar values in a JSON string using `\uXXXX` sequences
+    /// so the result is safe to embed in an HTTP header (which must be ASCII per RFC 7230).
+    /// Already-ASCII characters and existing escape sequences are passed through unchanged.
+    static func asciiEscapeJSON(_ json: String) -> String {
+        var out = ""
+        out.reserveCapacity(json.utf16.count)
+        for scalar in json.unicodeScalars {
+            if scalar.value > 127 {
+                out += String(format: "\\u%04x", scalar.value)
+            } else {
+                out.unicodeScalars.append(scalar)
+            }
+        }
+        return out
     }
 
     private static func checkOK(_ response: URLResponse, _ data: Data) throws {

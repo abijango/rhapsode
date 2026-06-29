@@ -53,10 +53,17 @@ final class DropboxOAuth: NSObject {
         let authURL = comps.url!
 
         return try await withCheckedThrowingContinuation { continuation in
+            // The completion handler is invoked by ASWebAuthenticationSession on a background
+            // XPC queue, NOT the main thread. `DropboxOAuth` is @MainActor, so without an
+            // explicit annotation this closure inherits main-actor isolation and the Swift 6
+            // runtime traps (`_dispatch_assert_queue_fail`) when it runs off-main. Mark it
+            // @Sendable so it is non-isolated: its body only resumes the continuation (safe from
+            // any thread) and touches no main-actor state. The awaiting `connect()` resumes back
+            // on the main actor automatically.
             let session = ASWebAuthenticationSession(
                 url: authURL,
                 callbackURLScheme: DropboxConfig.callbackScheme
-            ) { callbackURL, error in
+            ) { @Sendable callbackURL, error in
                 if let error {
                     continuation.resume(throwing: error)
                     return

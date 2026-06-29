@@ -10,6 +10,7 @@ struct PlayerView: View {
     @Environment(SyncManager.self) private var sync
     @State private var player = AudiobookPlayer()
     @State private var showTracks = false
+    @State private var showCadence = false
     @State private var scrubbing = false
     @State private var scrubValue: Double = 0
 
@@ -47,6 +48,19 @@ struct PlayerView: View {
         }
         .sheet(isPresented: $showTracks) {
             TrackListView(player: player)
+        }
+        .sheet(isPresented: $showCadence) {
+            CadenceSettingsView(book: audiobook, player: player)
+        }
+        .toolbar {
+            ToolbarItem(placement: .navigationBarTrailing) {
+                Button {
+                    showCadence = true
+                } label: {
+                    Image(systemName: "timer")
+                        .accessibilityLabel("\(CadenceBranding.featureName) settings")
+                }
+            }
         }
     }
 

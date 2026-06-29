@@ -1095,6 +1095,265 @@ extension PhaseZeroSelfTest {
         return failures
     }
 
+    // MARK: - WP7 — Time-saved stat checks
+
+    /// Verifies the CadenceStats accumulator via the `debugBeginCadenceStatSession` /
+    /// `debugFeedPlayerTick` seam on `AudiobookPlayer`.
+    ///
+    /// Uses the hand-constructed map from the WP8 resume checks (source 0–7 → trimmed 0–3, two
+    /// 2 s gaps collapsed) so the expected savings are analytically derivable without rendering.
+    ///
+    /// Map layout:
+    ///   (0,0)→(1,1) kept   — slope 1 (no savings)
+    ///   (1,1)→(3,1) gap    — source advances 2 s, trimmed stays flat → 2 s saved per 2 s of player
+    ///   (3,1)→(4,2) kept   — slope 1
+    ///   (4,2)→(6,2) gap    — source advances 2 s, trimmed stays flat → 2 s saved
+    ///   (6,2)→(7,3) kept   — slope 1
+    ///
+    /// Checks:
+    ///  1. Advancing player through the first kept zone (slope 1) → ~0 savings.
+    ///  2. Advancing player through the first collapsed gap → savings grow.
+    ///  3. Backward player tick → ignored, total unchanged.
+    ///  4. A second forward step in the gap → more savings accumulated.
+    ///  5. `formattedTotal()` renders "X h Y min saved" for a known totalSavedSeconds.
+    ///
+    /// Snapshots and restores `CadenceStats.totalSavedSeconds` so the test is idempotent.
+    static func runCadenceStatChecks() -> Int {
+        var failures = 0
+        func check(_ name: String, _ condition: Bool) {
+            print("\(tag): \(condition ? "PASS" : "FAIL") — \(name)")
+            if !condition { failures += 1 }
+        }
+
+        // Snapshot existing stat so we can restore it (test must be idempotent).
+        let savedBefore = CadenceStats.totalSavedSeconds
+        CadenceStats.totalSavedSeconds = 0
+        defer { CadenceStats.totalSavedSeconds = savedBefore }
+
+        // Hand-built map: source 0–7 → trimmed 0–3.  Two 2 s gaps collapsed.
+        let statMap = CadenceTimelineMap(
+            points: [
+                .init(source: 0, trimmed: 0),
+                .init(source: 1, trimmed: 1),   // kept → gap (onset)
+                .init(source: 3, trimmed: 1),   // gap → kept
+                .init(source: 4, trimmed: 2),   // kept → gap (onset)
+                .init(source: 6, trimmed: 2),   // gap → kept
+                .init(source: 7, trimmed: 3),
+            ],
+            sourceDuration: 7,
+            trimmedDuration: 3)
+
+        let player = AudiobookPlayer()
+        player.debugBeginCadenceStatSession(map: statMap)
+
+        // 1. Baseline tick (no prior baseline) — establishes lastPlayerTime only, no accumulation.
+        player.debugFeedPlayerTick(0.0)
+        let afterBaseline = CadenceStats.totalSavedSeconds
+        check("Stat: baseline tick does not accumulate (first tick = baseline only)",
+              afterBaseline == 0.0)
+
+        // 2. Advance through the first kept zone (trimmed 0.0 → 0.8; slope=1 → source 0→0.8).
+        //    sourceDelta ≈ trimmedDelta → near-zero savings.
+        player.debugFeedPlayerTick(0.8)
+        let afterKept = CadenceStats.totalSavedSeconds
+        check("Stat: kept-zone advance → ~0 savings (delta ≈ 0)",
+              afterKept < 0.05)
+
+        // 3. Gap-crossing tick: advance from trimmed 0.8 to 1.2.
+        //    toSource(0.8) ≈ 0.8 (in kept zone); toSource(1.2) ≈ 3.2 (past collapsed gap).
+        //    trimmedDelta = 0.4 s (below 4 s guard); sourceDelta = 3.2 − 0.8 = 2.4 s.
+        //    Expected saved ≈ 2.4 − 0.4 = 2.0 s.
+        let pStart = 0.8; let pEnd = 1.2
+        let srcStart = statMap.toSource(pStart); let srcEnd = statMap.toSource(pEnd)
+        let expectedSaved = max(0, (srcEnd - srcStart) - (pEnd - pStart))
+        player.debugFeedPlayerTick(pEnd)
+        let afterGap = CadenceStats.totalSavedSeconds
+        check("Stat: gap-crossing tick accumulates savings (≈\(String(format: "%.1f", expectedSaved)) s)",
+              abs(afterGap - afterKept - expectedSaved) < 0.15)
+
+        // 4. Backward tick (seek-back simulation): player time goes negative relative to last.
+        //    Must NOT change the total. The baseline is reset by the skipped-tick defer.
+        let beforeBackward = CadenceStats.totalSavedSeconds
+        player.debugFeedPlayerTick(0.3)   // backward from 1.2 → skip
+        let afterBackward = CadenceStats.totalSavedSeconds
+        check("Stat: backward player tick does not accumulate (seek/resume guard)",
+              afterBackward == beforeBackward)
+
+        // 5. After a backward skip, the baseline resets at 0.3.
+        //    Feed trimmed 0.3 → 0.7 (well inside kept zone 0–1, slope 1, away from gap boundary).
+        //    trimmedDelta = 0.4; sourceDelta = toSource(0.7) - toSource(0.3) = 0.7 - 0.3 = 0.4.
+        //    Expected savings ≈ 0 (slope-1 region).
+        player.debugFeedPlayerTick(0.7)
+        let afterForward2 = CadenceStats.totalSavedSeconds
+        check("Stat: normal tick after backward baseline-reset accumulates ~0 in kept zone",
+              abs(afterForward2 - afterBackward) < 0.05)
+
+        player.debugEndCadenceStatSession()
+
+        // 6. formattedTotal renders correctly for known values.
+        CadenceStats.totalSavedSeconds = 3720   // 1 h 2 min
+        check("Stat: formattedTotal() renders '1 h 2 min saved' for 3720 s",
+              CadenceStats.formattedTotal() == "1 h 2 min saved")
+
+        CadenceStats.totalSavedSeconds = 90     // 1 min 30 s → "1 min saved"
+        check("Stat: formattedTotal() renders '1 min saved' for 90 s",
+              CadenceStats.formattedTotal() == "1 min saved")
+
+        CadenceStats.totalSavedSeconds = 0
+        check("Stat: formattedTotal() renders '0 min saved' at zero",
+              CadenceStats.formattedTotal() == "0 min saved")
+
+        // Restore happens in defer.
+        return failures
+    }
+
+    // MARK: - WP9 — Tier persistence + re-render trigger
+
+    /// Verifies the non-UI logic for per-book tier persistence and tier-change re-render.
+    ///
+    /// Checks:
+    ///  1. Setting `book.cadenceTier` and saving persists across a context re-fetch.
+    ///  2. After a tier change, cancel+enqueue produces a rendition for the NEW tier.
+    ///  3. `selectTrimmedSource(tier: newTier)` returns non-nil for the new tier.
+    ///  4. `selectTrimmedSource(tier: oldTier)` returns nil (old-tier row replaced by upsert).
+    ///  5. The new rendition's `trimmedRelPath` differs from what the old tier would have produced
+    ///     (tier is embedded in the filename by `CadenceRenderCoordinator.outputRelPath`).
+    ///
+    /// Uses a synthetic on-disk book (same WAV layout as other coordinator tests) and
+    /// polls like `runCadenceCoordinatorChecks` so no AVPlayer or UI is involved.
+    static func runCadenceTierUIChecks(context: ModelContext) async -> Int {
+        var failures = 0
+        func check(_ name: String, _ condition: Bool) {
+            print("\(tag): \(condition ? "PASS" : "FAIL") — \(name)")
+            if !condition { failures += 1 }
+        }
+
+        let wasEnabled = CadencePreferences.isEnabled
+        CadencePreferences.isEnabled = true
+        defer { CadencePreferences.isEnabled = wasEnabled }
+
+        let layout: [(seconds: Double, tone: Bool)] = [(1, true), (2, false), (1, true), (2, false), (1, true)]
+        let bookDirRel = "selftest-wp9-tier"
+        var bookID: UUID?
+
+        do {
+            let rel = "\(bookDirRel)/tier.wav"
+            let url = try ContainerPaths.url(forRelativePath: rel)
+            try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try writeSyntheticWAV(layout: layout, sampleRate: 44_100, to: url)
+
+            // Start with the "default" tier.
+            let book = Audiobook(
+                title: "selftest-wp9-tier", sourcePath: rel,
+                tracks: [
+                    AudiobookTrack(title: "A", fileRelPath: rel, duration: 3.5, order: 0),
+                    AudiobookTrack(title: "B", fileRelPath: rel, duration: 3.5, order: 1),
+                ], totalDuration: 7)
+            book.cadenceTier = CadenceSettings.Preset.default.rawValue
+            context.insert(book)
+            try context.save()
+            let id = book.id
+            bookID = id
+
+            // 1. Check: cadenceTier persists (read it back from a fresh fetch).
+            let refetched = (try? context.fetch(FetchDescriptor<Audiobook>()))?.first(where: { $0.id == id })
+            check("TierUI: cadenceTier='default' persists after save",
+                  refetched?.cadenceTier == CadenceSettings.Preset.default.rawValue)
+
+            // Compute what the old-tier trimmedRelPath would be (for later inequality check).
+            let oldTierRelPath = CadenceRenderCoordinator.outputRelPath(
+                bookID: id, relPath: rel, tier: .default)
+
+            // Render the "default" tier first so there's a baseline rendition.
+            await CadenceRenderCoordinator.shared.configure(container: context.container)
+            await CadenceRenderCoordinator.shared.enqueue(bookID: id)
+
+            var defaultRendition: TrimmedRendition?
+            for _ in 0..<100 {
+                try? await Task.sleep(nanoseconds: 100_000_000)
+                defaultRendition = (try? context.fetch(FetchDescriptor<TrimmedRendition>()))?
+                    .first { $0.bookID == id }
+                if defaultRendition != nil { break }
+            }
+            check("TierUI: default-tier rendition written as baseline",
+                  defaultRendition?.tier == CadenceSettings.Preset.default.rawValue)
+
+            // 2. Change to "aggressive" tier, persist, cancel+enqueue.
+            book.cadenceTier = CadenceSettings.Preset.aggressive.rawValue
+            try context.save()
+
+            let newTierRaw = CadenceSettings.Preset.aggressive.rawValue
+
+            // Verify cadenceTier persistence for the new value.
+            let refetchedNew = (try? context.fetch(FetchDescriptor<Audiobook>()))?.first(where: { $0.id == id })
+            check("TierUI: cadenceTier='aggressive' persists after tier change",
+                  refetchedNew?.cadenceTier == newTierRaw)
+
+            await CadenceRenderCoordinator.shared.cancel(bookID: id)
+            await CadenceRenderCoordinator.shared.enqueue(bookID: id)
+
+            // Poll for a rendition with the new tier.
+            var aggressiveRendition: TrimmedRendition?
+            for _ in 0..<150 {
+                try? await Task.sleep(nanoseconds: 100_000_000)
+                // Refetch to see the upsert: old row is deleted, new row inserted.
+                let current = (try? context.fetch(FetchDescriptor<TrimmedRendition>()))?
+                    .first { $0.bookID == id }
+                if current?.tier == newTierRaw {
+                    aggressiveRendition = current
+                    break
+                }
+            }
+
+            check("TierUI: aggressive-tier rendition written after tier change",
+                  aggressiveRendition != nil && aggressiveRendition?.tier == newTierRaw)
+
+            // 3. selectTrimmedSource returns non-nil for the new tier.
+            let newSel = AudiobookPlayer.selectTrimmedSource(
+                bookID: id, relPath: rel, tier: newTierRaw, context: context)
+            check("TierUI: selectTrimmedSource(aggressive) returns non-nil after re-render",
+                  newSel != nil)
+
+            // 4. selectTrimmedSource returns nil for the old tier (upsert replaced the row).
+            let oldSel = AudiobookPlayer.selectTrimmedSource(
+                bookID: id, relPath: rel, tier: CadenceSettings.Preset.default.rawValue, context: context)
+            check("TierUI: selectTrimmedSource(default) returns nil — old-tier row replaced",
+                  oldSel == nil)
+
+            // 5. New rendition's trimmedRelPath embeds the new tier and differs from the old.
+            if let newRel = aggressiveRendition?.trimmedRelPath {
+                check("TierUI: new trimmedRelPath contains 'aggressive'",
+                      newRel.contains("aggressive"))
+                check("TierUI: new trimmedRelPath differs from old-tier path",
+                      newRel != oldTierRelPath)
+            } else {
+                check("TierUI: new rendition relPath available for path check", false)
+            }
+
+        } catch {
+            check("TierUI: setup threw: \(error)", false)
+        }
+
+        // Cleanup: renditions, book, files.
+        if let id = bookID {
+            for r in ((try? context.fetch(FetchDescriptor<TrimmedRendition>()))?.filter({ $0.bookID == id }) ?? []) {
+                if let f = try? ContainerPaths.cacheURL(forRelativePath: r.trimmedRelPath) {
+                    try? FileManager.default.removeItem(at: f)
+                }
+                context.delete(r)
+            }
+            for b in ((try? context.fetch(FetchDescriptor<Audiobook>()))?.filter({ $0.id == id }) ?? []) {
+                context.delete(b)
+            }
+            try? context.save()
+        }
+        if let dir = try? ContainerPaths.url(forRelativePath: bookDirRel) {
+            try? FileManager.default.removeItem(at: dir)
+        }
+        return failures
+    }
+
     /// Build mono float32 PCM from a tone/silence layout and write it as a WAV the renderer reads.
     private static func writeSyntheticWAV(layout: [(seconds: Double, tone: Bool)],
                                           sampleRate: Double, to url: URL) throws {

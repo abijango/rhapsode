@@ -30,12 +30,41 @@ final class AudiobookPlayer {
     private var context: ModelContext?
     private var lastPersist = Date(timeIntervalSince1970: 0)
 
-    // MARK: Cadence (WP5 / WP6 / WP8)
+    // MARK: Cadence (WP5 / WP6 / WP7 / WP8)
     /// Source↔trimmed map for the file currently loaded into `player`. `nil` ⇒ the loaded file
     /// IS the original (identity mapping). Set in `loadCurrentItem`: per-file for multi-file
     /// books, once for the single shared M4B file. All position math stays source-domain; we map
     /// only at the `player` boundary via `srcToPlayer` / `playerToSrc`.
     private var activeMap: CadenceTimelineMap?
+
+    // MARK: WP7 — time-saved stat accumulation
+    /// Last raw player (trimmed-domain) time seen by `tick()`. `nil` = no baseline yet.
+    private var lastPlayerTime: Double?
+    /// Last source-domain time corresponding to `lastPlayerTime`. `nil` = no baseline yet.
+    private var lastSourceTime: Double?
+
+    /// Accumulate honest saved time from one tick to the next.
+    ///
+    /// The guard is on `trimmedDelta` (how far the player advanced in the trimmed file) only.
+    /// When playback crosses a collapsed gap, `sourceDelta` leaps by several seconds while
+    /// `trimmedDelta` stays small — that IS the saving. Capping on `sourceDelta` would discard it.
+    ///
+    /// Skipped conditions (no accumulation):
+    /// - Not playing, or no activeMap (original file, no savings).
+    /// - No baseline yet (first tick after load or discontinuity).
+    /// - `trimmedDelta < 0`: backward seek, track-reset, or smart-resume nudge.
+    /// - `trimmedDelta >= 4.0`: forward skip/jump (above `maxRate × interval` budget).
+    ///
+    /// Always updates `lastPlayerTime`/`lastSourceTime` so the next tick has a fresh baseline.
+    private func accumulateSaved(playerNow: Double, sourceNow: Double) {
+        defer { lastPlayerTime = playerNow; lastSourceTime = sourceNow }
+        guard isPlaying, activeMap != nil,
+              let lp = lastPlayerTime, let ls = lastSourceTime else { return }
+        let trimmedDelta = playerNow - lp
+        let sourceDelta  = sourceNow - ls
+        guard trimmedDelta >= 0, trimmedDelta < 4.0 else { return }
+        CadenceStats.addSaved(max(0, sourceDelta - trimmedDelta))
+    }
 
     /// WP8 — smart resume flag. Set `true` on `pause()` and on initial `load()`, cleared by any
     /// deliberate seek (`seekWithinBook`, `seekInTrack`, `jump`) so a scrub-then-play is never
@@ -115,6 +144,12 @@ final class AudiobookPlayer {
         self.prefixSums = Self.computePrefixSums(tracks)
         self.currentIndex = min(max(book.lastTrackIndex, 0), max(tracks.count - 1, 0))
         self.offsetInTrack = book.lastOffsetSeconds
+
+        // WP7: clear the stat baseline on every new load so stale state from a previous book
+        // does not pollute the first tick (negative trimmedDelta guard catches this anyway, but
+        // explicit nil is clearer and makes the debug seam deterministic).
+        lastPlayerTime = nil
+        lastSourceTime = nil
 
         configureAudioSession()
         configureRemoteCommands()
@@ -412,6 +447,8 @@ final class AudiobookPlayer {
             offsetInTrack = now
             // Single-file end is handled by recompute; multi-file by item-end notification.
         }
+        // WP7: accumulate honest time-saved stat from trimmed playback progress.
+        accumulateSaved(playerNow: playerNow, sourceNow: now)
         updateNowPlayingElapsed()
         persist(force: false)
     }
@@ -549,6 +586,34 @@ extension AudiobookPlayer {
         pendingResumeNudge = true
         pendingResumeNudge = false
         applySmartResumeNudge()
+    }
+
+    // MARK: WP7 debug seam — stat accumulation
+
+    /// Prepare the player for a simulated trimmed-playback stat session.
+    ///
+    /// Directly wires in `map` as `activeMap` and marks `isPlaying = true` so
+    /// `accumulateSaved` will count. No AVPlayer item, no network, no real audio —
+    /// just the stat accumulation logic driven by `debugFeedPlayerTick`.
+    func debugBeginCadenceStatSession(map: CadenceTimelineMap) {
+        activeMap = map
+        isPlaying = true
+        lastPlayerTime = nil
+        lastSourceTime = nil
+    }
+
+    /// Feed a single simulated tick at `playerTime` (trimmed-domain seconds), exactly
+    /// as the real `tick()` does. The source time is derived via `playerToSrc(playerTime)`.
+    func debugFeedPlayerTick(_ playerTime: Double) {
+        accumulateSaved(playerNow: playerTime, sourceNow: playerToSrc(playerTime))
+    }
+
+    /// Tear down the stat session started by `debugBeginCadenceStatSession`.
+    func debugEndCadenceStatSession() {
+        isPlaying = false
+        activeMap = nil
+        lastPlayerTime = nil
+        lastSourceTime = nil
     }
 }
 #endif

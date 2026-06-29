@@ -63,7 +63,11 @@ final class AudiobookPlayer {
         let trimmedDelta = playerNow - lp
         let sourceDelta  = sourceNow - ls
         guard trimmedDelta >= 0, trimmedDelta < 4.0 else { return }
-        CadenceStats.addSaved(max(0, sourceDelta - trimmedDelta))
+        let saved = max(0, sourceDelta - trimmedDelta)
+        guard saved > 0 else { return }
+        CadenceStats.addSaved(saved)                                  // lifetime/global total
+        if let book { book.cadenceSavedSeconds = (book.cadenceSavedSeconds ?? 0) + saved }  // per-book
+        // Both persist via the throttled persist() in tick() (or force-save on pause).
     }
 
     /// WP8 — smart resume flag. Set `true` on `pause()` and on initial `load()`, cleared by any
@@ -273,8 +277,11 @@ final class AudiobookPlayer {
     /// WP6: also returns `relPath` so `loadCurrentItem` can register it in the in-use registry.
     private func trimmedSource(for relPath: String) -> (url: URL, map: CadenceTimelineMap, relPath: String)? {
         guard let book, let context else { return nil }
+        // Gate + tier come from the single resolver: off ⇒ play original; on(preset) ⇒ look up
+        // the rendition for that preset (a per-book forced profile plays even if global is off).
+        guard case .on(let preset) = book.resolvedCadence else { return nil }
         return Self.selectTrimmedSource(bookID: book.id, relPath: relPath,
-                                        tier: book.effectiveCadenceTier.rawValue, context: context)
+                                        tier: preset.rawValue, context: context)
     }
 
     /// Pure selection contract (testable without an `AVPlayer`): feature on + a rendition matching
@@ -289,11 +296,11 @@ final class AudiobookPlayer {
     /// WP10: returns `nil` immediately for books flagged `cadenceUnavailable` (DRM/undecodable).
     static func selectTrimmedSource(bookID: UUID, relPath: String, tier: String,
                                     context: ModelContext) -> (url: URL, map: CadenceTimelineMap, relPath: String)? {
-        // WP10: DRM/undecodable books are never trimmed.
-        if let book = (try? context.fetch(FetchDescriptor<Audiobook>()))?.first(where: { $0.id == bookID }),
-           book.cadenceUnavailable == true { return nil }
-
-        guard CadencePreferences.isEnabled,
+        // Gate on the book's resolved Cadence state — covers global on/off, per-book force-on/off,
+        // and DRM (`.off` for unavailable). The passed `tier` stays the validity tier the rendition
+        // must match. A book with no rendition row still returns nil (handled below).
+        guard let book = (try? context.fetch(FetchDescriptor<Audiobook>()))?.first(where: { $0.id == bookID }),
+              case .on = book.resolvedCadence,
               let srcURL = try? ContainerPaths.url(forRelativePath: relPath),
               let fingerprint = CadenceFingerprint.of(fileAt: srcURL)
         else { return nil }
@@ -595,12 +602,16 @@ extension AudiobookPlayer {
     /// Directly wires in `map` as `activeMap` and marks `isPlaying = true` so
     /// `accumulateSaved` will count. No AVPlayer item, no network, no real audio —
     /// just the stat accumulation logic driven by `debugFeedPlayerTick`.
-    func debugBeginCadenceStatSession(map: CadenceTimelineMap) {
+    func debugBeginCadenceStatSession(map: CadenceTimelineMap, book: Audiobook? = nil) {
+        self.book = book
         activeMap = map
         isPlaying = true
         lastPlayerTime = nil
         lastSourceTime = nil
     }
+
+    /// Per-book accrued savings for the session's book (S2), for the self-test to assert.
+    var debugBookSavedSeconds: Double? { book?.cadenceSavedSeconds }
 
     /// Feed a single simulated tick at `playerTime` (trimmed-domain seconds), exactly
     /// as the real `tick()` does. The source time is derived via `playerToSrc(playerTime)`.

@@ -1,161 +1,183 @@
 import SwiftUI
 import CadenceKit
 
-/// Per-book Cadence (silence-trimming) control panel. Spec §9, §5.4.
+/// Per-book Cadence override (spec §9, §5.4). A single menu sets how Cadence behaves for **this**
+/// audiobook, independent of the global setting:
+///   • Use Default → inherit the global on/off + default tier (`cadenceTier = nil`)
+///   • Off → silence-trimming off for this book, even when globally on (`"off"`)
+///   • Default / More / Aggressive → force that profile for this book, even when globally off
 ///
-/// Allows the user to enable/disable the feature globally and select the per-book
-/// trimming sensitivity (Default / More / Aggressive). Helper text guides the choice:
-/// fast natural narrators → Default; slow/deliberate → More/Aggressive.
-///
-/// Tier changes enqueue a background re-render via `CadenceRenderCoordinator`; a
-/// "Preparing…" indicator is shown until `selectTrimmedSource` returns a valid rendition
-/// for the new tier, at which point `player.applyCadenceChange()` swaps the audio
-/// source seamlessly at the current mapped source position.
+/// Changing the choice persists it, (re-)renders if it resolves to ON (showing "Preparing…" until
+/// the rendition for the new tier is ready, then swapping seamlessly via `applyCadenceChange()`),
+/// or reverts to the original immediately if it resolves to OFF. The global master switch and the
+/// default sensitivity live in Settings → Cadence, not here.
 struct CadenceSettingsView: View {
     let book: Audiobook
-    /// The live player — used to call `applyCadenceChange()` on toggle/tier changes.
+    /// The live player — used to swap the audio source on a change via `applyCadenceChange()`.
     let player: AudiobookPlayer
 
     @Environment(\.modelContext) private var modelContext
+    @Environment(\.dismiss) private var dismiss
 
-    @State private var enabled = false
-    /// True while a re-render for a new tier is in progress.
+    /// The five selectable states, mapped to/from `Audiobook.cadenceTier`.
+    enum Choice: Hashable {
+        case useGlobal
+        case off
+        case preset(CadenceSettings.Preset)
+    }
+
     @State private var isPreparing = false
-    /// The tier currently being prepared (so the poll knows which tier to wait for).
-    @State private var preparingTier: CadenceSettings.Preset?
-    /// Polling task for the "Preparing…" state.
     @State private var pollingTask: Task<Void, Never>?
 
     var body: some View {
-        Form {
-            Section("Cadence") {
-                Toggle("Enable \(CadenceBranding.featureName)", isOn: Binding(
-                    get: { enabled },
-                    set: { new in
-                        enabled = new
-                        CadencePreferences.isEnabled = new
-                        if new {
-                            // Feature turned ON: enqueue render for the current book.
-                            let bookID = book.id
-                            Task { await CadenceRenderCoordinator.shared.enqueue(bookID: bookID) }
-                        } else {
-                            // Feature turned OFF: revert to original at the current position.
-                            cancelPolling()
-                            isPreparing = false
-                            player.applyCadenceChange()
-                        }
-                    }
-                ))
-
-                if enabled {
-                    Picker(
-                        "Trimming Sensitivity",
-                        selection: Binding(
-                            get: { book.effectiveCadenceTier },
-                            set: { newTier in
-                                guard newTier != book.effectiveCadenceTier else { return }
-                                book.cadenceTier = newTier.rawValue
-                                try? modelContext.save()
-                                // Cancel any in-flight render for the old tier and enqueue the new one.
-                                let bookID = book.id
-                                Task {
-                                    await CadenceRenderCoordinator.shared.cancel(bookID: bookID)
-                                    await CadenceRenderCoordinator.shared.enqueue(bookID: bookID)
-                                }
-                                startPreparingPoll(for: newTier)
-                            }
-                        )
-                    ) {
+        NavigationStack {
+            Form {
+                Section {
+                    Picker(selection: choiceBinding) {
+                        Text(useGlobalLabel).tag(Choice.useGlobal)
+                        Text("Off").tag(Choice.off)
                         ForEach(CadenceSettings.Preset.allCases, id: \.self) { preset in
-                            Text(preset.displayName).tag(preset)
+                            Text(preset.displayName).tag(Choice.preset(preset))
                         }
+                    } label: {
+                        EmptyView()
                     }
-                    .pickerStyle(.segmented)
+                    .pickerStyle(.inline)
                     .disabled(isPreparing)
+                } header: {
+                    Text("For This Audiobook")
+                } footer: {
+                    Text(footerText)
+                }
 
-                    if isPreparing {
+                if isPreparing {
+                    Section {
                         HStack(spacing: 8) {
                             ProgressView()
-                            Text("Preparing…")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
+                            Text("Preparing…").font(.callout).foregroundStyle(.secondary)
                         }
-                    } else {
-                        Text(helperText)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
                     }
+                }
 
-                    // WP7: show honest accumulated time-saved stat (renders "0 min saved" until
-                    // trimmed playback accumulates savings; never shows a misleading "Preparing…").
-                    Text(CadenceStats.formattedTotal())
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                if let saved = book.cadenceSavedSeconds, saved > 0 {
+                    Section {
+                        LabeledContent("Saved in this book", value: Self.compactDuration(saved))
+                    }
                 }
             }
+            .navigationTitle(CadenceBranding.featureName)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+            .onDisappear { cancelPolling() }
         }
-        .onAppear {
-            enabled = CadencePreferences.isEnabled
+        .presentationDragIndicator(.visible)
+    }
+
+    // MARK: - Choice ↔ cadenceTier
+
+    private var choiceBinding: Binding<Choice> {
+        Binding(get: { currentChoice }, set: { apply($0) })
+    }
+
+    private var currentChoice: Choice {
+        switch book.cadenceTier {
+        case nil: return .useGlobal
+        case cadenceOffValue: return .off
+        case let raw?:
+            return CadenceSettings.Preset(rawValue: raw).map(Choice.preset) ?? .useGlobal
         }
-        .onChange(of: enabled) { _, new in
-            CadencePreferences.isEnabled = new
+    }
+
+    /// "Use Default (More)" / "Use Default (Off)" — shows what inheriting global resolves to now.
+    private var useGlobalLabel: String {
+        CadencePreferences.isEnabled
+            ? "Use Default (\(CadencePreferences.defaultTier.displayName))"
+            : "Use Default (Off)"
+    }
+
+    private var footerText: String {
+        switch book.resolvedCadence {
+        case .off:
+            return "Silence-trimming is off for this audiobook."
+        case .on(let preset):
+            switch preset {
+            case .default: return "Fast, natural narrators sound best on Default — subtle compression you may not notice."
+            case .more: return "More compression for slower narrators; keeps clarity while improving pace."
+            case .aggressive: return "Maximum compression; best for very slow or deliberate narration."
+            }
         }
-        .onDisappear {
+    }
+
+    // MARK: - Apply a change
+
+    private func apply(_ choice: Choice) {
+        guard choice != currentChoice else { return }
+        switch choice {
+        case .useGlobal:     book.cadenceTier = nil
+        case .off:           book.cadenceTier = cadenceOffValue
+        case .preset(let p): book.cadenceTier = p.rawValue
+        }
+        try? modelContext.save()
+
+        let bookID = book.id
+        switch book.resolvedCadence {
+        case .on(let preset):
+            // (Re-)render for the resolved tier, then swap seamlessly when it's ready.
+            Task {
+                await CadenceRenderCoordinator.shared.cancel(bookID: bookID)
+                await CadenceRenderCoordinator.shared.enqueue(bookID: bookID)
+            }
+            startPreparingPoll(for: preset)
+        case .off:
+            // Revert to the original at the current mapped position, immediately.
             cancelPolling()
+            isPreparing = false
+            player.applyCadenceChange()
         }
     }
 
-    private var helperText: String {
-        switch book.effectiveCadenceTier {
-        case .default:
-            return "Fast, natural narrators sound best on Default — subtle compression you may not notice."
-        case .more:
-            return "More compression for slower narrators; maintains clarity while improving pace."
-        case .aggressive:
-            return "Maximum compression; recommended for very slow or deliberate narration."
-        }
-    }
+    // MARK: - Preparing poll
 
-    // MARK: - Preparing-state poll
-
-    /// Begin polling for a valid rendition for `tier`. When found, call `applyCadenceChange()`
-    /// to swap the player source seamlessly, then clear the Preparing state.
     private func startPreparingPoll(for tier: CadenceSettings.Preset) {
         cancelPolling()
         isPreparing = true
-        preparingTier = tier
         let bookID = book.id
-        // For multi-file books, poll for the file the player is currently on; fall back to
-        // the first track's file for the single-file M4B case or when no track is active.
         let relPath = player.currentTrack?.fileRelPath ?? book.orderedTracks.first?.fileRelPath ?? ""
         let tierRaw = tier.rawValue
         let ctx = modelContext
         let p = player
-
         pollingTask = Task {
-            // Poll up to ~30 s (300 × 100 ms) for the rendition to land.
+            // Poll up to ~30 s for the rendition for the chosen tier to land.
             for _ in 0..<300 {
                 try? await Task.sleep(nanoseconds: 100_000_000)
                 if Task.isCancelled { return }
-                // selectTrimmedSource is @MainActor because ModelContext is not Sendable —
-                // call it synchronously here on the main actor.
-                let found = AudiobookPlayer.selectTrimmedSource(
-                    bookID: bookID, relPath: relPath, tier: tierRaw, context: ctx)
-                if found != nil {
+                if AudiobookPlayer.selectTrimmedSource(bookID: bookID, relPath: relPath,
+                                                       tier: tierRaw, context: ctx) != nil {
                     isPreparing = false
-                    preparingTier = nil
                     p.applyCadenceChange()
                     return
                 }
             }
-            // Timed out: clear Preparing state gracefully (original keeps playing).
-            isPreparing = false
-            preparingTier = nil
+            isPreparing = false   // timed out; original keeps playing
         }
     }
 
     private func cancelPolling() {
         pollingTask?.cancel()
         pollingTask = nil
+    }
+
+    /// Compact per-book duration, e.g. "1h 3m", "12m", "<1m".
+    private static func compactDuration(_ seconds: TimeInterval) -> String {
+        guard seconds > 0 else { return "<1m" }
+        let totalMinutes = Int(seconds / 60)
+        let hours = totalMinutes / 60, minutes = totalMinutes % 60
+        if hours > 0 { return "\(hours)h \(minutes)m" }
+        if minutes > 0 { return "\(minutes)m" }
+        return "<1m"
     }
 }

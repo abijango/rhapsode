@@ -9,6 +9,37 @@ import SwiftData
 /// AAC writer produces a shorter, decodable `.m4a`, that the source↔trimmed map round-trips on
 /// kept audio, and that chapter-chunk stitching holds. Runs only under `-phase0selftest`.
 extension PhaseZeroSelfTest {
+    /// S1 verification: the pure `resolvedCadence` truth table — the single gating authority for
+    /// global on/off, per-book force-on (renders even when global is off), per-book "off", and DRM.
+    /// Pure (no files/context): just constructs `Audiobook`s and reads the computed property.
+    static func runCadenceGatingChecks() -> Int {
+        var failures = 0
+        func check(_ name: String, _ condition: Bool) {
+            print("\(tag): \(condition ? "PASS" : "FAIL") — \(name)")
+            if !condition { failures += 1 }
+        }
+        let wasEnabled = CadencePreferences.isEnabled
+        let wasDefault = CadencePreferences.defaultTier
+        defer { CadencePreferences.isEnabled = wasEnabled; CadencePreferences.defaultTier = wasDefault }
+
+        func book(_ tier: String?, unavailable: Bool? = nil) -> Audiobook {
+            Audiobook(title: "g", sourcePath: "g", cadenceTier: tier, cadenceUnavailable: unavailable)
+        }
+
+        CadencePreferences.isEnabled = true
+        CadencePreferences.defaultTier = .more
+        check("Gating: nil override + global ON → on(default=more)", book(nil).resolvedCadence == .on(.more))
+        check("Gating: 'off' override + global ON → off", book(cadenceOffValue).resolvedCadence == .off)
+        check("Gating: forced 'aggressive' + global ON → on(aggressive)", book("aggressive").resolvedCadence == .on(.aggressive))
+        check("Gating: unavailable + global ON → off", book(nil, unavailable: true).resolvedCadence == .off)
+
+        CadencePreferences.isEnabled = false
+        check("Gating: nil override + global OFF → off", book(nil).resolvedCadence == .off)
+        check("Gating: forced 'more' + global OFF → on(more) [force-on]", book("more").resolvedCadence == .on(.more))
+        check("Gating: 'off' override + global OFF → off", book(cadenceOffValue).resolvedCadence == .off)
+        return failures
+    }
+
     static func runCadenceChecks() -> Int {
         var failures = 0
         func check(_ name: String, _ condition: Bool) {
@@ -201,6 +232,23 @@ extension PhaseZeroSelfTest {
         check("Playback: selection returns nil when feature disabled", offResult == nil)
         CadencePreferences.isEnabled = true
 
+        // Independent per-book gating (S1): a forced profile selects trimmed even when global is
+        // OFF; a per-book "off" returns nil even when global is ON. Reuses the rendered "default"
+        // rendition. Restores cadenceTier=nil so the later player.load test inherits the default.
+        if let b = (try? context.fetch(FetchDescriptor<Audiobook>()))?.first(where: { $0.id == bookID }) {
+            CadencePreferences.isEnabled = false
+            b.cadenceTier = "default"; try? context.save()
+            let forced = AudiobookPlayer.selectTrimmedSource(bookID: bookID, relPath: relPath, tier: "default", context: context)
+            check("Playback: per-book force-on selects trimmed even when global OFF", forced != nil)
+
+            CadencePreferences.isEnabled = true
+            b.cadenceTier = "off"; try? context.save()
+            let offForBook = AudiobookPlayer.selectTrimmedSource(bookID: bookID, relPath: relPath, tier: "default", context: context)
+            check("Playback: per-book 'off' returns nil even when global ON", offForBook == nil)
+
+            b.cadenceTier = nil; try? context.save()
+        }
+
         guard let map = try? JSONDecoder().decode(CadenceTimelineMap.self, from: rendition.timelineMapBlob),
               let book = (try? context.fetch(FetchDescriptor<Audiobook>()))?.first(where: { $0.id == bookID }) else {
             check("Playback: prerequisites (map + book) available", false)
@@ -211,8 +259,10 @@ extension PhaseZeroSelfTest {
         player.load(book, context: context)
 
         // Wait for the trimmed item to become ready (it must, before a precise seek lands).
+        // Generous timeout (~15 s): a local .m4a always becomes ready, but AVPlayer can be slow
+        // to report it on a loaded simulator/Catalyst host — keep this well above that latency.
         var ready = false
-        for _ in 0..<50 {
+        for _ in 0..<150 {
             try? await Task.sleep(nanoseconds: 100_000_000)
             if player.debugItemReady { ready = true; break }
         }
@@ -1204,6 +1254,87 @@ extension PhaseZeroSelfTest {
               CadenceStats.formattedTotal() == "0 min saved")
 
         // Restore happens in defer.
+        return failures
+    }
+
+    /// S2 verification: per-book savings accrue in lockstep with the global total during trimmed
+    /// playback, and a backward seek inflates neither. Reuses the same hand-built map.
+    static func runCadenceBookStatChecks() -> Int {
+        var failures = 0
+        func check(_ name: String, _ condition: Bool) {
+            print("\(tag): \(condition ? "PASS" : "FAIL") — \(name)")
+            if !condition { failures += 1 }
+        }
+        let savedBefore = CadenceStats.totalSavedSeconds
+        CadenceStats.totalSavedSeconds = 0
+        defer { CadenceStats.totalSavedSeconds = savedBefore }
+
+        let statMap = CadenceTimelineMap(
+            points: [
+                .init(source: 0, trimmed: 0), .init(source: 1, trimmed: 1),
+                .init(source: 3, trimmed: 1), .init(source: 4, trimmed: 2),
+                .init(source: 6, trimmed: 2), .init(source: 7, trimmed: 3),
+            ],
+            sourceDuration: 7, trimmedDuration: 3)
+
+        let book = Audiobook(title: "bookstat", sourcePath: "bookstat")  // cadenceSavedSeconds nil
+        let player = AudiobookPlayer()
+        player.debugBeginCadenceStatSession(map: statMap, book: book)
+
+        player.debugFeedPlayerTick(0.0)   // baseline only
+        check("BookStat: per-book starts nil/0 before any accrual",
+              (player.debugBookSavedSeconds ?? 0) == 0)
+
+        // Gap-crossing tick 0.8 → 1.2: saved ≈ 2.0 s should hit BOTH totals equally.
+        let pStart = 0.8, pEnd = 1.2
+        let expected = max(0, (statMap.toSource(pEnd) - statMap.toSource(pStart)) - (pEnd - pStart))
+        player.debugFeedPlayerTick(pStart)   // re-baseline at 0.8 (kept zone, ~0 accrual)
+        let globalBeforeGap = CadenceStats.totalSavedSeconds
+        let bookBeforeGap = player.debugBookSavedSeconds ?? 0
+        player.debugFeedPlayerTick(pEnd)
+        let globalGain = CadenceStats.totalSavedSeconds - globalBeforeGap
+        let bookGain = (player.debugBookSavedSeconds ?? 0) - bookBeforeGap
+        check("BookStat: per-book gain ≈ global gain ≈ \(String(format: "%.1f", expected)) s on gap-cross",
+              abs(bookGain - expected) < 0.15 && abs(bookGain - globalGain) < 0.001)
+
+        // Backward tick must not inflate per-book.
+        let bookBeforeBack = player.debugBookSavedSeconds ?? 0
+        player.debugFeedPlayerTick(0.3)
+        check("BookStat: backward tick does not change per-book",
+              (player.debugBookSavedSeconds ?? 0) == bookBeforeBack)
+
+        player.debugEndCadenceStatSession()
+        return failures
+    }
+
+    /// S3 verification: the global default-tier pref persists, a nil-override book follows it, and
+    /// the "across N audiobooks" count helper counts only books with accrued savings.
+    static func runCadenceSettingsChecks() -> Int {
+        var failures = 0
+        func check(_ name: String, _ condition: Bool) {
+            print("\(tag): \(condition ? "PASS" : "FAIL") — \(name)")
+            if !condition { failures += 1 }
+        }
+        let wasEnabled = CadencePreferences.isEnabled
+        let wasDefault = CadencePreferences.defaultTier
+        defer { CadencePreferences.isEnabled = wasEnabled; CadencePreferences.defaultTier = wasDefault }
+
+        CadencePreferences.defaultTier = .aggressive
+        check("Settings: global defaultTier persists and reads back", CadencePreferences.defaultTier == .aggressive)
+
+        CadencePreferences.isEnabled = true
+        let inheriting = Audiobook(title: "s", sourcePath: "s")  // nil override
+        check("Settings: nil-override book resolves to the new global default",
+              inheriting.resolvedCadence == .on(.aggressive))
+
+        let books = [
+            Audiobook(title: "a", sourcePath: "a", cadenceSavedSeconds: 120),
+            Audiobook(title: "b", sourcePath: "b", cadenceSavedSeconds: 0),
+            Audiobook(title: "c", sourcePath: "c"),                      // nil
+            Audiobook(title: "d", sourcePath: "d", cadenceSavedSeconds: 5),
+        ]
+        check("Settings: countWithCadenceSavings counts only books with >0 saved",
+              Audiobook.countWithCadenceSavings(books) == 2)
         return failures
     }
 

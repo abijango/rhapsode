@@ -56,6 +56,10 @@ final class Audiobook {
     /// selection are skipped permanently for this book. Additive optional (default nil treated as
     /// false) → lightweight, CloudKit-safe migration. Mirror of `cadenceTier` pattern.
     var cadenceUnavailable: Bool?
+    /// Cumulative seconds of silence Cadence has trimmed away **for this book**, accrued as the
+    /// user actually listens through trimmed audio. Drives the per-book stat and the global
+    /// "across N audiobooks" count. Additive optional (nil treated as 0) → lightweight migration.
+    var cadenceSavedSeconds: Double?
 
     init(
         id: UUID = UUID(),
@@ -69,7 +73,8 @@ final class Audiobook {
         totalDuration: Double = 0,
         progressUpdatedAt: Date? = nil,
         cadenceTier: String? = nil,
-        cadenceUnavailable: Bool? = nil
+        cadenceUnavailable: Bool? = nil,
+        cadenceSavedSeconds: Double? = nil
     ) {
         self.id = id
         self.title = title
@@ -83,6 +88,7 @@ final class Audiobook {
         self.progressUpdatedAt = progressUpdatedAt
         self.cadenceTier = cadenceTier
         self.cadenceUnavailable = cadenceUnavailable
+        self.cadenceSavedSeconds = cadenceSavedSeconds
     }
 
     /// Tracks in playback order. Always sort by `order` — never rely on the

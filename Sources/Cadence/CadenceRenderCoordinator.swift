@@ -26,16 +26,17 @@ actor CadenceRenderCoordinator {
         startNextIfIdle()
     }
 
-    /// Request a render of all of a book's files for its effective tier, if the feature is on and
-    /// the work isn't already valid. Idempotent and cheap — returns immediately.
-    /// WP10: also no-ops for books flagged as `cadenceUnavailable` (DRM/undecodable).
+    /// Request a render of all of a book's files for its resolved tier, if Cadence is active for
+    /// this book. Idempotent and cheap — returns immediately. Gating flows through the book's
+    /// `resolvedCadence` (so a per-book forced profile renders even when global is off; an "off"
+    /// or DRM book is skipped). `process` re-checks authoritatively.
     func enqueue(bookID: UUID) {
-        guard CadencePreferences.isEnabled else { return }
-        // WP10: skip if the book is permanently flagged unavailable (checked again in process).
+        // Best-effort skip when we can resolve to .off now; otherwise queue and let process decide
+        // (covers the rare enqueue-before-configure case where there is no container yet).
         if let container,
            let book = (try? ModelContext(container).fetch(FetchDescriptor<Audiobook>()))?
                .first(where: { $0.id == bookID }),
-           book.cadenceUnavailable == true { return }
+           case .off = book.resolvedCadence { return }
         if currentBookID != bookID && !queue.contains(bookID) { queue.append(bookID) }
         startNextIfIdle()
     }
@@ -74,10 +75,9 @@ actor CadenceRenderCoordinator {
         let ctx = ModelContext(container)
         guard let book = (try? ctx.fetch(FetchDescriptor<Audiobook>()))?.first(where: { $0.id == bookID }) else { return }
 
-        // WP10: skip books permanently flagged as undecodable (DRM or corrupt).
-        if book.cadenceUnavailable == true { return }
-
-        let tier = book.effectiveCadenceTier
+        // Authoritative gate: render only when Cadence resolves to ON for this book, at the
+        // resolved tier. Covers global-off-with-per-book-force-on, per-book "off", and DRM.
+        guard case .on(let tier) = book.resolvedCadence else { return }
         let jobs = Self.buildJobs(for: book)
 
         for job in jobs {

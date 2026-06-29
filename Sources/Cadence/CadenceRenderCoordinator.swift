@@ -28,8 +28,14 @@ actor CadenceRenderCoordinator {
 
     /// Request a render of all of a book's files for its effective tier, if the feature is on and
     /// the work isn't already valid. Idempotent and cheap — returns immediately.
+    /// WP10: also no-ops for books flagged as `cadenceUnavailable` (DRM/undecodable).
     func enqueue(bookID: UUID) {
         guard CadencePreferences.isEnabled else { return }
+        // WP10: skip if the book is permanently flagged unavailable (checked again in process).
+        if let container,
+           let book = (try? ModelContext(container).fetch(FetchDescriptor<Audiobook>()))?
+               .first(where: { $0.id == bookID }),
+           book.cadenceUnavailable == true { return }
         if currentBookID != bookID && !queue.contains(bookID) { queue.append(bookID) }
         startNextIfIdle()
     }
@@ -68,6 +74,9 @@ actor CadenceRenderCoordinator {
         let ctx = ModelContext(container)
         guard let book = (try? ctx.fetch(FetchDescriptor<Audiobook>()))?.first(where: { $0.id == bookID }) else { return }
 
+        // WP10: skip books permanently flagged as undecodable (DRM or corrupt).
+        if book.cadenceUnavailable == true { return }
+
         let tier = book.effectiveCadenceTier
         let jobs = Self.buildJobs(for: book)
 
@@ -101,12 +110,28 @@ actor CadenceRenderCoordinator {
                                      fingerprint: job.fingerprint, tier: tier.rawValue,
                                      trimmedRelPath: outputRel, result: result)
                 try? ctx.save()
+                // WP6: evict LRU renditions if total on-disk bytes exceeds the cap.
+                CadenceCache.evictIfNeeded(context: ctx)
             } catch is CancellationError {
                 try? FileManager.default.removeItem(at: outputURL)
                 break
+            } catch let ioErr as AudioIOError {
+                // WP10: DRM-protected or undecodable file — mark the book permanently unavailable
+                // so future enqueues are no-ops. Playback always falls back to the original.
+                try? FileManager.default.removeItem(at: outputURL)
+                switch ioErr {
+                case .noAudioTrack, .undecodable:
+                    // Re-fetch the book into this context (the `book` reference above may be stale).
+                    if let b = (try? ctx.fetch(FetchDescriptor<Audiobook>()))?.first(where: { $0.id == bookID }) {
+                        b.cadenceUnavailable = true
+                        try? ctx.save()
+                    }
+                    return  // stop processing all remaining jobs for this book
+                default:
+                    break   // other AudioIOError (tooLong, allocationFailed, etc.) — non-permanent, skip job
+                }
             } catch {
-                // Undecodable (e.g. DRM) or render failure: leave the partial file removed and
-                // skip — playback falls back to the original. WP10 persists an "unavailable" flag.
+                // Other render failure: remove partial output; playback falls back to the original.
                 try? FileManager.default.removeItem(at: outputURL)
             }
         }
@@ -137,6 +162,8 @@ actor CadenceRenderCoordinator {
         for relPath in order {
             guard let tracks = byFile[relPath],
                   let sourceURL = try? ContainerPaths.url(forRelativePath: relPath),
+                  // WP10: never render partial downloads — guard the file physically exists.
+                  FileManager.default.fileExists(atPath: sourceURL.path),
                   let fingerprint = CadenceFingerprint.of(fileAt: sourceURL) else { continue }
             // Chapter start offsets within this file = running prefix sums of durations.
             var cutPoints: [TimeInterval] = []

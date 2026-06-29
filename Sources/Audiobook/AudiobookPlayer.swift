@@ -30,17 +30,77 @@ final class AudiobookPlayer {
     private var context: ModelContext?
     private var lastPersist = Date(timeIntervalSince1970: 0)
 
-    // MARK: Cadence (WP5)
+    // MARK: Cadence (WP5 / WP6 / WP8)
     /// Source↔trimmed map for the file currently loaded into `player`. `nil` ⇒ the loaded file
     /// IS the original (identity mapping). Set in `loadCurrentItem`: per-file for multi-file
     /// books, once for the single shared M4B file. All position math stays source-domain; we map
     /// only at the `player` boundary via `srcToPlayer` / `playerToSrc`.
     private var activeMap: CadenceTimelineMap?
 
+    /// WP8 — smart resume flag. Set `true` on `pause()` and on initial `load()`, cleared by any
+    /// deliberate seek (`seekWithinBook`, `seekInTrack`, `jump`) so a scrub-then-play is never
+    /// yanked back. Consumed and cleared by `play()`.
+    private var pendingResumeNudge = false
+
+    /// The `trimmedRelPath` of the rendition currently loaded (if any). Used to update the
+    /// `CadenceInUseRegistry` on load and clear on teardown / track-change.
+    private var inUseTrimmedRelPath: String?
+
     /// Source-domain time → the time to hand `player.seek` (trimmed time when a trim is loaded).
     private func srcToPlayer(_ source: Double) -> Double { activeMap?.toTrimmed(source) ?? source }
     /// A time read from `player` → source-domain time.
     private func playerToSrc(_ playerTime: Double) -> Double { activeMap?.toSource(playerTime) ?? playerTime }
+
+    // MARK: WP8 — Smart resume
+
+    /// Nudge the source-domain playback position back to just before a pause (spec §11).
+    ///
+    /// Strategy:
+    /// - When a trimmed rendition is loaded (`activeMap != nil`): ask the map for the nearest
+    ///   silence onset within ~3 s. That is the source time where kept audio resumes after a
+    ///   collapsed gap — exactly the start of the next word/phrase. If found, seek there.
+    /// - Fallback (no map, or no onset within lookback): step back a fixed ~1.5 s.
+    /// - Only ever nudges BACKWARD. A position at 0 is left as-is.
+    ///
+    /// The map's source axis is **file-local** for both M4B and MP3:
+    /// - single-file (M4B): book source time (= prefix[index] + offsetInTrack) IS file-local.
+    /// - multi-file (MP3): `offsetInTrack` is already file-local per-track.
+    ///
+    /// Called only from `play()` when `pendingResumeNudge` is set.
+    private func applySmartResumeNudge() {
+        // Capture the current source position. For single-file, bookTime = playerToSrc(player time).
+        // For multi-file, offsetInTrack is already file-local source time.
+        let currentSource: Double = isSingleFile ? bookTime : offsetInTrack
+        guard currentSource.isFinite && currentSource > 0 else { return }
+
+        let lookback = 3.0
+        let fixedBackstep = 1.5
+
+        if let map = activeMap,
+           let onset = map.nearestSilenceOnset(beforeSource: currentSource, within: lookback) {
+            // Onset is guaranteed <= currentSource by the helper; clamp to >= 0 for safety.
+            let target = max(onset, 0)
+            if target < currentSource { performSmartSeek(toSource: target) }
+        } else {
+            // Fallback: fixed backstep, only if it would move backward.
+            let target = max(currentSource - fixedBackstep, 0)
+            if target < currentSource { performSmartSeek(toSource: target) }
+        }
+    }
+
+    /// Issue the seek for smart resume. Delegates to the same internal seek helpers so the
+    /// source↔trimmed mapping is applied exactly once, at the AVPlayer boundary.
+    private func performSmartSeek(toSource target: Double) {
+        if isSingleFile {
+            // single-file: `target` IS book-level source time (prefix sums already included).
+            seekSingleFile(to: target)
+        } else {
+            // multi-file: `target` is file-local (= track-level) source time.
+            let clamped = min(max(target, 0), trackDuration)
+            player.seek(to: cmTime(srcToPlayer(clamped)))
+            offsetInTrack = clamped
+        }
+    }
 
     var currentTrack: AudiobookTrack? { tracks.indices.contains(currentIndex) ? tracks[currentIndex] : nil }
     var trackDuration: Double { currentTrack?.duration ?? 0 }
@@ -60,6 +120,7 @@ final class AudiobookPlayer {
         configureRemoteCommands()
         loadCurrentItem(seekTo: offsetInTrack)
         addPeriodicObserver()
+        pendingResumeNudge = true   // WP8: initial load arms the smart-resume nudge
     }
 
     /// Persist position and stop. Call when leaving the player.
@@ -70,6 +131,11 @@ final class AudiobookPlayer {
         timeObserver = nil
         if let endObserver { NotificationCenter.default.removeObserver(endObserver) }
         endObserver = nil
+        // WP6: unmark the in-use rendition so the LRU eviction may reclaim it.
+        if let rel = inUseTrimmedRelPath {
+            CadenceInUseRegistry.shared.clearInUse(rel)
+            inUseTrimmedRelPath = nil
+        }
     }
 
     // MARK: Transport
@@ -77,6 +143,13 @@ final class AudiobookPlayer {
     func togglePlayPause() { isPlaying ? pause() : play() }
 
     func play() {
+        // WP8 — smart resume: nudge position back to the nearest silence onset before playing,
+        // but only when the flag was armed (initial load or pause). Deliberate seeks clear the
+        // flag so scrub-then-play is never yanked back.
+        if pendingResumeNudge {
+            pendingResumeNudge = false
+            applySmartResumeNudge()
+        }
         isPlaying = true
         player.rate = rate
         updateNowPlaying()
@@ -85,6 +158,7 @@ final class AudiobookPlayer {
     func pause() {
         isPlaying = false
         player.pause()
+        pendingResumeNudge = true   // WP8: arm so next play() nudges
         persist(force: true)
         updateNowPlaying()
     }
@@ -96,6 +170,7 @@ final class AudiobookPlayer {
 
     /// Seek within the current track (0...trackDuration).
     func seekInTrack(to seconds: Double) {
+        pendingResumeNudge = false   // WP8: deliberate seek — do not nudge on next play()
         let clamped = min(max(seconds, 0), trackDuration)
         if isSingleFile {
             seekSingleFile(to: prefixSums[currentIndex] + clamped)
@@ -107,6 +182,7 @@ final class AudiobookPlayer {
     }
 
     func jump(toTrack index: Int) {
+        pendingResumeNudge = false   // WP8: track jump is deliberate — do not nudge
         guard tracks.indices.contains(index) else { return }
         currentIndex = index
         offsetInTrack = 0
@@ -124,12 +200,20 @@ final class AudiobookPlayer {
 
     private func loadCurrentItem(seekTo offset: Double) {
         guard let track = currentTrack else { return }
+        // WP6: clear the previous in-use registration before selecting the new file.
+        if let old = inUseTrimmedRelPath {
+            CadenceInUseRegistry.shared.clearInUse(old)
+            inUseTrimmedRelPath = nil
+        }
         // Cadence source selection: trimmed rendition when one is valid, else the original.
         // Set `activeMap` BEFORE any srcToPlayer/seek below (the multi-file branch seeks at once).
         let url: URL
         if let trimmed = trimmedSource(for: track.fileRelPath) {
             url = trimmed.url
             activeMap = trimmed.map
+            // WP6: mark this rendition as in-use so the eviction routine won't remove it.
+            CadenceInUseRegistry.shared.markInUse(trimmed.relPath)
+            inUseTrimmedRelPath = trimmed.relPath
         } else if let original = try? ContainerPaths.url(forRelativePath: track.fileRelPath) {
             url = original
             activeMap = nil
@@ -151,7 +235,8 @@ final class AudiobookPlayer {
 
     /// The trimmed rendition to play for `relPath`, if the feature is on and a valid rendition's
     /// audio is present on disk; else `nil` (play the original). Touches `lastUsedAt` for LRU.
-    private func trimmedSource(for relPath: String) -> (url: URL, map: CadenceTimelineMap)? {
+    /// WP6: also returns `relPath` so `loadCurrentItem` can register it in the in-use registry.
+    private func trimmedSource(for relPath: String) -> (url: URL, map: CadenceTimelineMap, relPath: String)? {
         guard let book, let context else { return nil }
         return Self.selectTrimmedSource(bookID: book.id, relPath: relPath,
                                         tier: book.effectiveCadenceTier.rawValue, context: context)
@@ -160,20 +245,109 @@ final class AudiobookPlayer {
     /// Pure selection contract (testable without an `AVPlayer`): feature on + a rendition matching
     /// the validity key (fingerprint + versions + tier, not evicted) whose `.m4a` exists on disk +
     /// a decodable timeline map. Any miss ⇒ `nil`.
+    ///
+    /// WP6 — eviction / regenerate-on-demand: if a rendition row exists for this (book, file) but
+    /// its audio is evicted (`audioEvicted == true`) or the `.m4a` is missing from disk, return
+    /// `nil` AND enqueue a re-render so the file is rebuilt. Other misses (no row, tier/fingerprint
+    /// mismatch) do NOT re-enqueue — those cases are handled by the coordinator on its own trigger.
+    /// The returned tuple now carries `relPath` so callers can update the in-use registry.
+    /// WP10: returns `nil` immediately for books flagged `cadenceUnavailable` (DRM/undecodable).
     static func selectTrimmedSource(bookID: UUID, relPath: String, tier: String,
-                                    context: ModelContext) -> (url: URL, map: CadenceTimelineMap)? {
+                                    context: ModelContext) -> (url: URL, map: CadenceTimelineMap, relPath: String)? {
+        // WP10: DRM/undecodable books are never trimmed.
+        if let book = (try? context.fetch(FetchDescriptor<Audiobook>()))?.first(where: { $0.id == bookID }),
+           book.cadenceUnavailable == true { return nil }
+
         guard CadencePreferences.isEnabled,
               let srcURL = try? ContainerPaths.url(forRelativePath: relPath),
-              let fingerprint = CadenceFingerprint.of(fileAt: srcURL),
-              let rendition = (try? context.fetch(FetchDescriptor<TrimmedRendition>()))?
-                  .first(where: { $0.bookID == bookID && $0.sourceFileRelPath == relPath }),
-              rendition.isValid(forFingerprint: fingerprint, tier: tier),
-              let url = try? ContainerPaths.cacheURL(forRelativePath: rendition.trimmedRelPath),
-              FileManager.default.fileExists(atPath: url.path),
+              let fingerprint = CadenceFingerprint.of(fileAt: srcURL)
+        else { return nil }
+
+        guard let rendition = (try? context.fetch(FetchDescriptor<TrimmedRendition>()))?
+                .first(where: { $0.bookID == bookID && $0.sourceFileRelPath == relPath })
+        else { return nil }   // no row — not an eviction, don't re-enqueue
+
+        // Detect evicted or missing audio and trigger background re-render.
+        let fileURL = try? ContainerPaths.cacheURL(forRelativePath: rendition.trimmedRelPath)
+        let fileMissing = fileURL == nil || !FileManager.default.fileExists(atPath: fileURL!.path)
+        if rendition.audioEvicted || fileMissing {
+            Task { await CadenceRenderCoordinator.shared.enqueue(bookID: bookID) }
+            return nil
+        }
+
+        guard rendition.isValid(forFingerprint: fingerprint, tier: tier),
+              let url = fileURL,
               let map = try? JSONDecoder().decode(CadenceTimelineMap.self, from: rendition.timelineMapBlob)
         else { return nil }
+
         rendition.lastUsedAt = Date()
-        return (url, map)
+        return (url, map, rendition.trimmedRelPath)
+    }
+
+    /// WP10 — mid-session swap. Re-evaluates whether the current track should play the trimmed or
+    /// original source. If the selection changed (e.g. Cadence was toggled off, or a new rendition
+    /// became available), swaps the `AVPlayerItem` **at the current mapped source position** so
+    /// there is no audible jump:
+    ///
+    /// 1. Capture `sourceNow` from the **old** map (before any changes).
+    /// 2. Compute the new selection. If unchanged, return.
+    /// 3. Swap the in-use registry, `activeMap`, and `player.currentItem`.
+    /// 4. Seek to `sourceNow` through the **new** map.
+    ///
+    /// Call from: (a) Cadence toggle-off mid-play (spec §12); (b) WP9 tier-change ready.
+    func applyCadenceChange() {
+        guard let track = currentTrack else { return }
+
+        // 1. Capture current source position BEFORE mutating activeMap.
+        let sourceNow: Double
+        if isSingleFile {
+            sourceNow = bookTime   // bookTime already calls playerToSrc (uses old activeMap)
+        } else {
+            sourceNow = offsetInTrack   // multi-file: offsetInTrack is already source-domain
+        }
+
+        let wasPlaying = isPlaying
+
+        // 2. Evaluate new selection.
+        let newSelection = trimmedSource(for: track.fileRelPath)
+        let newRelPath = newSelection?.relPath
+
+        // No-op if already loaded the same source (nil == nil, or same relPath).
+        if newRelPath == inUseTrimmedRelPath { return }
+
+        // 3. Swap in-use registry.
+        if let old = inUseTrimmedRelPath {
+            CadenceInUseRegistry.shared.clearInUse(old)
+            inUseTrimmedRelPath = nil
+        }
+
+        let newURL: URL
+        if let sel = newSelection {
+            newURL = sel.url
+            activeMap = sel.map
+            CadenceInUseRegistry.shared.markInUse(sel.relPath)
+            inUseTrimmedRelPath = sel.relPath
+        } else {
+            guard let orig = try? ContainerPaths.url(forRelativePath: track.fileRelPath) else { return }
+            newURL = orig
+            activeMap = nil
+        }
+
+        // 4. Swap the player item and seek to the preserved source position.
+        player.replaceCurrentItem(with: AVPlayerItem(url: newURL))
+
+        if isSingleFile {
+            // For single-file M4B: seek to the absolute book position using the new map.
+            // The seek is issued immediately; AVPlayer queues it until the item is ready.
+            seekSingleFile(to: sourceNow)
+        } else {
+            // Multi-file: seek within the current track file using the new map.
+            player.seek(to: cmTime(srcToPlayer(sourceNow)))
+            observeItemEnd()   // re-attach end observer to the new AVPlayerItem
+        }
+
+        if wasPlaying { player.rate = rate }
+        updateNowPlaying()
     }
 
     private func seekSingleFile(to bookTime: Double) {
@@ -182,6 +356,7 @@ final class AudiobookPlayer {
     }
 
     private func seekWithinBook(toBookTime t: Double) {
+        pendingResumeNudge = false   // WP8: deliberate seek — do not nudge on next play()
         let clamped = min(max(t, 0), totalDuration)
         if isSingleFile {
             seekSingleFile(to: clamped)
@@ -365,5 +540,15 @@ extension AudiobookPlayer {
     /// Source-domain position via the read path (`playerToSrc`) — for asserting it round-trips to S.
     var debugBookTime: Double { bookTime }
     func debugSeek(toSourceTime t: Double) { seekWithinBook(toBookTime: t) }
+    /// WP10 test seam: expose `applyCadenceChange` to the self-test harness.
+    func debugApplyCadenceChange() { applyCadenceChange() }
+    /// WP8 test seam: arm the resume nudge flag and immediately trigger the nudge (without setting
+    /// `isPlaying`). This lets the self-test drive the pure nudge logic deterministically without
+    /// launching real playback.
+    func debugSmartResumeNudge() {
+        pendingResumeNudge = true
+        pendingResumeNudge = false
+        applySmartResumeNudge()
+    }
 }
 #endif

@@ -60,9 +60,16 @@ struct CadenceRenderer {
     func render(_ req: CadenceRenderRequest) throws -> CadenceRenderResult {
         let settings = CadenceSettings(preset: req.preset)
 
-        // Probe format + duration. Throws if undecodable (e.g. DRM) — the caller marks the book
-        // Cadence-unavailable (WP10).
-        let probe = try AVAudioFile(forReading: req.sourceURL)
+        // Probe format + duration. Wraps any AVAudioFile failure as AudioIOError.undecodable so the
+        // coordinator's WP10 catch can classify DRM/corrupt files and mark the book unavailable.
+        //
+        // Safety assumption: callers guarantee the file is COMPLETE before calling render.
+        // BackgroundDownloader uses an atomic fm.moveItem before enqueuing, so a partial/in-flight
+        // download cannot reach here. If that trigger topology ever changes, this wrapping would
+        // over-capture a transient failure as a permanent disable — review at that point.
+        let probe: AVAudioFile
+        do { probe = try AVAudioFile(forReading: req.sourceURL) }
+        catch { throw AudioIOError.undecodable(underlying: error) }
         let sampleRate = probe.processingFormat.sampleRate
         let channels = probe.processingFormat.channelCount
         let originalDuration = Double(probe.length) / sampleRate

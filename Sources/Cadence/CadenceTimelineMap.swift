@@ -31,6 +31,33 @@ struct CadenceTimelineMap: Codable, Sendable, Equatable {
         interpolate(trimmed, key: \.trimmed, value: \.source)
     }
 
+    /// Smart resume (spec §11): find the nearest **silence onset** that precedes `s` in source time.
+    ///
+    /// A silence onset is the source coordinate at which a collapsed gap ENDS and kept audio
+    /// resumes — i.e. the point `b.source` in a consecutive pair `(a, b)` where the trimmed
+    /// coordinate stayed flat (`b.trimmed ≈ a.trimmed`, within a small epsilon to tolerate float
+    /// rounding in the builder) while source advanced (`b.source > a.source`). That is exactly
+    /// the "start of the next word/phrase" the user should resume from.
+    ///
+    /// Returns the **largest** such onset `o` satisfying `(s - lookback) < o ≤ s`, or `nil` when
+    /// no silence falls within `lookback`. Never returns a value > `s` (only ever nudges backward).
+    func nearestSilenceOnset(beforeSource s: TimeInterval, within lookback: TimeInterval) -> TimeInterval? {
+        let lowerBound = s - lookback
+        var best: TimeInterval? = nil
+        let flatEpsilon = 1e-6   // tolerate float rounding in the trimmed axis from the builder
+        for i in 0 ..< (points.count - 1) {
+            let a = points[i], b = points[i + 1]
+            // A flat run: source advances while trimmed stays flat → collapsed silence.
+            let isFlatRun = b.source > a.source + flatEpsilon
+                         && abs(b.trimmed - a.trimmed) < flatEpsilon
+            guard isFlatRun else { continue }
+            let onset = b.source   // the point where kept audio resumes
+            guard onset > lowerBound && onset <= s else { continue }
+            if let prev = best { if onset > prev { best = onset } } else { best = onset }
+        }
+        return best
+    }
+
     /// Generic monotonic piecewise-linear lookup along one axis. Binary-searches the last point
     /// whose `key` ≤ `x`, then linearly interpolates `value` into the next strictly-increasing step.
     private func interpolate(_ x: Double, key: KeyPath<Point, Double>,

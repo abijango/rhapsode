@@ -52,6 +52,10 @@ final class Audiobook {
     /// ("default"/"more"/"aggressive"). `nil` → inherit the global default tier. Resolve via
     /// `effectiveCadenceTier`. Additive optional → lightweight, CloudKit-safe migration.
     var cadenceTier: String?
+    /// Set to `true` when the audio is undecodable (e.g. DRM-protected) — Cadence rendering and
+    /// selection are skipped permanently for this book. Additive optional (default nil treated as
+    /// false) → lightweight, CloudKit-safe migration. Mirror of `cadenceTier` pattern.
+    var cadenceUnavailable: Bool?
 
     init(
         id: UUID = UUID(),
@@ -64,7 +68,8 @@ final class Audiobook {
         lastOffsetSeconds: Double = 0,
         totalDuration: Double = 0,
         progressUpdatedAt: Date? = nil,
-        cadenceTier: String? = nil
+        cadenceTier: String? = nil,
+        cadenceUnavailable: Bool? = nil
     ) {
         self.id = id
         self.title = title
@@ -77,6 +82,7 @@ final class Audiobook {
         self.totalDuration = totalDuration
         self.progressUpdatedAt = progressUpdatedAt
         self.cadenceTier = cadenceTier
+        self.cadenceUnavailable = cadenceUnavailable
     }
 
     /// Tracks in playback order. Always sort by `order` — never rely on the

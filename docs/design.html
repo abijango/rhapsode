@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Rhapsode — Design &amp; Architecture</title>
+<style>
+  :root{
+    --ink:#1d2433; --ink-2:#3a4253; --muted:#5b6472; --faint:#8a93a0;
+    --paper:#f7f8f6; --surface:#ffffff; --line:#e6eae6; --line-2:#d4ded9;
+    --accent:#2f6f6a; --accent-soft:#e8efed; --ochre:#9c6b2e; --ochre-soft:#f0ece3;
+    --serif:"Iowan Old Style",Palatino,Charter,Georgia,serif;
+    --sans:-apple-system,"Segoe UI",system-ui,sans-serif;
+    --mono:ui-monospace,"SF Mono","Cascadia Code",Menlo,monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--paper);color:var(--ink);font-family:var(--sans);
+       line-height:1.65;-webkit-font-smoothing:antialiased;}
+  .wrap{max-width:880px;margin:0 auto;padding:0 24px 96px;}
+  .col{max-width:680px;}
+  h1,h2,h3{font-family:var(--serif);font-weight:700;text-wrap:balance;line-height:1.2;color:var(--ink);}
+  h2{font-size:26px;margin:0 0 6px;}
+  h3{font-size:18px;margin:0 0 4px;}
+  p{margin:0 0 14px;}
+  a{color:var(--accent);}
+  .eyebrow{font-family:var(--sans);font-size:11px;font-weight:700;letter-spacing:1.6px;
+           text-transform:uppercase;color:var(--accent);margin:0 0 10px;}
+  .mono{font-family:var(--mono);}
+  code{font-family:var(--mono);font-size:.88em;background:var(--accent-soft);color:#27514d;
+       padding:1px 5px;border-radius:4px;}
+
+  /* hero */
+  header{padding:64px 0 40px;border-bottom:1px solid var(--line-2);}
+  .wordmark{font-family:var(--serif);font-size:54px;font-weight:700;letter-spacing:-.5px;margin:0;}
+  .tagline{font-size:18px;color:var(--ink-2);max-width:560px;margin:10px 0 0;}
+  .lede{font-size:14px;color:var(--muted);max-width:600px;margin:14px 0 0;}
+  .facts{display:flex;flex-wrap:wrap;gap:10px;margin-top:26px;}
+  .fact{background:var(--surface);border:1px solid var(--line-2);border-radius:10px;
+        padding:10px 14px;}
+  .fact b{display:block;font-family:var(--mono);font-size:12px;color:var(--accent);
+          letter-spacing:.3px;text-transform:uppercase;margin-bottom:2px;font-weight:600;}
+  .fact span{font-size:14px;color:var(--ink);}
+
+  section{padding:44px 0;border-bottom:1px solid var(--line);}
+  section:last-child{border-bottom:0;}
+
+  .diagram{margin:22px 0 6px;border:1px solid var(--line-2);border-radius:14px;
+           background:var(--surface);padding:8px;overflow-x:auto;}
+  .diagram svg{display:block;min-width:760px;width:100%;height:auto;}
+  .caption{font-size:12.5px;color:var(--faint);font-style:italic;}
+
+  /* numbered flows */
+  .flow{display:flex;flex-direction:column;gap:14px;margin-top:18px;}
+  .step{display:grid;grid-template-columns:34px 1fr;gap:14px;align-items:start;}
+  .step .n{font-family:var(--mono);font-size:13px;font-weight:600;color:var(--accent);
+           border:1px solid var(--line-2);border-radius:8px;height:30px;display:flex;
+           align-items:center;justify-content:center;background:var(--surface);}
+  .step h3{font-size:15px;margin:3px 0 2px;font-family:var(--sans);font-weight:700;}
+  .step p{font-size:14px;color:var(--muted);margin:0;}
+
+  /* feature cards */
+  .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:14px;margin-top:18px;}
+  .card{background:var(--surface);border:1px solid var(--line-2);border-radius:12px;padding:18px 18px 16px;}
+  .card .k{font-family:var(--mono);font-size:11px;letter-spacing:.4px;text-transform:uppercase;
+           color:var(--accent);font-weight:600;margin-bottom:8px;}
+  .card.text .k{color:var(--ochre);}
+  .card h3{font-size:16px;margin:0 0 8px;font-family:var(--sans);}
+  .card ul{margin:0;padding-left:18px;}
+  .card li{font-size:13.5px;color:var(--ink-2);margin-bottom:4px;}
+
+  /* module table */
+  .tablewrap{overflow-x:auto;margin-top:16px;border:1px solid var(--line-2);border-radius:12px;}
+  table{border-collapse:collapse;width:100%;min-width:560px;font-size:13.5px;background:var(--surface);}
+  th,td{text-align:left;padding:11px 14px;border-bottom:1px solid var(--line);vertical-align:top;}
+  th{font-size:11px;letter-spacing:.6px;text-transform:uppercase;color:var(--muted);font-weight:700;background:#fbfcfb;}
+  tr:last-child td{border-bottom:0;}
+  td.path{font-family:var(--mono);font-size:12.5px;color:var(--accent);white-space:nowrap;}
+  td .t{font-family:var(--mono);font-size:11.5px;color:var(--ink-2);}
+
+  /* status pills */
+  .status{display:flex;flex-direction:column;gap:9px;margin-top:16px;}
+  .row{display:flex;align-items:center;gap:12px;font-size:14px;}
+  .pill{font-family:var(--mono);font-size:10.5px;font-weight:700;letter-spacing:.4px;
+        text-transform:uppercase;padding:3px 9px;border-radius:999px;white-space:nowrap;}
+  .pill.done{background:var(--accent-soft);color:#27514d;}
+  .pill.device{background:var(--ochre-soft);color:#7a5320;}
+  .row span{color:var(--ink-2);}
+
+  .two{display:grid;grid-template-columns:1fr 1fr;gap:28px;}
+  @media(max-width:620px){.two{grid-template-columns:1fr;}}
+  ul.tight{margin:0;padding-left:20px;}
+  ul.tight li{margin-bottom:6px;color:var(--ink-2);font-size:14px;}
+  .accentbar{height:3px;width:46px;background:var(--accent);border-radius:2px;margin-bottom:20px;}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <p class="eyebrow">Design &amp; Architecture</p>
+    <h1 class="wordmark">Rhapsode</h1>
+    <p class="tagline">An offline-first audiobook &amp; EPUB player that keeps your library in a Dropbox app folder — and trims the dead air out of narration so books play faster without sounding edited.</p>
+    <p class="lede">Native SwiftUI for iPhone, iPad and Mac (Catalyst). Files are downloaded in full and played from local storage; nothing streams. Dropbox is reached over its plain HTTP API so the design ports cleanly to a planned Android client.</p>
+    <div class="facts">
+      <div class="fact"><b>Platforms</b><span>iOS · iPadOS · macOS (Catalyst)</span></div>
+      <div class="fact"><b>Source</b><span>Dropbox App folder · HTTP + OAuth PKCE</span></div>
+      <div class="fact"><b>Persistence</b><span>SwiftData · relative paths</span></div>
+      <div class="fact"><b>Signature feature</b><span>Cadence silence-trimming</span></div>
+    </div>
+  </header>
+
+  <section>
+    <p class="eyebrow">System</p>
+    <h2>Architecture at a glance</h2>
+    <div class="col"><p>Four layers, top to bottom: SwiftUI presentation, a domain/playback layer (AVPlayer, Readium, Cadence), the library/sync/source layer behind a single <code>LibrarySource</code> protocol, and SwiftData persistence with on-device storage. Dropbox, Readium and CadenceKit are the only external dependencies.</p></div>
+    <div class="diagram" role="img" aria-label="Rhapsode layered architecture">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1040 760" font-family="-apple-system, Segoe UI, system-ui, sans-serif" role="img" aria-label="Rhapsode architecture diagram">
+  <rect x="0" y="0" width="1040" height="760" fill="#f7f8f6"/>
+  <text x="32" y="46" font-family="Iowan Old Style, Palatino, Charter, Georgia, serif" font-size="30" font-weight="700" fill="#1d2433">Rhapsode — Architecture</text>
+  <text x="32" y="70" font-size="14" fill="#5b6472">Offline-first audiobook &amp; EPUB player · SwiftUI + SwiftData · Dropbox App-folder source · Cadence silence-trimming</text>
+  <rect x="32" y="92" width="688" height="112" rx="12" fill="#eef3f1" stroke="#d4ded9"/>
+  <text x="48" y="113" font-size="11" font-weight="700" letter-spacing="1.5" fill="#2f6f6a">PRESENTATION · SwiftUI</text>
+  <g fill="#ffffff" stroke="#c7d0cc">
+    <rect x="48" y="122" width="208" height="66" rx="8"/>
+    <rect x="272" y="122" width="208" height="66" rx="8"/>
+    <rect x="496" y="122" width="208" height="66" rx="8"/>
+  </g>
+  <g font-size="13.5" fill="#1d2433" text-anchor="middle" font-weight="600">
+    <text x="152" y="150">Tab Shell &amp; Shelves</text>
+    <text x="376" y="150">Player / Reader</text>
+    <text x="600" y="150">Cadence &amp; Settings</text>
+  </g>
+  <g font-size="11" fill="#5b6472" text-anchor="middle">
+    <text x="152" y="170">Audiobooks · Books · Downloads</text>
+    <text x="376" y="170">PlayerView · ReaderView</text>
+    <text x="600" y="170">tier menu · time-saved · Dropbox</text>
+  </g>
+  <rect x="32" y="232" width="688" height="112" rx="12" fill="#e8efed" stroke="#cfdbd6"/>
+  <text x="48" y="253" font-size="11" font-weight="700" letter-spacing="1.5" fill="#2f6f6a">DOMAIN &amp; PLAYBACK</text>
+  <g fill="#ffffff" stroke="#c7d0cc">
+    <rect x="48" y="262" width="208" height="66" rx="8"/>
+    <rect x="272" y="262" width="208" height="66" rx="8"/>
+    <rect x="496" y="262" width="208" height="66" rx="8"/>
+  </g>
+  <g font-size="13.5" fill="#1d2433" text-anchor="middle" font-weight="600">
+    <text x="152" y="290">AudiobookPlayer</text>
+    <text x="376" y="290">EbookReader</text>
+    <text x="600" y="290">Cadence Coordinator</text>
+  </g>
+  <g font-size="11" fill="#5b6472" text-anchor="middle">
+    <text x="152" y="310">AVPlayer · now-playing · resume</text>
+    <text x="376" y="310">Readium · Locator</text>
+    <text x="600" y="310">render queue · cache · stat</text>
+  </g>
+  <rect x="32" y="372" width="688" height="112" rx="12" fill="#efece4" stroke="#ded8c9"/>
+  <text x="48" y="393" font-size="11" font-weight="700" letter-spacing="1.5" fill="#9c6b2e">LIBRARY · SYNC · SOURCE</text>
+  <g fill="#ffffff" stroke="#c7d0cc">
+    <rect x="48" y="402" width="152" height="66" rx="8"/>
+    <rect x="216" y="402" width="152" height="66" rx="8"/>
+    <rect x="384" y="402" width="152" height="66" rx="8"/>
+    <rect x="552" y="402" width="152" height="66" rx="8"/>
+  </g>
+  <g font-size="13" fill="#1d2433" text-anchor="middle" font-weight="600">
+    <text x="124" y="430">SyncManager</text>
+    <text x="292" y="430">Background</text>
+    <text x="292" y="446">Downloader</text>
+    <text x="460" y="430">ProgressSync</text>
+    <text x="628" y="430">DropboxSource</text>
+  </g>
+  <g font-size="10.5" fill="#5b6472" text-anchor="middle">
+    <text x="124" y="450">scan · longpoll · queue</text>
+    <text x="460" y="446">LWW · JSON</text>
+    <text x="628" y="450">OAuth PKCE · HTTP</text>
+  </g>
+  <rect x="32" y="512" width="688" height="156" rx="12" fill="#e9eef2" stroke="#d2dbe2"/>
+  <text x="48" y="533" font-size="11" font-weight="700" letter-spacing="1.5" fill="#3a5878">PERSISTENCE &amp; STORAGE</text>
+  <g fill="#ffffff" stroke="#c7d0cc">
+    <rect x="48" y="542" width="392" height="110" rx="8"/>
+    <rect x="456" y="542" width="120" height="110" rx="8"/>
+    <rect x="592" y="542" width="112" height="110" rx="8"/>
+  </g>
+  <text x="244" y="566" font-size="13" font-weight="700" fill="#1d2433" text-anchor="middle">SwiftData · AppSchema</text>
+  <g font-size="11.5" fill="#3a5878" text-anchor="middle" font-family="ui-monospace, SF Mono, Menlo, monospace">
+    <text x="244" y="590">Audiobook · AudiobookTrack · Book</text>
+    <text x="244" y="610">WatchedFolder · DownloadItem</text>
+    <text x="244" y="630">TrimmedRendition</text>
+  </g>
+  <text x="516" y="566" font-size="12.5" font-weight="700" fill="#1d2433" text-anchor="middle">ContainerPaths</text>
+  <g font-size="10.5" fill="#5b6472" text-anchor="middle">
+    <text x="516" y="592">Media —</text>
+    <text x="516" y="607">App Support</text>
+    <text x="516" y="628">Trims — Caches</text>
+  </g>
+  <text x="648" y="566" font-size="12.5" font-weight="700" fill="#1d2433" text-anchor="middle">Keychain</text>
+  <g font-size="10.5" fill="#5b6472" text-anchor="middle">
+    <text x="648" y="592">Dropbox</text>
+    <text x="648" y="607">OAuth token</text>
+  </g>
+  <text x="244" y="648" font-size="9.5" fill="#8a93a0" text-anchor="middle" font-style="italic">relative paths · stable UUIDs · no .unique (CloudKit-friendly)</text>
+  <text x="752" y="113" font-size="11" font-weight="700" letter-spacing="1.5" fill="#5b6472">EXTERNAL</text>
+  <rect x="752" y="372" width="256" height="112" rx="12" fill="#1d2433" stroke="#1d2433"/>
+  <text x="880" y="408" font-size="15" font-weight="700" fill="#ffffff" text-anchor="middle">Dropbox App Folder</text>
+  <text x="880" y="430" font-size="11.5" fill="#b9c4cf" text-anchor="middle">HTTP API · OAuth2 PKCE</text>
+  <g font-size="11" fill="#8fd6cf" text-anchor="middle" font-family="ui-monospace, SF Mono, Menlo, monospace">
+    <text x="880" y="452">/Audiobooks · /Books</text>
+    <text x="880" y="468">/.rhapsode-sync</text>
+  </g>
+  <rect x="752" y="122" width="256" height="50" rx="10" fill="#ffffff" stroke="#c7d0cc"/>
+  <text x="880" y="143" font-size="13" font-weight="600" fill="#1d2433" text-anchor="middle">Readium Swift toolkit</text>
+  <text x="880" y="160" font-size="10.5" fill="#5b6472" text-anchor="middle">EPUB rendering (UIKit)</text>
+  <rect x="752" y="262" width="256" height="50" rx="10" fill="#ffffff" stroke="#2f6f6a"/>
+  <text x="880" y="283" font-size="13" font-weight="600" fill="#1d2433" text-anchor="middle">CadenceKit package</text>
+  <text x="880" y="300" font-size="10.5" fill="#2f6f6a" text-anchor="middle">Accelerate + AVFoundation only</text>
+  <g stroke="#9aa6a2" stroke-width="2">
+    <line x1="376" y1="204" x2="376" y2="232"/>
+    <line x1="376" y1="344" x2="376" y2="372"/>
+    <line x1="376" y1="484" x2="376" y2="512"/>
+  </g>
+  <g fill="#9aa6a2">
+    <path d="M376 204 l-5 -9 h10 z"/><path d="M376 232 l-5 9 h10 z"/>
+    <path d="M376 344 l-5 -9 h10 z"/><path d="M376 372 l-5 9 h10 z"/>
+    <path d="M376 484 l-5 -9 h10 z"/><path d="M376 512 l-5 9 h10 z"/>
+  </g>
+  <line x1="720" y1="428" x2="752" y2="428" stroke="#2f6f6a" stroke-width="2.5"/>
+  <path d="M722 428 l9 -5 v10 z" fill="#2f6f6a"/>
+  <path d="M750 428 l-9 -5 v10 z" fill="#2f6f6a"/>
+  <line x1="752" y1="147" x2="724" y2="270" stroke="#9aa6a2" stroke-width="1.5" stroke-dasharray="4 3"/>
+  <line x1="752" y1="287" x2="704" y2="290" stroke="#2f6f6a" stroke-width="1.5" stroke-dasharray="4 3"/>
+  <text x="736" y="510" font-size="10.5" fill="#5b6472" font-style="italic">download · longpoll · progress</text>
+  <text x="600" y="220" font-size="10" fill="#2f6f6a" text-anchor="middle" font-style="italic">on download → render trim → cache</text>
+</svg>
+    </div>
+    <p class="caption">Solid teal: the Dropbox boundary and the Cadence render path. Dashed: package/framework links. Everything above the source layer is backend-agnostic.</p>
+  </section>
+
+  <section>
+    <p class="eyebrow">Data flow</p>
+    <h2>Three pipelines</h2>
+    <div class="flow">
+      <div class="step"><div class="n">1</div><div>
+        <h3>Library sync &amp; download</h3>
+        <p><code>SyncManager</code> watches the two app-folder roots (<span class="mono">/Audiobooks</span>, <span class="mono">/Books</span>) with Dropbox <code>longpoll</code>, plus a manual “Scan now”. A new file is handed to <code>BackgroundDownloader</code> (background <code>URLSession</code>) which survives suspension and cold relaunch; on completion the importer parses metadata and inserts a SwiftData row. Media lands in Application Support; only relative paths are stored.</p>
+      </div></div>
+      <div class="step"><div class="n">2</div><div>
+        <h3>Cadence render-on-download</h3>
+        <p>When a book finishes downloading (and Cadence resolves to on for it), <code>CadenceRenderCoordinator</code> analyses a mono downmix to locate silences, renders a trimmed <code>.m4a</code> from the original channels — chapter-chunked so memory stays bounded — and writes it to an evictable Caches file plus a <code>TrimmedRendition</code> row with a source↔trimmed timeline map.</p>
+      </div></div>
+      <div class="step"><div class="n">3</div><div>
+        <h3>Cross-device progress sync</h3>
+        <p>Playback/reading positions are written as small JSON files under <span class="mono">/.rhapsode-sync</span> in the app folder (one per item, last-writer-wins by timestamp) and merged on foreground. Positions are keyed by the stable, cross-device container path — start on iPhone, resume on iPad.</p>
+      </div></div>
+    </div>
+  </section>
+
+  <section>
+    <p class="eyebrow">Capabilities</p>
+    <h2>Features</h2>
+    <div class="cards">
+      <div class="card"><div class="k">Audio</div><h3>Audiobooks</h3>
+        <ul><li>Single-file M4B (chapters) &amp; MP3 folders</li><li>Play/pause, scrub, skip ±15/30s, speed</li><li>Lock-screen &amp; Control Center controls</li><li>Chapter list, resume from last position</li></ul></div>
+      <div class="card text"><div class="k">Text</div><h3>E-books</h3>
+        <ul><li>Readium reflowable EPUB reader</li><li>Font size, light / dark / sepia</li><li>Table of contents, resume to last locator</li></ul></div>
+      <div class="card"><div class="k">Source</div><h3>Sync &amp; downloads</h3>
+        <ul><li>Connect Dropbox (OAuth PKCE, Keychain)</li><li>Foreground auto-detect via longpoll</li><li>Background downloads with a visible queue</li><li>Local start/finish notifications</li></ul></div>
+      <div class="card"><div class="k">Cadence</div><h3>Silence-trimming</h3>
+        <ul><li>Global on/off + Default / More / Aggressive</li><li>Per-book override (incl. off, or force-on)</li><li>Honest “time saved”, global &amp; per-book</li><li>Plays via the existing AVPlayer — no re-engine</li></ul></div>
+    </div>
+  </section>
+
+  <section>
+    <p class="eyebrow">Map</p>
+    <h2>Modules</h2>
+    <div class="tablewrap"><table>
+      <thead><tr><th>Directory</th><th>Responsibility</th><th>Key types</th></tr></thead>
+      <tbody>
+        <tr><td class="path">App/</td><td>Tab shell, shelves, settings, app lifecycle</td><td><span class="t">RhapsodeApp · RootTabView · SettingsView</span></td></tr>
+        <tr><td class="path">Audiobook/</td><td>Import &amp; playback (both formats)</td><td><span class="t">AudiobookPlayer · AudiobookImporter · PlayerView</span></td></tr>
+        <tr><td class="path">Ebook/</td><td>EPUB reading via Readium</td><td><span class="t">EbookReader · ReaderView</span></td></tr>
+        <tr><td class="path">Cadence/</td><td>Silence-trimming: model, render, gating, UI</td><td><span class="t">CadenceRenderCoordinator · CadenceTimelineMap · TrimmedRendition</span></td></tr>
+        <tr><td class="path">Source/</td><td>Remote library behind one protocol</td><td><span class="t">LibrarySource · DropboxSource · KeychainTokenStore</span></td></tr>
+        <tr><td class="path">Sync/</td><td>Scan, watch, download queue, progress sync</td><td><span class="t">SyncManager · BackgroundDownloader · ProgressSync</span></td></tr>
+        <tr><td class="path">Model/</td><td>SwiftData schema + repository</td><td><span class="t">Models (AppSchema) · LibraryStore</span></td></tr>
+        <tr><td class="path">Support/</td><td>Container paths, design system, self-test</td><td><span class="t">ContainerPaths · DesignSystem</span></td></tr>
+        <tr><td class="path">CadenceKit/</td><td>Standalone analyzer + renderer package</td><td><span class="t">SilenceAnalyzer · OfflineTrimRenderer · AudioIO</span></td></tr>
+      </tbody>
+    </table></div>
+  </section>
+
+  <section>
+    <div class="two">
+      <div>
+        <p class="eyebrow">Foundation</p>
+        <h2>Tech stack</h2>
+        <ul class="tight">
+          <li>SwiftUI + Swift Concurrency, Swift 6 strict</li>
+          <li>SwiftData persistence (CloudKit-friendly schema)</li>
+          <li>AVPlayer + MPNowPlayingInfoCenter / remote commands</li>
+          <li>Readium Swift toolkit (EPUB)</li>
+          <li>CadenceKit — Accelerate (vDSP) + AVFoundation</li>
+          <li>Background URLSession · BGTaskScheduler · UNUserNotificationCenter</li>
+          <li>XcodeGen project; headless self-test harness</li>
+        </ul>
+      </div>
+      <div>
+        <p class="eyebrow">Build status</p>
+        <h2>Platforms &amp; phases</h2>
+        <div class="status">
+          <div class="row"><span class="pill done">Done</span><span>MVP: sync, downloads, player, reader</span></div>
+          <div class="row"><span class="pill done">Done</span><span>iPad adaptive layout · Mac Catalyst</span></div>
+          <div class="row"><span class="pill done">Done</span><span>Cross-device progress sync (app folder)</span></div>
+          <div class="row"><span class="pill done">Done</span><span>Cadence WP0–WP11 + global/per-book UX</span></div>
+          <div class="row"><span class="pill device">On device</span><span>True background downloads · lock-screen</span></div>
+          <div class="row"><span class="pill device">On device</span><span>Live Dropbox M4B / MP3-folder pull</span></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <p class="eyebrow">Deep dive</p>
+    <h2>How Cadence works</h2>
+    <div class="accentbar"></div>
+    <div class="col">
+      <p>Cadence shortens silences in narration so a book plays faster <em>without sounding edited</em> — not hard silence-skipping, but proportional compression with an adaptive noise floor, a residual-gap floor, edge guards and equal-power crossfades at every splice.</p>
+      <p>It is a <b>pre-render</b> design (“Path&nbsp;B”): the downloaded file is analysed and a trimmed <code>.m4a</code> is rendered ahead of time, then played by the <em>existing</em> AVPlayer — no AVAudioEngine, no rewrite of the now-playing / CarPlay / AirPlay surface. The trimmed file is just an audio file, so everything that works for the original works for it.</p>
+    </div>
+    <div class="cards" style="margin-top:20px">
+      <div class="card"><div class="k">Correctness</div><h3>Source of truth</h3>
+        <ul><li>Original download is never modified</li><li>Trimmed file is a regenerable, evictable cache</li><li>Keyed by fingerprint + analyzer/renderer version + tier</li></ul></div>
+      <div class="card"><div class="k">Mapping</div><h3>Source-domain positions</h3>
+        <ul><li>All saved positions live in source time</li><li>Mapped to trimmed time only at the AVPlayer boundary</li><li>Stable across tier changes, toggles &amp; eviction</li></ul></div>
+      <div class="card"><div class="k">Analysis</div><h3>Mono detect, channel render</h3>
+        <ul><li>Silence located on a mono downmix</li><li>Renderer cuts the original channels at those times</li><li>Zero-crossing-aligned, equal-power crossfades</li></ul></div>
+    </div>
+  </section>
+</div>
+</body>
+</html>

@@ -1,0 +1,142 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1040 760" font-family="-apple-system, Segoe UI, system-ui, sans-serif" role="img" aria-label="Rhapsode architecture diagram">
+  <rect x="0" y="0" width="1040" height="760" fill="#f7f8f6"/>
+
+  <!-- Title -->
+  <text x="32" y="46" font-family="Iowan Old Style, Palatino, Charter, Georgia, serif" font-size="30" font-weight="700" fill="#1d2433">Rhapsode — Architecture</text>
+  <text x="32" y="70" font-size="14" fill="#5b6472">Offline-first audiobook &amp; EPUB player · SwiftUI + SwiftData · Dropbox App-folder source · Cadence silence-trimming</text>
+
+  <!-- ============ BAND 1 — Presentation ============ -->
+  <rect x="32" y="92" width="688" height="112" rx="12" fill="#eef3f1" stroke="#d4ded9"/>
+  <text x="48" y="113" font-size="11" font-weight="700" letter-spacing="1.5" fill="#2f6f6a">PRESENTATION · SwiftUI</text>
+  <g fill="#ffffff" stroke="#c7d0cc">
+    <rect x="48" y="122" width="208" height="66" rx="8"/>
+    <rect x="272" y="122" width="208" height="66" rx="8"/>
+    <rect x="496" y="122" width="208" height="66" rx="8"/>
+  </g>
+  <g font-size="13.5" fill="#1d2433" text-anchor="middle" font-weight="600">
+    <text x="152" y="150">Tab Shell &amp; Shelves</text>
+    <text x="376" y="150">Player / Reader</text>
+    <text x="600" y="150">Cadence &amp; Settings</text>
+  </g>
+  <g font-size="11" fill="#5b6472" text-anchor="middle">
+    <text x="152" y="170">Audiobooks · Books · Downloads</text>
+    <text x="376" y="170">PlayerView · ReaderView</text>
+    <text x="600" y="170">tier menu · time-saved · Dropbox</text>
+  </g>
+
+  <!-- ============ BAND 2 — Domain & Playback ============ -->
+  <rect x="32" y="232" width="688" height="112" rx="12" fill="#e8efed" stroke="#cfdbd6"/>
+  <text x="48" y="253" font-size="11" font-weight="700" letter-spacing="1.5" fill="#2f6f6a">DOMAIN &amp; PLAYBACK</text>
+  <g fill="#ffffff" stroke="#c7d0cc">
+    <rect x="48" y="262" width="208" height="66" rx="8"/>
+    <rect x="272" y="262" width="208" height="66" rx="8"/>
+    <rect x="496" y="262" width="208" height="66" rx="8"/>
+  </g>
+  <g font-size="13.5" fill="#1d2433" text-anchor="middle" font-weight="600">
+    <text x="152" y="290">AudiobookPlayer</text>
+    <text x="376" y="290">EbookReader</text>
+    <text x="600" y="290">Cadence Coordinator</text>
+  </g>
+  <g font-size="11" fill="#5b6472" text-anchor="middle">
+    <text x="152" y="310">AVPlayer · now-playing · resume</text>
+    <text x="376" y="310">Readium · Locator</text>
+    <text x="600" y="310">render queue · cache · stat</text>
+  </g>
+
+  <!-- ============ BAND 3 — Library, Sync & Source ============ -->
+  <rect x="32" y="372" width="688" height="112" rx="12" fill="#efece4" stroke="#ded8c9"/>
+  <text x="48" y="393" font-size="11" font-weight="700" letter-spacing="1.5" fill="#9c6b2e">LIBRARY · SYNC · SOURCE</text>
+  <g fill="#ffffff" stroke="#c7d0cc">
+    <rect x="48" y="402" width="152" height="66" rx="8"/>
+    <rect x="216" y="402" width="152" height="66" rx="8"/>
+    <rect x="384" y="402" width="152" height="66" rx="8"/>
+    <rect x="552" y="402" width="152" height="66" rx="8"/>
+  </g>
+  <g font-size="13" fill="#1d2433" text-anchor="middle" font-weight="600">
+    <text x="124" y="430">SyncManager</text>
+    <text x="292" y="430">Background</text>
+    <text x="292" y="446">Downloader</text>
+    <text x="460" y="430">ProgressSync</text>
+    <text x="628" y="430">DropboxSource</text>
+  </g>
+  <g font-size="10.5" fill="#5b6472" text-anchor="middle">
+    <text x="124" y="450">scan · longpoll · queue</text>
+    <text x="460" y="446">LWW · JSON</text>
+    <text x="628" y="450">OAuth PKCE · HTTP</text>
+  </g>
+
+  <!-- ============ BAND 4 — Persistence & Storage ============ -->
+  <rect x="32" y="512" width="688" height="156" rx="12" fill="#e9eef2" stroke="#d2dbe2"/>
+  <text x="48" y="533" font-size="11" font-weight="700" letter-spacing="1.5" fill="#3a5878">PERSISTENCE &amp; STORAGE</text>
+  <g fill="#ffffff" stroke="#c7d0cc">
+    <rect x="48" y="542" width="392" height="110" rx="8"/>
+    <rect x="456" y="542" width="120" height="110" rx="8"/>
+    <rect x="592" y="542" width="112" height="110" rx="8"/>
+  </g>
+  <text x="244" y="566" font-size="13" font-weight="700" fill="#1d2433" text-anchor="middle">SwiftData · AppSchema</text>
+  <g font-size="11.5" fill="#3a5878" text-anchor="middle" font-family="ui-monospace, SF Mono, Menlo, monospace">
+    <text x="244" y="590">Audiobook · AudiobookTrack · Book</text>
+    <text x="244" y="610">WatchedFolder · DownloadItem</text>
+    <text x="244" y="630">TrimmedRendition</text>
+  </g>
+  <text x="516" y="566" font-size="12.5" font-weight="700" fill="#1d2433" text-anchor="middle">ContainerPaths</text>
+  <g font-size="10.5" fill="#5b6472" text-anchor="middle">
+    <text x="516" y="592">Media —</text>
+    <text x="516" y="607">App Support</text>
+    <text x="516" y="628">Trims — Caches</text>
+  </g>
+  <text x="648" y="566" font-size="12.5" font-weight="700" fill="#1d2433" text-anchor="middle">Keychain</text>
+  <g font-size="10.5" fill="#5b6472" text-anchor="middle">
+    <text x="648" y="592">Dropbox</text>
+    <text x="648" y="607">OAuth token</text>
+  </g>
+  <text x="244" y="648" font-size="9.5" fill="#8a93a0" text-anchor="middle" font-style="italic">relative paths · stable UUIDs · no .unique (CloudKit-friendly)</text>
+
+  <!-- ============ EXTERNAL COLUMN ============ -->
+  <text x="752" y="113" font-size="11" font-weight="700" letter-spacing="1.5" fill="#5b6472">EXTERNAL</text>
+  <!-- Dropbox -->
+  <rect x="752" y="372" width="256" height="112" rx="12" fill="#1d2433" stroke="#1d2433"/>
+  <text x="880" y="408" font-size="15" font-weight="700" fill="#ffffff" text-anchor="middle">Dropbox App Folder</text>
+  <text x="880" y="430" font-size="11.5" fill="#b9c4cf" text-anchor="middle">HTTP API · OAuth2 PKCE</text>
+  <g font-size="11" fill="#8fd6cf" text-anchor="middle" font-family="ui-monospace, SF Mono, Menlo, monospace">
+    <text x="880" y="452">/Audiobooks · /Books</text>
+    <text x="880" y="468">/.rhapsode-sync</text>
+  </g>
+  <!-- Readium -->
+  <rect x="752" y="122" width="256" height="50" rx="10" fill="#ffffff" stroke="#c7d0cc"/>
+  <text x="880" y="143" font-size="13" font-weight="600" fill="#1d2433" text-anchor="middle">Readium Swift toolkit</text>
+  <text x="880" y="160" font-size="10.5" fill="#5b6472" text-anchor="middle">EPUB rendering (UIKit)</text>
+  <!-- CadenceKit -->
+  <rect x="752" y="262" width="256" height="50" rx="10" fill="#ffffff" stroke="#2f6f6a"/>
+  <text x="880" y="283" font-size="13" font-weight="600" fill="#1d2433" text-anchor="middle">CadenceKit package</text>
+  <text x="880" y="300" font-size="10.5" fill="#2f6f6a" text-anchor="middle">Accelerate + AVFoundation only</text>
+
+  <!-- ============ CONNECTORS ============ -->
+  <!-- vertical band-to-band (double headed), center x=376 -->
+  <g stroke="#9aa6a2" stroke-width="2">
+    <line x1="376" y1="204" x2="376" y2="232"/>
+    <line x1="376" y1="344" x2="376" y2="372"/>
+    <line x1="376" y1="484" x2="376" y2="512"/>
+  </g>
+  <g fill="#9aa6a2">
+    <path d="M376 204 l-5 -9 h10 z"/><path d="M376 232 l-5 9 h10 z"/>
+    <path d="M376 344 l-5 -9 h10 z"/><path d="M376 372 l-5 9 h10 z"/>
+    <path d="M376 484 l-5 -9 h10 z"/><path d="M376 512 l-5 9 h10 z"/>
+  </g>
+
+  <!-- Dropbox <-> Sync band (horizontal double headed) at y=428 -->
+  <line x1="720" y1="428" x2="752" y2="428" stroke="#2f6f6a" stroke-width="2.5"/>
+  <path d="M722 428 l9 -5 v10 z" fill="#2f6f6a"/>
+  <path d="M750 428 l-9 -5 v10 z" fill="#2f6f6a"/>
+
+  <!-- Readium -> EbookReader -->
+  <line x1="752" y1="147" x2="724" y2="270" stroke="#9aa6a2" stroke-width="1.5" stroke-dasharray="4 3"/>
+  <!-- CadenceKit -> Cadence Coordinator -->
+  <line x1="752" y1="287" x2="704" y2="290" stroke="#2f6f6a" stroke-width="1.5" stroke-dasharray="4 3"/>
+
+  <!-- flow legend -->
+  <text x="736" y="510" font-size="10.5" fill="#5b6472" font-style="italic">download · longpoll · progress</text>
+
+  <!-- Cadence pipeline highlight note -->
+  <text x="600" y="214" font-size="10" fill="#2f6f6a" text-anchor="middle" font-style="italic">on download → render trim → cache</text>
+</svg>

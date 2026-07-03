@@ -2,21 +2,6 @@ import Foundation
 import SwiftData
 import CadenceKit
 
-/// Aggregated, per-tier projected Cadence savings for one book, summed across its files.
-/// Drives the per-tier comparison in the per-book settings sheet.
-struct CadenceProjectedSavings {
-    /// Projected seconds saved per tier (`Preset.rawValue` → seconds), summed across the book's
-    /// rendered files. Empty until at least one file has been rendered with projections.
-    let savedByTier: [String: TimeInterval]
-    /// Sum of original (untrimmed) durations across the rendered files (≈ `book.totalDuration`).
-    let originalDuration: TimeInterval
-
-    /// Projected seconds saved for a specific tier (0 if unknown).
-    func saved(for preset: CadenceSettings.Preset) -> TimeInterval { savedByTier[preset.rawValue] ?? 0 }
-    /// Whether any projection data is available yet.
-    var hasData: Bool { !savedByTier.isEmpty }
-}
-
 /// The authoritative on/off + tier decision for a single book.
 enum CadenceResolved: Equatable {
     case off
@@ -62,33 +47,5 @@ extension Audiobook {
     /// stat card's "across N audiobooks" line. Shared by the Settings view and the self-test.
     static func countWithCadenceSavings(_ books: [Audiobook]) -> Int {
         books.filter { ($0.cadenceSavedSeconds ?? 0) > 0 }.count
-    }
-
-    /// Aggregate the per-tier projected savings (and total original runtime) for this book by
-    /// summing its `TrimmedRendition` rows (one per file). Each row carries projections for ALL
-    /// tiers, so the sum is exact for whatever files have been rendered; a multi-file book that is
-    /// only partly rendered yields a partial (growing) sum. Legacy rows without projections
-    /// contribute their original duration but no per-tier breakdown.
-    static func projectedSavings(forBookID id: UUID, context: ModelContext) -> CadenceProjectedSavings {
-        let rows = ((try? context.fetch(FetchDescriptor<TrimmedRendition>())) ?? [])
-            .filter { $0.bookID == id }
-        var byTier: [String: TimeInterval] = [:]
-        var original: TimeInterval = 0
-        for row in rows {
-            original += row.originalDuration
-            for (tier, seconds) in row.projectedSavedByTier { byTier[tier, default: 0] += seconds }
-        }
-        return CadenceProjectedSavings(savedByTier: byTier, originalDuration: original)
-    }
-
-    /// Per-book render summary for the status screen: actual rendered seconds saved, wall-clock
-    /// render time, and whether any rendition exists — summed across the book's files.
-    static func renderSummary(forBookID id: UUID, context: ModelContext)
-        -> (savedSeconds: TimeInterval, renderSeconds: TimeInterval, hasRendition: Bool) {
-        let rows = ((try? context.fetch(FetchDescriptor<TrimmedRendition>())) ?? [])
-            .filter { $0.bookID == id }
-        let saved = rows.reduce(0) { $0 + $1.savedSeconds }
-        let render = rows.reduce(0) { $0 + ($1.renderDurationSeconds ?? 0) }
-        return (saved, render, !rows.isEmpty)
     }
 }

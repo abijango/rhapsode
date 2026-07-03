@@ -76,7 +76,7 @@ struct CadenceTimeSavedCard: View {
             title: "TIME SAVED",
             value: compactDuration(totalSeconds),
             subtitle: bookCount > 0 ? "across \(bookCount) audiobook\(bookCount == 1 ? "" : "s")" : nil,
-            emptyText: "Start listening with Cadence on to see your saved time.",
+            emptyText: "Start listening with \(CadenceBranding.featureName) on to see your saved time.",
             isEmpty: totalSeconds <= 0)
     }
 

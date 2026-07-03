@@ -25,12 +25,23 @@ struct RhapsodeApp: App {
             appropriateFor: nil, create: true)
 
         let container: ModelContainer
+        let schema = Schema(AppSchema.models)
+        let config = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
         do {
-            let schema = Schema(AppSchema.models)
-            let config = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
             container = try ModelContainer(for: schema, configurations: config)
         } catch {
-            fatalError("Failed to create ModelContainer: \(error)")
+            // The SwiftData store is a rebuildable cache (books re-download from Dropbox; progress
+            // and stats re-pull from /.rhapsode-sync + UserDefaults). If it can't open — e.g. an
+            // incompatible schema after removing a model like TrimmedRendition — delete and recreate
+            // rather than crashing on launch.
+            for suffix in ["", "-wal", "-shm"] {
+                try? FileManager.default.removeItem(at: URL(fileURLWithPath: config.url.path + suffix))
+            }
+            do {
+                container = try ModelContainer(for: schema, configurations: config)
+            } catch {
+                fatalError("Failed to create ModelContainer after store reset: \(error)")
+            }
         }
         modelContainer = container
         // Share one DropboxSource between the library pipeline and progress sync so
@@ -64,11 +75,6 @@ struct RhapsodeApp: App {
         // WP-C: let SyncManager reconcile the live player when a newer remote position is
         // merged (auto-jump + prevents the player's cached position clobbering the merge).
         syncManager.audioPlayer = player
-        // Wire the Cadence render coordinator; it drains anything enqueued before configuration
-        // once the container arrives.
-        Task {
-            await CadenceRenderCoordinator.shared.configure(container: container)
-        }
         // Show download notifications even while the app is in the foreground.
         NotificationPresenter.install()
         // Reconcile any downloads that were in-flight when the app was last killed.

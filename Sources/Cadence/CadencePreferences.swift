@@ -4,7 +4,7 @@ import CadenceKit
 /// Single source of truth for the user-facing feature name. Must **not** be "Smart Speed"
 /// (Overcast trademark) — spec §0. Change the name here only.
 enum CadenceBranding {
-    static let featureName = "Cadence"
+    static let featureName = "SmartSpeech"
 }
 
 /// Global Cadence settings (not per-book), stored in `UserDefaults`.

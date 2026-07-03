@@ -1,0 +1,412 @@
+<title>R2 vs S3 vs GCS — Egress-Heavy Personal Library</title>
+<style>
+:root{
+  --paper:#FAFAF7;
+  --ink:#1C1E1B;
+  --slate:#5B615C;
+  --slate-soft:#8A8F89;
+  --amber:#B5762A;
+  --amber-soft:#F3E6D4;
+  --good:#3C6E4F;
+  --good-soft:#E4EEE7;
+  --warn:#9C3B2E;
+  --warn-soft:#F5E4E0;
+  --line:#DDD9CE;
+  --panel:#F2EFE6;
+}
+*{box-sizing:border-box;}
+body{
+  background:var(--paper);
+  color:var(--ink);
+  font-family:-apple-system,"SF Pro Text",Segoe UI,Helvetica,Arial,sans-serif;
+  font-size:16px;
+  line-height:1.55;
+  max-width:800px;
+  margin:0 auto;
+  padding:56px 28px 96px;
+}
+.mono{
+  font-family:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+  font-variant-numeric:tabular-nums;
+}
+h1,h2,h3{
+  font-family:-apple-system,"SF Pro Display",Segoe UI,Helvetica,Arial,sans-serif;
+  text-wrap:balance;
+  letter-spacing:-0.01em;
+}
+header.doc-head{
+  border-bottom:2px solid var(--ink);
+  padding-bottom:20px;
+  margin-bottom:8px;
+}
+.eyebrow{
+  font-size:12.5px;
+  letter-spacing:0.08em;
+  text-transform:uppercase;
+  color:var(--amber);
+  font-weight:600;
+  margin:0 0 10px;
+}
+h1{
+  font-size:30px;
+  font-weight:700;
+  margin:0 0 10px;
+  line-height:1.15;
+}
+.subtitle{
+  font-size:16.5px;
+  color:var(--slate);
+  margin:0;
+  max-width:62ch;
+}
+.meta-row{
+  display:flex;
+  gap:20px;
+  margin-top:18px;
+  font-size:13px;
+  color:var(--slate-soft);
+}
+.meta-row span{font-family:ui-monospace,monospace;}
+
+h2{
+  font-size:20px;
+  font-weight:700;
+  margin:44px 0 6px;
+  padding-top:2px;
+}
+h2 .num{
+  color:var(--amber);
+  font-family:ui-monospace,monospace;
+  font-weight:600;
+  font-size:15px;
+  margin-right:8px;
+}
+h3{
+  font-size:15.5px;
+  font-weight:700;
+  margin:26px 0 8px;
+}
+p{margin:0 0 14px; max-width:66ch;}
+ul,ol{margin:0 0 14px; padding-left:22px;}
+li{margin-bottom:6px; max-width:62ch;}
+strong{font-weight:650;}
+
+.verdict-box{
+  background:var(--panel);
+  border:1px solid var(--line);
+  border-left:4px solid var(--amber);
+  border-radius:3px;
+  padding:20px 22px;
+  margin:20px 0 8px;
+}
+.verdict-box .label{
+  font-size:11.5px;
+  text-transform:uppercase;
+  letter-spacing:0.07em;
+  color:var(--amber);
+  font-weight:700;
+  margin-bottom:8px;
+}
+.verdict-box p:last-child{margin-bottom:0;}
+
+.table-wrap{
+  overflow-x:auto;
+  margin:16px 0 22px;
+  border:1px solid var(--line);
+  border-radius:4px;
+}
+table{
+  width:100%;
+  border-collapse:collapse;
+  font-size:14.5px;
+  min-width:600px;
+}
+th,td{
+  padding:10px 14px;
+  text-align:left;
+  border-bottom:1px solid var(--line);
+  white-space:nowrap;
+}
+th{
+  background:var(--panel);
+  font-size:12px;
+  text-transform:uppercase;
+  letter-spacing:0.05em;
+  color:var(--slate);
+  font-weight:700;
+}
+td.num, th.num{text-align:right; font-family:ui-monospace,monospace;}
+tr:last-child td{border-bottom:none;}
+tr.total td{font-weight:700; background:#FCFAF3;}
+tr.total td.num{color:var(--ink);}
+.pill{
+  display:inline-block;
+  font-size:11px;
+  font-weight:700;
+  padding:2px 8px;
+  border-radius:20px;
+  letter-spacing:0.02em;
+}
+.pill.cheap{background:var(--good-soft); color:var(--good);}
+.pill.mid{background:var(--amber-soft); color:var(--amber);}
+.pill.flag{background:var(--warn-soft); color:var(--warn);}
+
+.cite{
+  font-size:12.5px;
+  color:var(--slate-soft);
+  font-family:ui-monospace,monospace;
+}
+.cite a{color:var(--slate); text-decoration:underline; text-decoration-color:var(--line);}
+.cite a:hover{color:var(--amber); text-decoration-color:var(--amber);}
+
+.callout{
+  background:var(--warn-soft);
+  border-left:4px solid var(--warn);
+  border-radius:3px;
+  padding:14px 18px;
+  margin:16px 0;
+  font-size:14.5px;
+}
+.callout .tag{
+  font-size:11px;
+  text-transform:uppercase;
+  letter-spacing:0.06em;
+  color:var(--warn);
+  font-weight:700;
+  display:block;
+  margin-bottom:6px;
+}
+.callout p{margin-bottom:0; max-width:none;}
+
+.good-callout{
+  background:var(--good-soft);
+  border-left:4px solid var(--good);
+  border-radius:3px;
+  padding:14px 18px;
+  margin:16px 0;
+  font-size:14.5px;
+}
+.good-callout .tag{
+  font-size:11px;
+  text-transform:uppercase;
+  letter-spacing:0.06em;
+  color:var(--good);
+  font-weight:700;
+  display:block;
+  margin-bottom:6px;
+}
+.good-callout p{margin-bottom:0; max-width:none;}
+
+.source-list{
+  list-style:none;
+  padding:0;
+  margin:0;
+  display:flex;
+  flex-direction:column;
+  gap:6px;
+}
+.source-list li{margin:0; font-size:13px;}
+.source-list a{color:var(--slate); text-decoration:none; border-bottom:1px solid var(--line);}
+.source-list a:hover{color:var(--amber); border-bottom-color:var(--amber);}
+
+hr.section-break{
+  border:none;
+  border-top:1px solid var(--line);
+  margin:44px 0;
+}
+
+.two-col{
+  display:grid;
+  grid-template-columns:1fr 1fr;
+  gap:14px;
+  margin:16px 0 22px;
+}
+@media (max-width:600px){.two-col{grid-template-columns:1fr;}}
+.mini-card{
+  border:1px solid var(--line);
+  border-radius:4px;
+  padding:14px 16px;
+  background:#fff;
+}
+.mini-card .who{
+  font-size:11px;
+  text-transform:uppercase;
+  letter-spacing:0.06em;
+  color:var(--slate-soft);
+  font-weight:700;
+  margin-bottom:6px;
+}
+.mini-card .verdict{font-size:14px; margin-bottom:0;}
+
+footer{
+  margin-top:56px;
+  padding-top:20px;
+  border-top:1px solid var(--line);
+  font-size:12.5px;
+  color:var(--slate-soft);
+}
+
+a{color:inherit;}
+:focus-visible{outline:2px solid var(--amber); outline-offset:2px;}
+</style>
+
+<header class="doc-head">
+  <p class="eyebrow">Cost research memo</p>
+  <h1>Does R2's free egress actually beat S3 and GCS for this workload?</h1>
+  <p class="subtitle">A 200GB personal audiobook/e-book library, ~3 devices repeatedly downloading 60–100GB/month. Verified against primary pricing pages, July 2026.</p>
+  <div class="meta-row">
+    <span>Scope: R2 · AWS S3 · GCP Cloud Storage</span>
+    <span>Workload: 200GB stored, 60–100GB/mo egress</span>
+  </div>
+</header>
+
+<div class="verdict-box">
+  <div class="label">Short answer</div>
+  <p><strong>R2 is cheapest in every reading of the data — but not for the reason the hypothesis proposed.</strong> Against GCS, free egress really is the deciding factor (GCS's internet-egress pricing is high and its free allowance likely doesn't apply here). Against S3, egress is <strong>not</strong> the deciding factor at this volume — AWS gives 100GB/month of free internet egress, account-wide, which comfortably covers this workload. R2's edge over S3 is smaller, and comes from storage price plus <em>unlimited</em> egress headroom, not from S3 having an egress problem it doesn't have yet.</p>
+</div>
+
+<h2><span class="num">01</span>AWS S3 — free tier and standard pricing</h2>
+
+<p>AWS restructured its free tier for new accounts on <strong>July 15, 2025</strong> — later than the 2024 date recalled in the brief. New accounts now get a <strong>$100 credit on signup, up to $200 total</strong> via five $20 credit-earning activities (launch EC2, configure RDS, build a Lambda function, use Bedrock, set an AWS Budget). The free-plan window closes after 6 months or when credit runs out; unused credit expires at 12 months. This is generic spendable credit, not an S3-specific allowance — S3 is simply one eligible service to spend it on.</p>
+
+<div class="callout">
+  <span class="tag">Flag — AWS's own pages disagree with each other</span>
+  <p>The current <a href="https://aws.amazon.com/s3/pricing/">S3 pricing page</a> reflects the new $100–200 credit model, but the <a href="https://aws.amazon.com/s3/faqs/">S3 FAQ page</a> still states verbatim: "new AWS customers receive 5 GB of Amazon S3 Standard storage, 20,000 Get Requests, 2,000 Put Requests, and 100GB of data transfer out each month for one year." That page appears stale post-restructuring. Either way, this legacy allowance was always time-limited ("for one year"), never perpetual — S3 has no line in AWS's genuinely-perpetual "Always Free" category. For an existing account with no credit left, standard rates apply from GB 1.</p>
+</div>
+
+<h3>Standard pricing (US East, N. Virginia)</h3>
+<div class="table-wrap">
+<table>
+<thead><tr><th>Item</th><th class="num">Rate</th></tr></thead>
+<tbody>
+<tr><td>Storage, first 50TB/mo</td><td class="num mono">$0.023 / GB-month</td></tr>
+<tr><td>PUT / COPY / POST / LIST requests</td><td class="num mono">$0.005 / 1,000</td></tr>
+<tr><td>GET / SELECT requests</td><td class="num mono">$0.0004 / 1,000</td></tr>
+<tr><td>Data transfer <strong>IN</strong></td><td class="num mono">Free</td></tr>
+<tr><td>Data transfer <strong>OUT</strong> to internet — free allowance</td><td class="num mono">100GB/mo free</td></tr>
+<tr><td>Data transfer OUT to internet — after free tier (first 10TB/mo)</td><td class="num mono">$0.09 / GB</td></tr>
+</tbody>
+</table>
+</div>
+<p class="cite">Source: <a href="https://aws.amazon.com/s3/pricing/">aws.amazon.com/s3/pricing</a> (Storage, Requests, and Data Transfer tabs, rendered directly — the tables are populated via JS and required a headless fetch to read)</p>
+
+<div class="good-callout">
+  <span class="tag">The pivotal fact</span>
+  <p>The 100GB free egress allowance is confirmed <strong>account-wide, aggregated across all AWS services and regions</strong> (excluding China/GovCloud) — identical wording appears on both the <a href="https://aws.amazon.com/s3/pricing/">S3 pricing page</a> and the <a href="https://aws.amazon.com/ec2/pricing/on-demand/">EC2 on-demand pricing page</a>. It is not 100GB per service. At 60–100GB/month of egress, this workload sits at or under that shared ceiling — meaning S3 egress cost here rounds to <strong>roughly $0</strong>, provided no other AWS service is drawing from the same pool.</p>
+</div>
+
+<h2><span class="num">02</span>GCP Cloud Storage — Always Free tier and standard pricing</h2>
+
+<h3>Always Free (verified against raw page HTML — the pricing page is JS-rendered and truncates under normal fetch)</h3>
+<div class="table-wrap">
+<table>
+<thead><tr><th>Item</th><th class="num">Allowance</th></tr></thead>
+<tbody>
+<tr><td>Standard storage</td><td class="num mono">5 GB-months/mo</td></tr>
+<tr><td>Class A operations</td><td class="num mono">5,000/mo</td></tr>
+<tr><td>Class B operations</td><td class="num mono">50,000/mo</td></tr>
+<tr><td>Data transfer</td><td class="num mono">100GB — see flag below</td></tr>
+</tbody>
+</table>
+</div>
+<p class="cite">Regions: <span class="mono">us-west1, us-central1, us-east1</span> only, usage pooled across the three. Source: <a href="https://docs.cloud.google.com/free/docs/free-cloud-features">cloud.google.com/free/docs/free-cloud-features</a> and raw HTML of <a href="https://cloud.google.com/storage/pricing">cloud.google.com/storage/pricing</a>.</p>
+
+<div class="callout">
+  <span class="tag">Flag — could not fully verify against a primary source</span>
+  <p>The free allowance's exact wording is <strong>"100GB from North America to each Google Cloud Data transfer destination (Australia and China excluded)"</strong> — not "to the internet." The paid pricing table this would need to offset (id <span class="mono">#network-egress</span>, labelled "General network usage," defined as traffic "out of Google Cloud or between continents" — i.e. downloads to a phone or Mac) shows <strong>$0.12/GiB starting at 0GiB, with no cross-reference to the free-tier row</strong>. These are two structurally separate tables in Google's own pricing page with no stated link between them. No independent free-egress tracker (e.g. Cherry Servers' roundup of providers with free egress) lists GCP. Google support forum threads confirm users have been billed for egress while nominally "on the free tier." Six searches across GCP's own docs, SKU pages, and third-party analyses could not produce an explicit sentence resolving whether the 100GB line covers public-internet egress or only GCP-internal destinations. <strong>Treat this as unresolved</strong> — the cost table below shows both readings.</p>
+</div>
+
+<h3>Standard pricing (representative US region)</h3>
+<div class="table-wrap">
+<table>
+<thead><tr><th>Item</th><th class="num">Rate</th></tr></thead>
+<tbody>
+<tr><td>Storage, Standard, single US region (us-east1)</td><td class="num mono">$0.020 / GB-month</td></tr>
+<tr><td>Class A operations</td><td class="num mono">$0.05 / 10,000</td></tr>
+<tr><td>Class B operations</td><td class="num mono">$0.004 / 10,000</td></tr>
+<tr><td>Egress to internet, worldwide (excl. Asia/Australia), 0–10TiB/mo</td><td class="num mono">$0.12 / GB</td></tr>
+</tbody>
+</table>
+</div>
+<p class="cite">Source: <a href="https://cloud.google.com/storage/pricing">cloud.google.com/storage/pricing</a> (storage table + "General network usage" section, raw HTML) and <a href="https://cloud.google.com/storage/pricing-examples">cloud.google.com/storage/pricing-examples</a> (us-east1 worked example). Note: a separate general-purpose <a href="https://cloud.google.com/vpc/network-pricing">VPC network pricing</a> table exists for Compute Engine/GKE egress with different tier breakpoints — it does not govern Cloud Storage-to-internet traffic; the Cloud Storage-specific table above does.</p>
+
+<h2><span class="num">03</span>Cloudflare R2 — re-verified</h2>
+
+<div class="table-wrap">
+<table>
+<thead><tr><th>Item</th><th class="num">Rate / Allowance</th></tr></thead>
+<tbody>
+<tr><td>Standard storage</td><td class="num mono">$0.015 / GB-month</td></tr>
+<tr><td>Free tier: storage</td><td class="num mono">10 GB-months/mo</td></tr>
+<tr><td>Free tier: Class A ops</td><td class="num mono">1,000,000/mo</td></tr>
+<tr><td>Free tier: Class B ops</td><td class="num mono">10,000,000/mo</td></tr>
+<tr><td>Egress via Workers API / S3 API / r2.dev</td><td class="num mono">Free, no published cap</td></tr>
+</tbody>
+</table>
+</div>
+<p class="cite">Source: <a href="https://developers.cloudflare.com/r2/pricing/">developers.cloudflare.com/r2/pricing</a>. Confirmed unchanged from prior research, with one favorable correction: free egress applies to <strong>both</strong> Standard and Infrequent Access storage classes, not Standard only. One caveat found in the fine print: if other metered Cloudflare services are chained to the bucket, those services may bill separately — the free-egress promise covers R2 itself. No fair-use cap or plan-tier requirement is stated for the free-egress promise.</p>
+
+<hr class="section-break">
+
+<h2><span class="num">04</span>Monthly cost projection — 200GB stored, 60–100GB/mo egress</h2>
+
+<div class="table-wrap">
+<table>
+<thead>
+<tr><th>Provider</th><th class="num">Storage (200GB)</th><th class="num">Egress (60–100GB)</th><th class="num">Total</th></tr>
+</thead>
+<tbody>
+<tr>
+  <td>Cloudflare R2</td>
+  <td class="num mono">$2.85<br><span class="cite">(200GB − 10GB free) × $0.015</span></td>
+  <td class="num mono">$0.00<br><span class="cite">unconditional</span></td>
+  <td class="num mono"><strong>~$2.85–3/mo</strong></td>
+</tr>
+<tr>
+  <td>AWS S3 Standard</td>
+  <td class="num mono">$4.60<br><span class="cite">200GB × $0.023</span></td>
+  <td class="num mono">$0.00<br><span class="cite">within 100GB free tier</span></td>
+  <td class="num mono"><strong>~$4.60/mo</strong></td>
+</tr>
+<tr>
+  <td>GCP Cloud Storage — <span class="pill flag">conservative</span></td>
+  <td class="num mono">$3.90<br><span class="cite">(200GB − 5GB free) × $0.020</span></td>
+  <td class="num mono">$7.20–12.00<br><span class="cite">60–100GB × $0.12, free tier not counted</span></td>
+  <td class="num mono"><strong>~$11–16/mo</strong></td>
+</tr>
+<tr>
+  <td>GCP Cloud Storage — <span class="pill mid">generous</span></td>
+  <td class="num mono">$3.90</td>
+  <td class="num mono">$0.00<br><span class="cite">if 100GB free covers internet egress — unverified</span></td>
+  <td class="num mono"><strong>~$4/mo</strong></td>
+</tr>
+</tbody>
+</table>
+</div>
+
+<p><strong>R2 wins under every reading</strong>, including the most generous possible interpretation of GCS's ambiguous free tier. The margin over S3 is modest (~$1.75/month, driven by storage price); the margin over GCS is large and driven specifically by egress <em>if</em> the conservative reading is correct, which the evidence on balance favors.</p>
+
+<hr class="section-break">
+
+<h2><span class="num">05</span>Verdict</h2>
+
+<div class="two-col">
+  <div class="mini-card">
+    <div class="who">vs GCP Cloud Storage</div>
+    <p class="verdict"><strong>Hypothesis confirmed.</strong> Egress is very likely the deciding factor. GCS's internet-egress rate ($0.12/GB) is higher than AWS's, its Always Free tier's 100GB data-transfer line most plausibly does not cover public-internet egress, and even its storage-only cost is close to R2's. At this workload GCS likely costs 3–5× what R2 costs, almost entirely on the egress line.</p>
+  </div>
+  <div class="mini-card">
+    <div class="who">vs AWS S3</div>
+    <p class="verdict"><strong>Hypothesis not confirmed as stated.</strong> AWS's 100GB/month free internet egress is real, current, and comfortably covers 60–100GB of monthly downloads. Egress is <em>not</em> what makes R2 cheaper here — R2's edge is its lower storage rate plus genuinely unlimited egress headroom, versus a free allowance that is shared across every other AWS service on the account and disappears entirely above 100GB/month.</p>
+  </div>
+</div>
+
+<h3>Where would S3 or GCS actually win?</h3>
+<ul>
+  <li><strong>A library small enough to fit inside the free storage tier</strong> — under roughly 5–10GB with low, occasional egress. Neither applies here: 200GB blows past every provider's free storage allowance, and re-downloads after cache eviction keep egress a recurring cost, not a one-time event.</li>
+  <li><strong>Cold, rarely-accessed archival storage</strong> — data pushed to S3 Glacier or GCS Coldline/Archive tiers (storage around $0.004/GB-month, egress rare enough that the per-GB rate barely matters). This app's actual pattern — three devices repeatedly re-fetching multi-GB files — is the opposite of that access pattern.</li>
+</ul>
+
+<footer>
+  <p>Research method: 5 parallel search agents against primary pricing pages (developers.cloudflare.com, aws.amazon.com, cloud.google.com), cross-checked against AWS/GCP blog and forum sources where pricing pages were ambiguous or JS-rendered. GCS's internet-egress free-tier scope remains flagged as unresolved against a primary source despite six follow-up queries — see §2.</p>
+</footer>

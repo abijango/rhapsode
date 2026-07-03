@@ -29,7 +29,7 @@ enum LiveCadenceExport {
 
         let writer = try AudioIO.AACFileWriter(
             url: outURL, sampleRate: sampleRate, channelCount: channels,
-            bitRate: CadenceRenderer.targetBitRate(for: url, channels: channels))
+            bitRate: CadenceRenderUtil.targetBitRate(for: url, channels: channels))
 
         var start: TimeInterval = 0
         while start < duration {

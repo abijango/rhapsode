@@ -262,6 +262,5 @@ enum AppSchema {
         Book.self,
         WatchedFolder.self,
         DownloadItem.self,
-        TrimmedRendition.self,
     ]
 }

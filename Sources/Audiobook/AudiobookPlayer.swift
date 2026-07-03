@@ -373,43 +373,6 @@ final class AudiobookPlayer {
         lastSourceTime = nil
     }
 
-    /// Pure selection contract (testable without playback): feature on + a rendition matching the
-    /// validity key (fingerprint + versions + tier, not evicted) whose `.m4a` exists on disk + a
-    /// decodable timeline map. Any miss ⇒ `nil`.
-    ///
-    /// UNUSED by live playback (batch/pre-rendered playback returns in a later WP); retained so that
-    /// work can reuse the exact selection contract, and so the WP4–WP11 selection self-tests stay green.
-    static func selectTrimmedSource(bookID: UUID, relPath: String, tier: String,
-                                    context: ModelContext) -> (url: URL, map: CadenceTimelineMap, relPath: String)? {
-        // Gate on the book's resolved Cadence state — covers global on/off, per-book force-on/off,
-        // and DRM (`.off` for unavailable). The passed `tier` is the validity tier the rendition
-        // must match. A book with no rendition row still returns nil (handled below).
-        guard let book = (try? context.fetch(FetchDescriptor<Audiobook>()))?.first(where: { $0.id == bookID }),
-              case .on = book.resolvedCadence,
-              let srcURL = try? ContainerPaths.url(forRelativePath: relPath),
-              let fingerprint = CadenceFingerprint.of(fileAt: srcURL)
-        else { return nil }
-
-        guard let rendition = (try? context.fetch(FetchDescriptor<TrimmedRendition>()))?
-                .first(where: { $0.bookID == bookID && $0.sourceFileRelPath == relPath })
-        else { return nil }   // no row — not an eviction, don't re-enqueue
-
-        // Detect evicted or missing audio and trigger background re-render.
-        let fileURL = try? ContainerPaths.cacheURL(forRelativePath: rendition.trimmedRelPath)
-        let fileMissing = fileURL == nil || !FileManager.default.fileExists(atPath: fileURL!.path)
-        if rendition.audioEvicted || fileMissing {
-            Task { await CadenceRenderCoordinator.shared.enqueue(bookID: bookID) }
-            return nil
-        }
-
-        guard rendition.isValid(forFingerprint: fingerprint, tier: tier),
-              let url = fileURL,
-              let map = try? JSONDecoder().decode(CadenceTimelineMap.self, from: rendition.timelineMapBlob)
-        else { return nil }
-
-        rendition.lastUsedAt = Date()
-        return (url, map, rendition.trimmedRelPath)
-    }
 
     /// Re-evaluate the trim setting for the current book and reload the backend at the preserved
     /// source position so the change (Cadence toggled on/off, or tier changed) takes effect without

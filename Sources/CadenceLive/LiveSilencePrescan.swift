@@ -73,7 +73,7 @@ enum LiveSilencePrescan {
                          projectedSavedByTier: [:], globalFloorDb: -160, globalSpeechDb: -160)
         }
 
-        let windows = CadenceRenderer.chunkWindows(cutPoints: cutPoints, totalDuration: sourceDuration,
+        let windows = CadenceRenderUtil.chunkWindows(cutPoints: cutPoints, totalDuration: sourceDuration,
                                                    maxChunkSeconds: maxChunkSeconds)
 
         // Pass 1: accumulate a whole-file loudness histogram → global adaptive floor/speech (Fix A).

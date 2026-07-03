@@ -33,6 +33,12 @@ final class BackgroundDownloader: NSObject {
     /// invoked in `urlSessionDidFinishEvents(forBackgroundURLSession:)`.
     var backgroundSessionCompletionHandler: (() -> Void)?
 
+    /// Invoked on the main actor after a download finishes importing into the
+    /// library. Wired by the app to re-pull cross-device progress, so a position
+    /// another device pushed is applied as soon as the matching book lands (rather
+    /// than only on the next foreground). Optional — unset in tests.
+    var onImportFinished: (@MainActor () -> Void)?
+
     // MARK: Session (created lazily, once)
 
     private lazy var session: URLSession = {
@@ -53,16 +59,15 @@ final class BackgroundDownloader: NSObject {
     ///   - item:    The already-inserted `DownloadItem` (state = .downloading).
     ///   - destRelPath: Container-relative destination (e.g. "Books/novel.epub").
     func enqueue(request: URLRequest, item: DownloadItem, destRelPath: String) {
-        let payload = TaskPayload(
-            itemID: item.id,
-            destRelPath: destRelPath,
-            kind: item.kind,
-            title: item.title ?? ""
-        )
+        enqueue(request: request, payload: TaskPayload(
+            itemID: item.id, destRelPath: destRelPath, kind: item.kind, title: item.title ?? ""))
+    }
+
+    /// Enqueue with a prebuilt payload.
+    func enqueue(request: URLRequest, payload: TaskPayload) {
         guard let encoded = try? JSONEncoder().encode(payload),
               let description = String(data: encoded, encoding: .utf8)
         else { return }
-
         let task = session.downloadTask(with: request)
         task.taskDescription = description
         task.resume()
@@ -204,10 +209,15 @@ extension BackgroundDownloader: URLSessionDownloadDelegate {
                     try? ctx.save()
                 }
 
-                // Cadence: render-on-download (WP4). No-op unless the feature is enabled.
-                if let bookID = newAudiobookID {
-                    Task { await CadenceRenderCoordinator.shared.enqueue(bookID: bookID) }
-                }
+                // The matching book now exists locally — pull any progress another
+                // device pushed for it so cross-device resume lands immediately.
+                self.onImportFinished?()
+
+                // Playback is now LIVE silence-trimming (the pre-rendered .m4a is not used at
+                // playback), so we no longer batch-render every download. Batch rendering is an
+                // on-demand utility from Settings (WP5). Leaving auto-render on would waste CPU +
+                // storage producing files nothing plays.
+                _ = newAudiobookID
 
                 let notifier = NotificationService()
                 await notifier.notifyDownloadFinished(title: title)

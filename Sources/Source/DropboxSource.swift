@@ -207,7 +207,8 @@ actor DropboxSource: LibrarySource {
             name: e.name,
             path: e.path_display ?? e.path_lower ?? "/\(e.name)",
             size: e.size ?? 0,
-            isFolder: e.tag == "folder"
+            isFolder: e.tag == "folder",
+            contentHash: e.content_hash
         )
     }
 
@@ -265,8 +266,11 @@ private struct Metadata: Decodable {
     let path_lower: String?
     let path_display: String?
     let size: Int64?
+    /// Dropbox's stable content hash (present on `file` entries from `list_folder`; absent on
+    /// folders). See `DropboxContentHash` for the matching local computation.
+    let content_hash: String?
 
     enum CodingKeys: String, CodingKey {
-        case tag = ".tag", name, id, path_lower, path_display, size
+        case tag = ".tag", name, id, path_lower, path_display, size, content_hash
     }
 }

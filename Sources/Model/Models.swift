@@ -60,6 +60,11 @@ final class Audiobook {
     /// user actually listens through trimmed audio. Drives the per-book stat and the global
     /// "across N audiobooks" count. Additive optional (nil treated as 0) → lightweight migration.
     var cadenceSavedSeconds: Double?
+    /// Cumulative seconds of trimmed/output CONTENT actually listened through **for this book**
+    /// (rate-independent — the per-tick trimmed-domain delta, accrued whether or not Cadence is
+    /// trimming). Drives the per-book "played" stat. Additive optional (nil treated as 0) →
+    /// lightweight, CloudKit-safe migration.
+    var listenedSeconds: Double?
 
     init(
         id: UUID = UUID(),
@@ -74,7 +79,8 @@ final class Audiobook {
         progressUpdatedAt: Date? = nil,
         cadenceTier: String? = nil,
         cadenceUnavailable: Bool? = nil,
-        cadenceSavedSeconds: Double? = nil
+        cadenceSavedSeconds: Double? = nil,
+        listenedSeconds: Double? = nil
     ) {
         self.id = id
         self.title = title
@@ -89,12 +95,33 @@ final class Audiobook {
         self.cadenceTier = cadenceTier
         self.cadenceUnavailable = cadenceUnavailable
         self.cadenceSavedSeconds = cadenceSavedSeconds
+        self.listenedSeconds = listenedSeconds
     }
 
     /// Tracks in playback order. Always sort by `order` — never rely on the
     /// stored relationship array order.
     var orderedTracks: [AudiobookTrack] {
         tracks.sorted { $0.order < $1.order }
+    }
+
+    /// Source-domain seconds played so far, derived from the persisted resume
+    /// position. Consistent across formats: the cumulative duration of completed
+    /// segments plus the offset into the current one.
+    var playedSeconds: Double {
+        let ordered = orderedTracks
+        guard !ordered.isEmpty else { return 0 }
+        let idx = min(max(lastTrackIndex, 0), ordered.count - 1)
+        let prior = ordered.prefix(idx).reduce(0) { $0 + $1.duration }
+        return prior + max(0, lastOffsetSeconds)
+    }
+
+    /// Fraction of the whole book completed (0...1), for the shelf progress bar.
+    /// Falls back to summed track durations when `totalDuration` is unset so the
+    /// bar is never blank for an older/partially-imported book.
+    var fractionComplete: Double {
+        let total = totalDuration > 0 ? totalDuration : orderedTracks.reduce(0) { $0 + $1.duration }
+        guard total > 0 else { return 0 }
+        return min(1, max(0, playedSeconds / total))
     }
 }
 
@@ -156,6 +183,19 @@ final class Book {
         self.fileRelPath = fileRelPath
         self.readingLocator = readingLocator
         self.progressUpdatedAt = progressUpdatedAt
+    }
+
+    /// Overall reading progress (0...1) for the shelf, parsed from the persisted
+    /// Readium locator's `locations.totalProgression` (the fraction through the
+    /// whole publication). 0 when never opened or the locator lacks the field.
+    /// Parsed with `JSONSerialization` so the model layer needn't import Readium.
+    var fractionComplete: Double {
+        guard let json = readingLocator,
+              let data = json.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let locations = obj["locations"] as? [String: Any],
+              let total = locations["totalProgression"] as? Double else { return 0 }
+        return min(1, max(0, total))
     }
 }
 

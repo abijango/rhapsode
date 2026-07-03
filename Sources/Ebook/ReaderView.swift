@@ -13,6 +13,10 @@ struct ReaderView: View {
     @State private var reader = EbookReader()
     @State private var showSettings = false
     @State private var showTOC = false
+    /// WP-B — holds the in-flight debounce task for the cross-device progress push. A reference
+    /// type (not a `@State` value) so the escaping `onProgressChanged` closure mutates it through
+    /// a stable identity; replacing a `@State` struct field from such a closure is unreliable.
+    @State private var pushDebounce = PushDebounce()
 
     var body: some View {
         Group {
@@ -35,26 +39,44 @@ struct ReaderView: View {
                     .disabled(reader.navigator == nil)
             }
         }
-        .task { await reader.open(book, context: modelContext) }
+        .task {
+            await reader.open(book, context: modelContext)
+            // WP-C: register this open reader so a newer remote locator (pulled while the
+            // reader is on screen) auto-jumps the page. Cleared in onDisappear.
+            sync.activeReader = reader
+            sync.activeReaderBookID = book.id
+            // WP-B: continuous push on page turns, debounced ~6s so flicking through pages
+            // coalesces into one upload. Capture the key (String) before the actor hop — the
+            // Book model is not Sendable. The onDisappear push below covers the trailing edge.
+            let key = book.fileRelPath
+            reader.onProgressChanged = {
+                pushDebounce.task?.cancel()
+                pushDebounce.task = Task {
+                    try? await Task.sleep(for: .seconds(6))
+                    guard !Task.isCancelled else { return }
+                    await sync.pushBookProgress(relPath: key)
+                }
+            }
+        }
         .onDisappear {
+            // WP-C: deregister this reader so remote merges no longer try to drive a gone view.
+            if sync.activeReaderBookID == book.id {
+                sync.activeReader = nil
+                sync.activeReaderBookID = nil
+            }
             // The reader persists the locator locally on every page turn; push the
             // latest for cross-device resume. Capture the key (String) before the
             // actor hop — the Book model is not Sendable.
+            // WP-B: cancel any pending debounced push — this onDisappear push is the
+            // trailing edge and supersedes it (avoids a duplicate upload moments later).
+            pushDebounce.task?.cancel()
             let key = book.fileRelPath
             Task { await sync.pushBookProgress(relPath: key) }
         }
-        // Hardware-keyboard page-turn keys (iPad + Mac Catalyst).
-        // These are additive — pressing keys is a no-op on iPhone where no keyboard
-        // is attached. The shortcuts live on hidden buttons so they don't appear in
-        // menus; right-arrow / left-arrow are the standard reader conventions.
-        .background {
-            Group {
-                Button("") { reader.goForward()  }.keyboardShortcut(.rightArrow, modifiers: [])
-                Button("") { reader.goBackward() }.keyboardShortcut(.leftArrow,  modifiers: [])
-            }
-            .accessibilityHidden(true)
-            .opacity(0)
-        }
+        // Page turns (edge tap / mouse click + arrow/space keys) are handled by
+        // Readium's DirectionalNavigationAdapter, bound in EbookReader.open — it
+        // hooks the navigator's input layer, so it works on Mac Catalyst where
+        // SwiftUI keyboard shortcuts above the web view were swallowed.
         .sheet(isPresented: $showSettings) {
             ReaderSettingsSheet(settings: $reader.settings)
                 .presentationDetents([.medium])
@@ -66,6 +88,14 @@ struct ReaderView: View {
             }
         }
     }
+}
+
+/// WP-B — stable reference holder for the debounced cross-device push task. Held as `@State`
+/// in `ReaderView` so the escaping `onProgressChanged` closure can cancel/replace the in-flight
+/// task through a fixed identity (mutating a `@State` struct field from such a closure is
+/// unreliable). Main-actor-isolated to match `ReaderView`'s body.
+@MainActor private final class PushDebounce {
+    var task: Task<Void, Never>?
 }
 
 /// Bridges the UIKit `EPUBNavigatorViewController` into SwiftUI.

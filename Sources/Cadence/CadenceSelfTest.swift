@@ -249,7 +249,7 @@ extension PhaseZeroSelfTest {
             b.cadenceTier = nil; try? context.save()
         }
 
-        guard let map = try? JSONDecoder().decode(CadenceTimelineMap.self, from: rendition.timelineMapBlob),
+        guard (try? JSONDecoder().decode(CadenceTimelineMap.self, from: rendition.timelineMapBlob)) != nil,
               let book = (try? context.fetch(FetchDescriptor<Audiobook>()))?.first(where: { $0.id == bookID }) else {
             check("Playback: prerequisites (map + book) available", false)
             return failures
@@ -269,22 +269,22 @@ extension PhaseZeroSelfTest {
         check("Playback: trimmed item ready", ready)
         check("Playback: loaded the trimmed file (activeMap set)", player.debugIsTrimmed)
 
-        // Seek to a source time mid-kept-region: toTrimmed(3.5)≈1.9, vs 3.5 (missed site) vs
-        // ~3.8 (inverted) — all separated by >1 s, so the tight tolerance pins the wiring.
+        // The live backend plays the ORIGINAL and trims on the fly — there is no static trimmed file
+        // or map at the playback boundary, and `debugPlayerTimeSeconds` (backend output) is 0 while
+        // paused after a seek. So the meaningful landing invariant is purely source-domain: a seek to
+        // source 3.5 s must round-trip to 3.5 s through `bookTime`. (Batch/static-map playback and its
+        // toTrimmed-landing assertion return in a later WP.)
         let sourceSeek = 3.5
-        let expectedPlayer = map.toTrimmed(sourceSeek)
         player.debugSeek(toSourceTime: sourceSeek)
 
-        var landed = player.debugPlayerTimeSeconds
+        var landed = player.debugBookTime
         for _ in 0..<30 {
             try? await Task.sleep(nanoseconds: 100_000_000)
-            landed = player.debugPlayerTimeSeconds
-            if abs(landed - expectedPlayer) < 0.25 { break }
+            landed = player.debugBookTime
+            if abs(landed - sourceSeek) < 0.25 { break }
         }
-        check("Playback: player landed at toTrimmed(source) — \(String(format: "%.2f", landed)) ≈ \(String(format: "%.2f", expectedPlayer))",
-              abs(landed - expectedPlayer) < 0.25)
-        check("Playback: bookTime round-trips to source 3.5 — \(String(format: "%.2f", player.debugBookTime))",
-              abs(player.debugBookTime - sourceSeek) < 0.25)
+        check("Playback: bookTime round-trips to source 3.5 — \(String(format: "%.2f", landed))",
+              abs(landed - sourceSeek) < 0.25)
 
         player.teardown()
         return failures
@@ -809,25 +809,23 @@ extension PhaseZeroSelfTest {
                     // Apply the nudge directly (bypasses play() to stay deterministic).
                     rPlayer.debugSmartResumeNudge()
 
-                    // Allow the seek to settle: the nudge seeks to the first gap onset (≈2.96 source
-                    // → ≈1.42 trimmed). Poll until the raw player time drops below pre-nudge trimmed.
-                    let preNudgePlayer = rPlayer.debugPlayerTimeSeconds
+                    // The live backend exposes only source-domain position (`debugPlayerTimeSeconds`
+                    // is 0 while paused), and the nudge is now the fixed 1.5 s backstep (the onset-based
+                    // nudge was dropped in the live WP), so assert in SOURCE domain against that backstep.
+                    // Poll until the source position drops below the pre-nudge value.
                     for _ in 0..<30 {
                         try? await Task.sleep(nanoseconds: 100_000_000)
-                        if rPlayer.debugPlayerTimeSeconds < preNudgePlayer - 0.1 { break }
+                        if rPlayer.debugBookTime < preNudgeTime - 0.1 { break }
                     }
-                    let postNudgePlayer = rPlayer.debugPlayerTimeSeconds   // trimmed-domain
-                    // Verify nudge moved player backward (trimmed domain, unambiguous).
-                    check("Resume B: nudge moved player position backward (trimmed) — \(String(format: "%.2f", postNudgePlayer)) < \(String(format: "%.2f", preNudgePlayer))",
-                          postNudgePlayer < preNudgePlayer)
-                    check("Resume B: nudge did not overshoot forward (trimmed)",
-                          postNudgePlayer <= preNudgePlayer + 0.1)
-                    // Verify nudge landed near the trimmed equivalent of the onset.
-                    if let o = builtOnset {
-                        let expectedTrimmed = builderMap.toTrimmed(o)
-                        check("Resume B: nudge landed near onset trimmed≈\(String(format: "%.2f", expectedTrimmed)) — got \(String(format: "%.2f", postNudgePlayer))",
-                              abs(postNudgePlayer - expectedTrimmed) < 0.5)
-                    }
+                    let postNudgeSource = rPlayer.debugBookTime   // source-domain
+                    check("Resume B: nudge moved position backward (source) — \(String(format: "%.2f", postNudgeSource)) < \(String(format: "%.2f", preNudgeTime))",
+                          postNudgeSource < preNudgeTime)
+                    check("Resume B: nudge did not overshoot forward (source)",
+                          postNudgeSource <= preNudgeTime + 0.1)
+                    // Fixed 1.5 s backstep: lands ≈ preNudge − 1.5 (source domain).
+                    let expectedBackstep = max(preNudgeTime - 1.5, 0)
+                    check("Resume B: nudge lands ≈ 1.5 s back (source) — \(String(format: "%.2f", postNudgeSource)) ≈ \(String(format: "%.2f", expectedBackstep))",
+                          abs(postNudgeSource - expectedBackstep) < 0.6)
 
                     // Fallback test: no activeMap → nudge falls back to 1.5 s fixed backstep.
                     // Disable Cadence so selectTrimmedSource returns nil → next load uses original.

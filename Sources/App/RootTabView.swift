@@ -23,7 +23,8 @@ enum RootLayoutMode: Equatable {
 private enum SidebarItem: Int, CaseIterable, Identifiable {
     case audiobooks = 0
     case ebooks     = 1
-    case settings   = 2
+    case stats      = 2
+    case settings   = 3
 
     var id: Int { rawValue }
 
@@ -31,6 +32,7 @@ private enum SidebarItem: Int, CaseIterable, Identifiable {
         switch self {
         case .audiobooks: Label("Audiobooks", systemImage: "headphones")
         case .ebooks:     Label("E-books",    systemImage: "books.vertical")
+        case .stats:      Label("Nerd Stats", systemImage: "chart.bar")
         case .settings:   Label("Settings",   systemImage: "gearshape")
         }
     }
@@ -45,6 +47,7 @@ private enum SidebarItem: Int, CaseIterable, Identifiable {
 ///   detail column that hosts the selected shelf or settings screen.
 struct RootTabView: View {
     @Environment(SyncManager.self) private var sync
+    @Environment(AudiobookPlayer.self) private var audioPlayer
     @Environment(\.scenePhase)            private var scenePhase
     @Environment(\.horizontalSizeClass)   private var hSizeClass
 
@@ -59,7 +62,8 @@ struct RootTabView: View {
            i + 1 < CommandLine.arguments.count {
             switch CommandLine.arguments[i + 1] {
             case "ebooks":   return 1
-            case "settings": return 2
+            case "stats":    return 2
+            case "settings": return 3
             default:         return 0
             }
         }
@@ -77,7 +81,14 @@ struct RootTabView: View {
         // Foreground auto-detect: watch Dropbox while active, stop when backgrounded.
         .onChange(of: scenePhase, initial: true) { _, phase in
             if phase == .active {
-                Task { await sync.ensureWatching() }
+                // The headless self-test drives its own SyncManagers over the shared context;
+                // starting the live watcher/scan here would race its store mutations. Skip it.
+                #if DEBUG
+                let selfTest = PhaseZeroSelfTest.isRequested
+                #else
+                let selfTest = false
+                #endif
+                if !selfTest { Task { await sync.ensureWatching() } }
                 #if targetEnvironment(macCatalyst)
                 // Apply now, and once more after the scene settles — sizeRestrictions
                 // is often unavailable at the first .active tick (the source of the
@@ -90,7 +101,16 @@ struct RootTabView: View {
                 #endif
             } else {
                 sync.stopWatching()
-                if phase == .background { BackgroundRefresh.schedule() }
+                if phase == .background {
+                    BackgroundRefresh.schedule()
+                    // WP-B: before suspension, force-persist the live audiobook position and push
+                    // it cross-device. `savePosition()` runs persist(force:true), which fires the
+                    // wired onProgressChanged push (gated on a genuine, non-remote change), so we
+                    // don't also call sync.push directly here (that would double-push or push stale).
+                    audioPlayer.savePosition()
+                    // Back up lifetime Cadence stats (time saved + render time) before suspension.
+                    Task { await sync.pushCadenceStats() }
+                }
             }
         }
     }
@@ -122,9 +142,13 @@ struct RootTabView: View {
                 .tabItem { Label("E-books", systemImage: "books.vertical") }
                 .tag(1)
 
+            NerdStatsView()
+                .tabItem { Label("Nerd Stats", systemImage: "chart.bar") }
+                .tag(2)
+
             SettingsView()
                 .tabItem { Label("Settings", systemImage: "gearshape") }
-                .tag(2)
+                .tag(3)
         }
     }
 
@@ -144,6 +168,7 @@ struct RootTabView: View {
             switch sidebarItem ?? .audiobooks {
             case .audiobooks: AudiobooksShelfView()
             case .ebooks:     BooksShelfView()
+            case .stats:      NerdStatsView()
             case .settings:   SettingsView()
             }
         }

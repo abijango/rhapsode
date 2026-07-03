@@ -37,6 +37,11 @@ final class TrimmedRendition {
     var originalDuration: TimeInterval
     var trimmedDuration: TimeInterval
     var savedSeconds: TimeInterval
+    /// JSON `[Preset.rawValue : projected seconds saved]` for ALL tiers, computed from THIS file's
+    /// silences at render time (silence content is the tier-independent input, so one render fills
+    /// every tier). Drives the per-book per-tier savings comparison. Additive optional → lightweight,
+    /// CloudKit-safe migration; nil on rows written before this existed (they backfill on re-render).
+    var projectedSavedByTierBlob: Data?
 
     /// Packed source↔trimmed timeline map (built crossfade-corrected in WP3).
     var timelineMapBlob: Data
@@ -46,6 +51,10 @@ final class TrimmedRendition {
     var createdAt: Date
     /// For LRU eviction (spec §7).
     var lastUsedAt: Date
+    /// Wall-clock seconds this file took to render. Summed per book for the render-status screen;
+    /// also fed into the lifetime `CadenceStats.totalRenderSeconds`. Additive optional → lightweight
+    /// migration; nil on rows written before this existed.
+    var renderDurationSeconds: TimeInterval?
 
     init(
         bookID: UUID,
@@ -59,10 +68,12 @@ final class TrimmedRendition {
         originalDuration: TimeInterval,
         trimmedDuration: TimeInterval,
         savedSeconds: TimeInterval,
+        projectedSavedByTierBlob: Data? = nil,
         timelineMapBlob: Data,
         chapterMapBlob: Data,
         createdAt: Date = Date(),
-        lastUsedAt: Date = Date()
+        lastUsedAt: Date = Date(),
+        renderDurationSeconds: TimeInterval? = nil
     ) {
         self.bookID = bookID
         self.sourceFileRelPath = sourceFileRelPath
@@ -75,10 +86,20 @@ final class TrimmedRendition {
         self.originalDuration = originalDuration
         self.trimmedDuration = trimmedDuration
         self.savedSeconds = savedSeconds
+        self.projectedSavedByTierBlob = projectedSavedByTierBlob
         self.timelineMapBlob = timelineMapBlob
         self.chapterMapBlob = chapterMapBlob
         self.createdAt = createdAt
         self.lastUsedAt = lastUsedAt
+        self.renderDurationSeconds = renderDurationSeconds
+    }
+
+    /// Decoded `[Preset.rawValue : projected seconds saved]`. Empty for legacy rows (nil blob)
+    /// until a re-render backfills it.
+    var projectedSavedByTier: [String: TimeInterval] {
+        guard let blob = projectedSavedByTierBlob,
+              let map = try? JSONDecoder().decode([String: TimeInterval].self, from: blob) else { return [:] }
+        return map
     }
 
     /// Whether this rendition satisfies a request for the given key. Identity (`bookID`,

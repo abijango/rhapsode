@@ -9,13 +9,18 @@ struct RemoteEntry: Identifiable, Hashable, Sendable {
     let path: String
     let size: Int64
     let isFolder: Bool
+    /// Dropbox's stable `content_hash` for a file (nil for folders, or backends that don't
+    /// provide it). Stable for identical content on every device — the Cadence cross-device
+    /// source key. Computable locally via `DropboxContentHash` from the same bytes.
+    let contentHash: String?
 
-    init(id: String, name: String, path: String, size: Int64, isFolder: Bool) {
+    init(id: String, name: String, path: String, size: Int64, isFolder: Bool, contentHash: String? = nil) {
         self.id = id
         self.name = name
         self.path = path
         self.size = size
         self.isFolder = isFolder
+        self.contentHash = contentHash
     }
 }
 

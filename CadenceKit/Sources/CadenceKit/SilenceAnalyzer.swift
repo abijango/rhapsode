@@ -22,6 +22,19 @@ public struct AnalysisResult: Sendable {
     public let sampleRate: Double
 }
 
+/// The **tier-independent** loudness profile of one section: the windowed dB envelope plus the
+/// adaptive floor/speech levels. Computing this (the vDSP RMS pass + the two percentiles) is the
+/// expensive part of analysis; turning it into regions for a given `CadenceSettings` is cheap.
+/// Callers that need several tiers (the renderer's per-tier savings projection) compute this ONCE
+/// with `SilenceAnalyzer.profile(...)` and call `regions(from:)` per tier — avoiding redundant RMS.
+public struct LoudnessProfile: Sendable {
+    public let dbs: [Double]
+    public let hop: Int
+    public let noiseFloorDb: Double
+    public let speechLevelDb: Double
+    public let sampleRate: Double
+}
+
 /// Detects trimmable silences in mono PCM. Pure and audio-hardware-free: it takes a
 /// `[Float]` and a sample rate, so it is driven entirely by synthetic PCM in tests.
 /// Implements the pipeline in `cadence-feature-spec.md` §4.
@@ -44,25 +57,60 @@ public struct SilenceAnalyzer {
     }
 
     /// Analyse mono float32 PCM. Returns edge-guarded silence regions in source time.
+    /// Equivalent to `regions(from: Self.profile(...))` — kept as the single-shot entry point.
     public func analyze(monoSamples: [Float], sampleRate: Double) -> AnalysisResult {
-        let windowSize = max(1, Int((Self.windowMs / 1000.0 * sampleRate).rounded()))
-        let hop = max(1, Int((Self.hopMs / 1000.0 * sampleRate).rounded()))
+        let profile = Self.profile(monoSamples: monoSamples, sampleRate: sampleRate)
+        return AnalysisResult(regions: regions(from: profile),
+                              noiseFloorDb: profile.noiseFloorDb, sampleRate: sampleRate)
+    }
 
-        let dbs = Self.windowedRMSdB(monoSamples, windowSize: windowSize, hop: hop)
-        guard !dbs.isEmpty else {
-            return AnalysisResult(regions: [], noiseFloorDb: Self.silenceFloorDb, sampleRate: sampleRate)
-        }
+    /// Compute the tier-independent loudness profile (the expensive windowed-RMS + percentile pass).
+    /// `static` because it does NOT depend on `settings` — only on the fixed window/hop constants —
+    /// which is exactly why it can be shared across tiers.
+    public static func profile(monoSamples: [Float], sampleRate: Double) -> LoudnessProfile {
+        let windowSize = max(1, Int((windowMs / 1000.0 * sampleRate).rounded()))
+        let hop = max(1, Int((hopMs / 1000.0 * sampleRate).rounded()))
+        let dbs = windowedRMSdB(monoSamples, windowSize: windowSize, hop: hop)
+        // When empty, mirror the previous behaviour: silence-floor diagnostics, no regions.
+        let noiseFloor = dbs.isEmpty ? silenceFloorDb : percentile(dbs, noiseFloorPercentile)
+        let speechLevel = dbs.isEmpty ? silenceFloorDb : percentile(dbs, speechLevelPercentile)
+        return LoudnessProfile(dbs: dbs, hop: hop, noiseFloorDb: noiseFloor,
+                               speechLevelDb: speechLevel, sampleRate: sampleRate)
+    }
 
-        let noiseFloor = Self.percentile(dbs, Self.noiseFloorPercentile)
-        let speechLevel = Self.percentile(dbs, Self.speechLevelPercentile)
+    /// Derive edge-guarded silence regions for THIS analyzer's `settings` from a precomputed
+    /// profile. Cheap (threshold compare + hysteresis + edge-guard); safe to call per tier.
+    public func regions(from profile: LoudnessProfile) -> [SilenceRegion] {
+        regions(from: profile, floorOverrideDb: nil, speechOverrideDb: nil)
+    }
+
+    /// As `regions(from:)`, but the live (on-the-fly) engine can inject an external floor/speech
+    /// (e.g. a global, whole-file profile) in place of this chunk-local profile's percentiles. The
+    /// live engine analyses short streaming chunks whose local percentiles jitter across chunk
+    /// boundaries; a stable global floor makes detection deterministic regardless of where a chunk
+    /// falls (Fix A). Both `nil` ⇒ **byte-identical** to `regions(from:)`, so the shipped pre-render
+    /// path and `analyzerVersion` are unchanged. The absolute-silence ceiling (Fix B) still applies
+    /// via `settings.absoluteSilenceCeilingDb`.
+    public func regions(from profile: LoudnessProfile,
+                        floorOverrideDb: Double?,
+                        speechOverrideDb: Double?) -> [SilenceRegion] {
+        guard !profile.dbs.isEmpty else { return [] }
+
+        let floorDb = floorOverrideDb ?? profile.noiseFloorDb
+        let speechDb = speechOverrideDb ?? profile.speechLevelDb
         // Clamp the threshold below the speech level: a section with no genuine quiet
         // cluster (floor ≈ speech, e.g. continuous narration) must not flag everything as
         // silence. In the normal case (floor far below speech) this leaves floor+margin intact.
-        let threshold = min(noiseFloor + settings.thresholdMarginDb, speechLevel - Self.minSeparationDb)
-        let silent = dbs.map { $0 < threshold }
+        let adaptive = min(floorDb + settings.thresholdMarginDb,
+                           speechDb - Self.minSeparationDb)
+        // Clamp by the absolute silence ceiling so a loud continuous bed (music/ambience) — whose
+        // adaptive floor is high — is never treated as trimmable. This only ever tightens the
+        // threshold; clean narration already sits below the ceiling and is unaffected.
+        let threshold = min(adaptive, settings.absoluteSilenceCeilingDb)
+        let silent = profile.dbs.map { $0 < threshold }
 
         func windows(forMs ms: Double) -> Int {
-            max(1, Int((ms / 1000.0 * sampleRate / Double(hop)).rounded()))
+            max(1, Int((ms / 1000.0 * profile.sampleRate / Double(profile.hop)).rounded()))
         }
         let windowRanges = Self.detectRegions(
             silent: silent,
@@ -72,7 +120,7 @@ public struct SilenceAnalyzer {
 
         // Window index → source time. Window w spans samples [w*hop, w*hop+windowSize);
         // we anchor region boundaries to hop starts (within ±1 window of tolerance).
-        let hopSeconds = Double(hop) / sampleRate
+        let hopSeconds = Double(profile.hop) / profile.sampleRate
         let guardSeconds = settings.edgeGuardMs / 1000.0
         var regions: [SilenceRegion] = []
         for (startWindow, endWindow) in windowRanges {
@@ -82,8 +130,7 @@ public struct SilenceAnalyzer {
             guard end - start >= settings.minSilenceDuration else { continue }
             regions.append(SilenceRegion(start: start, end: end))
         }
-
-        return AnalysisResult(regions: regions, noiseFloorDb: noiseFloor, sampleRate: sampleRate)
+        return regions
     }
 
     // MARK: - Pure stages (internal for direct unit testing)

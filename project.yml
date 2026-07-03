@@ -38,6 +38,9 @@ targets:
       - path: Fixtures/SampleLibrary
         type: folder
         buildPhase: resources
+      # Bundled IBM Plex Mono (OFL) — the Nerd Stats / per-book receipt typeface.
+      - path: SupportingFiles/Fonts
+        buildPhase: resources
     dependencies:
       - package: Readium
         product: ReadiumShared
@@ -64,6 +67,18 @@ targets:
         UIBackgroundModes:
           - audio
           - fetch
+        # Bundled fonts (registered so Font.custom can resolve them):
+        # IBM Plex Mono = data/receipt face; Hanken Grotesk = display face (titles + big stat numbers).
+        UIAppFonts:
+          - IBMPlexMono-Regular.ttf
+          - IBMPlexMono-Medium.ttf
+          - IBMPlexMono-SemiBold.ttf
+          - IBMPlexMono-Bold.ttf
+          - HankenGrotesk-Regular.ttf
+          - HankenGrotesk-Medium.ttf
+          - HankenGrotesk-SemiBold.ttf
+          - HankenGrotesk-Bold.ttf
+          - HankenGrotesk-ExtraBold.ttf
         # BGTaskScheduler delta-check while the app is closed (Phase 2 fast-follow).
         # Free feature — no paid entitlement.
         BGTaskSchedulerPermittedIdentifiers:
@@ -97,3 +112,19 @@ targets:
         # Phase 4b (macOS Catalyst) — Keychain entitlement for storing the Dropbox
         # OAuth token. Resolves Keychain -34018 (errSecMissingEntitlement) errors.
         CODE_SIGN_ENTITLEMENTS: SupportingFiles/Rhapsode.entitlements
+
+# Generate a SHARED Rhapsode scheme so it survives `xcodegen generate` (Xcode was only
+# autocreating a user scheme, which a regenerate wiped — breaking `xcodebuild -scheme Rhapsode`).
+schemes:
+  Rhapsode:
+    build:
+      targets:
+        Rhapsode: all
+    run:
+      config: Debug
+    profile:
+      config: Release
+    analyze:
+      config: Debug
+    archive:
+      config: Release

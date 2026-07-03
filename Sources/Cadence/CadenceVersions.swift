@@ -7,7 +7,9 @@ import Foundation
 /// `OfflineTrimRenderer` or the AAC encode changes — either forces re-render + cache
 /// invalidation for every book (spec §7.1 / §15). Keep these in lockstep with CadenceKit.
 enum CadenceVersions {
-    static let analyzer = 1
+    // analyzer 2: added absolute silence ceiling (CadenceSettings.absoluteSilenceCeilingDb) so a
+    // continuous music/ambience bed is no longer mistaken for trimmable silence.
+    static let analyzer = 2
     static let renderer = 1
 }
 

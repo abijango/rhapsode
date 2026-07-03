@@ -49,6 +49,25 @@ struct DropboxProgressSync: ProgressSync {
         return result
     }
 
+    /// Fixed path for the single shared Cadence stats backup.
+    static let statsPath = "\(folder)/cadence-stats.json"
+
+    func pushStats(_ stats: CadenceStatsRecord) async throws {
+        // Same read-before-write LWW guard as `push`: don't clobber a strictly-newer remote.
+        if let data = try? await source.readFile(at: Self.statsPath),
+           let existing = try? PlaybackProgress.decoder.decode(CadenceStatsRecord.self, from: data),
+           existing.updatedAt > stats.updatedAt {
+            return
+        }
+        let data = try PlaybackProgress.encoder.encode(stats)
+        try await source.writeFile(data, to: Self.statsPath)
+    }
+
+    func pullStats() async throws -> CadenceStatsRecord? {
+        guard let data = try? await source.readFile(at: Self.statsPath) else { return nil }
+        return try? PlaybackProgress.decoder.decode(CadenceStatsRecord.self, from: data)
+    }
+
     /// Stable, ASCII, filesystem-safe file path for an item key (SHA-256 hex). The
     /// real key lives inside the JSON, so the hashed name only needs to be a stable
     /// unique handle — identical for the same key on every device.

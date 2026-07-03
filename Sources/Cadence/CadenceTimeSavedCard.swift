@@ -11,6 +11,59 @@ import SwiftUI
 /// - Header: clock.badge.checkmark icon + "TIME SAVED" caption (uppercase, semibold).
 /// - Empty state: helper text "Start listening with Cadence on to see your saved time."
 /// - Populated state: large bold duration (e.g. "4h 12m") + subtitle with book count.
+/// A reusable Cadence stat card (icon + uppercase title + big value + optional subtitle, on a
+/// rounded grouped-background card). Two of these sit side by side in Settings (Time Saved +
+/// Render Time); the big value shrinks to fit the narrower half-width layout.
+struct CadenceStatCard: View {
+    let icon: String
+    let title: String
+    /// Large value string (e.g. "4h 12m"). Ignored when `isEmpty`.
+    let value: String
+    var subtitle: String? = nil
+    /// Shown in place of `value` when there's nothing to report yet.
+    var emptyText: String? = nil
+    var isEmpty: Bool = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: DS.Spacing.sm) {
+            HStack(spacing: DS.Spacing.sm) {
+                Image(systemName: icon)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text(title)
+                    .font(.caption)
+                    .fontWeight(.semibold)
+                    .textCase(.uppercase)
+                    .kerning(0.8)
+                    .foregroundStyle(.secondary)
+                Spacer(minLength: 0)
+            }
+
+            if isEmpty, let emptyText {
+                Text(emptyText)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            } else {
+                Text(value)
+                    .font(.system(size: 40, weight: .bold, design: .rounded))
+                    .monospacedDigit()
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.5)
+                if let subtitle {
+                    Text(subtitle)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, minHeight: 92, alignment: .topLeading)
+        .padding(DS.Spacing.lg)
+        .background(Color(.secondarySystemGroupedBackground))
+        .clipShape(RoundedRectangle(cornerRadius: 16))
+    }
+}
+
 struct CadenceTimeSavedCard: View {
     /// Total seconds saved across all audiobooks.
     let totalSeconds: TimeInterval
@@ -18,44 +71,13 @@ struct CadenceTimeSavedCard: View {
     let bookCount: Int
 
     var body: some View {
-        VStack(alignment: .leading, spacing: DS.Spacing.sm) {
-            // Header row
-            HStack(spacing: DS.Spacing.sm) {
-                Image(systemName: "clock.badge.checkmark")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Text("TIME SAVED")
-                    .font(.caption)
-                    .fontWeight(.semibold)
-                    .textCase(.uppercase)
-                    .kerning(0.8)
-                    .foregroundStyle(.secondary)
-                Spacer()
-            }
-
-            if totalSeconds <= 0 {
-                // Empty state
-                Text("Start listening with Cadence on to see your saved time.")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-            } else {
-                // Populated state
-                Text(compactDuration(totalSeconds))
-                    .font(.system(size: 40, weight: .bold, design: .rounded))
-                    .monospacedDigit()
-                    .foregroundStyle(.primary)
-
-                if bookCount > 0 {
-                    Text("across \(bookCount) audiobook\(bookCount == 1 ? "" : "s")")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(DS.Spacing.lg)
-        .background(Color(.secondarySystemGroupedBackground))
-        .clipShape(RoundedRectangle(cornerRadius: 16))
+        CadenceStatCard(
+            icon: "clock.badge.checkmark",
+            title: "TIME SAVED",
+            value: compactDuration(totalSeconds),
+            subtitle: bookCount > 0 ? "across \(bookCount) audiobook\(bookCount == 1 ? "" : "s")" : nil,
+            emptyText: "Start listening with Cadence on to see your saved time.",
+            isEmpty: totalSeconds <= 0)
     }
 
     // MARK: - Helpers

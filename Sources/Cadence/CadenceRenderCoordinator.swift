@@ -19,6 +19,15 @@ actor CadenceRenderCoordinator {
     private var isRunning = false
     private var currentBookID: UUID?
     private var activeTask: Task<Void, Never>?
+    /// True once `cancel` has cancelled the in-flight book's task. Lets a re-`enqueue` of that same
+    /// book (the WP9 tier-change pattern: cancel → enqueue) queue a fresh render instead of being
+    /// dropped by the "already current" guard — the current task is being torn down, so a new render
+    /// IS wanted. Reset when the next book actually starts. Without this, a tier change issued while
+    /// the previous render is still finishing (e.g. mid-upload) would never re-render.
+    private var currentCancelled = false
+    /// Render progress (0...1) for the book currently rendering, weighted by file duration.
+    /// Read by the per-book settings sheet to draw a progress bar; cleared when the book finishes.
+    private var progressByBook: [UUID: Double] = [:]
 
     /// Wire the container at launch. Drains anything enqueued before configuration.
     func configure(container: ModelContainer) {
@@ -37,15 +46,49 @@ actor CadenceRenderCoordinator {
            let book = (try? ModelContext(container).fetch(FetchDescriptor<Audiobook>()))?
                .first(where: { $0.id == bookID }),
            case .off = book.resolvedCadence { return }
-        if currentBookID != bookID && !queue.contains(bookID) { queue.append(bookID) }
+        // Queue unless it's already waiting, or already the current book (idempotent) — EXCEPT when
+        // the current book was just cancelled (tier change), where a fresh render IS wanted.
+        let isCurrentAndLive = currentBookID == bookID && !currentCancelled
+        if !isCurrentAndLive && !queue.contains(bookID) { queue.append(bookID) }
         startNextIfIdle()
     }
+
+    /// Enqueue every known audiobook. Idempotent: already-rendered files are cache-hits that skip
+    /// re-render, so this self-heals a book that was imported before rendering existed.
+    func enqueueAllBooks() {
+        guard let container else { return }
+        let ids = ((try? ModelContext(container).fetch(FetchDescriptor<Audiobook>())) ?? []).map(\.id)
+        for id in ids { enqueue(bookID: id) }
+    }
+
+    /// Whether this book is currently rendering or waiting in the queue. Lets the per-book
+    /// settings sheet show a live "Preparing…" instead of a dead-ended empty state.
+    func isWorking(on bookID: UUID) -> Bool {
+        currentBookID == bookID || queue.contains(bookID)
+    }
+
+    /// Current render progress (0...1) for a book, or nil if it isn't rendering. Drives the
+    /// progress bar in the per-book settings sheet.
+    func renderProgress(for bookID: UUID) -> Double? { progressByBook[bookID] }
+
+    /// A live snapshot of what the coordinator is doing, for the render-status screen.
+    struct RenderSnapshot: Sendable {
+        /// Book currently rendering → progress 0...1.
+        let activeProgress: [UUID: Double]
+        /// Books waiting in the queue (not yet started).
+        let queued: [UUID]
+    }
+    func snapshot() -> RenderSnapshot { RenderSnapshot(activeProgress: progressByBook, queued: queue) }
+
+    /// Set from the render's progress callback (hopped onto the actor).
+    private func setRenderProgress(_ bookID: UUID, _ value: Double) { progressByBook[bookID] = value }
 
     /// Cancel an in-flight or queued render (e.g. on tier change — WP9). The partial `.m4a` is
     /// discarded; a fresh `enqueue` re-renders from scratch (book-granularity resume).
     func cancel(bookID: UUID) {
         queue.removeAll { $0 == bookID }
-        if currentBookID == bookID { activeTask?.cancel() }
+        progressByBook[bookID] = nil
+        if currentBookID == bookID { currentCancelled = true; activeTask?.cancel() }
     }
 
     // MARK: - Draining
@@ -55,6 +98,7 @@ actor CadenceRenderCoordinator {
         isRunning = true
         let bookID = queue.removeFirst()
         currentBookID = bookID
+        currentCancelled = false
         activeTask = Task { [weak self] in
             await self?.process(bookID: bookID)
             await self?.finishCurrent()
@@ -62,6 +106,7 @@ actor CadenceRenderCoordinator {
     }
 
     private func finishCurrent() {
+        if let id = currentBookID { progressByBook[id] = nil }
         isRunning = false
         currentBookID = nil
         activeTask = nil
@@ -79,6 +124,11 @@ actor CadenceRenderCoordinator {
         // resolved tier. Covers global-off-with-per-book-force-on, per-book "off", and DRM.
         guard case .on(let tier) = book.resolvedCadence else { return }
         let jobs = Self.buildJobs(for: book)
+        // Book-level progress is weighted by each file's duration; `completedDuration` advances as
+        // files finish (or are skipped because already rendered).
+        let totalDuration = jobs.reduce(0) { $0 + $1.duration }
+        var completedDuration: TimeInterval = 0
+        progressByBook[bookID] = 0
 
         for job in jobs {
             if Task.isCancelled { break }
@@ -89,6 +139,8 @@ actor CadenceRenderCoordinator {
                FileManager.default.fileExists(atPath: (try? ContainerPaths.cacheURL(forRelativePath: existing.trimmedRelPath))?.path ?? "") {
                 existing.lastUsedAt = Date()
                 try? ctx.save()
+                completedDuration += job.duration
+                progressByBook[bookID] = totalDuration > 0 ? completedDuration / totalDuration : 1
                 continue
             }
 
@@ -100,15 +152,32 @@ actor CadenceRenderCoordinator {
                 sourceURL: job.sourceURL, cutPoints: job.cutPoints, titles: job.titles,
                 preset: tier, outputURL: outputURL)
 
+            // Hop per-chunk file progress back onto the actor, weighted into book progress.
+            let base = completedDuration
+            let jobDuration = job.duration
+            let onProgress: @Sendable (Double) -> Void = { [weak self] fileFraction in
+                guard let self else { return }
+                let value = totalDuration > 0 ? (base + fileFraction * jobDuration) / totalDuration : 0
+                Task { await self.setRenderProgress(bookID, min(1, value)) }
+            }
+
+            let renderStart = Date()
             do {
                 // Heavy decode/analyze/render off the actor; only Sendable values cross back.
-                let result = try await Task.detached(priority: .utility) {
-                    try CadenceRenderer().render(request)
+                // `.userInitiated` (not `.utility`) so it runs on the performance cores rather than
+                // being pinned to the efficiency cores — the user is usually waiting on the
+                // "Preparing…" bar. Trades some battery/contention for a much faster prepare.
+                let result = try await Task.detached(priority: .userInitiated) {
+                    try CadenceRenderer().render(request, onProgress: onProgress)
                 }.value
 
+                // Record how long this file took: the lifetime counter + the per-file duration
+                // shown on the render-status screen.
+                let elapsed = Date().timeIntervalSince(renderStart)
+                CadenceStats.addRender(elapsed)
                 Self.upsertRendition(ctx, bookID: bookID, relPath: job.relPath,
                                      fingerprint: job.fingerprint, tier: tier.rawValue,
-                                     trimmedRelPath: outputRel, result: result)
+                                     trimmedRelPath: outputRel, result: result, renderDuration: elapsed)
                 try? ctx.save()
                 // WP6: evict LRU renditions if total on-disk bytes exceeds the cap.
                 CadenceCache.evictIfNeeded(context: ctx)
@@ -134,6 +203,8 @@ actor CadenceRenderCoordinator {
                 // Other render failure: remove partial output; playback falls back to the original.
                 try? FileManager.default.removeItem(at: outputURL)
             }
+            completedDuration += jobDuration
+            progressByBook[bookID] = totalDuration > 0 ? completedDuration / totalDuration : 1
         }
     }
 
@@ -147,6 +218,8 @@ actor CadenceRenderCoordinator {
         let cutPoints: [TimeInterval]
         let titles: [String]
         let fingerprint: String
+        /// Total source duration of this file (sum of its tracks) — weights book-level progress.
+        let duration: TimeInterval
     }
 
     static func buildJobs(for book: Audiobook) -> [Job] {
@@ -170,7 +243,8 @@ actor CadenceRenderCoordinator {
             var acc: TimeInterval = 0
             for t in tracks { cutPoints.append(acc); acc += t.duration }
             jobs.append(Job(relPath: relPath, sourceURL: sourceURL,
-                            cutPoints: cutPoints, titles: tracks.map(\.title), fingerprint: fingerprint))
+                            cutPoints: cutPoints, titles: tracks.map(\.title),
+                            fingerprint: fingerprint, duration: acc))
         }
         return jobs
     }
@@ -196,8 +270,9 @@ actor CadenceRenderCoordinator {
     }
 
     static func upsertRendition(_ ctx: ModelContext, bookID: UUID, relPath: String,
-                                fingerprint: String, tier: String, trimmedRelPath: String,
-                                result: CadenceRenderResult) {
+                                fingerprint: String, tier: String,
+                                trimmedRelPath: String,
+                                result: CadenceRenderResult, renderDuration: TimeInterval) {
         // Replace any prior row for this file (stale key/version/tier).
         let stale = (try? ctx.fetch(FetchDescriptor<TrimmedRendition>()))?
             .filter { $0.bookID == bookID && $0.sourceFileRelPath == relPath } ?? []
@@ -205,6 +280,7 @@ actor CadenceRenderCoordinator {
 
         let timelineBlob = (try? JSONEncoder().encode(result.timelineMap)) ?? Data()
         let chapterBlob = (try? JSONEncoder().encode(result.chapters)) ?? Data()
+        let projectedBlob = try? JSONEncoder().encode(result.projectedSavedByTier)
         ctx.insert(TrimmedRendition(
             bookID: bookID, sourceFileRelPath: relPath, tier: tier,
             contentFingerprint: fingerprint,
@@ -212,6 +288,8 @@ actor CadenceRenderCoordinator {
             trimmedRelPath: trimmedRelPath,
             originalDuration: result.originalDuration, trimmedDuration: result.trimmedDuration,
             savedSeconds: result.savedSeconds,
-            timelineMapBlob: timelineBlob, chapterMapBlob: chapterBlob))
+            projectedSavedByTierBlob: projectedBlob,
+            timelineMapBlob: timelineBlob, chapterMapBlob: chapterBlob,
+            renderDurationSeconds: renderDuration))
     }
 }

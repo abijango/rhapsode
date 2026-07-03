@@ -29,13 +29,21 @@ public struct CadenceSettings: Equatable, Codable, Sendable {
     /// Equal-power crossfade length applied at every splice so joins never click. (Rule 4.)
     public var crossfadeMs: Double
 
+    /// Absolute loudness ceiling (dBFS) for trimmable silence. A window may be collapsed only if
+    /// it is BOTH below the adaptive threshold AND below this ceiling. This composes as a `min()`
+    /// with the adaptive threshold, so it can only make detection *stricter*: clean narration
+    /// (whose quiet gaps sit far below this) is unaffected, while a continuous music/ambience bed
+    /// — which pushes the adaptive "floor" loud — is never mistaken for silence and chopped.
+    public var absoluteSilenceCeilingDb: Double
+
     public init(
         minSilenceDuration: TimeInterval = 0.28,
         minKeptSilence: TimeInterval = 0.18,
         residualSlope: Double = 0.12,
         thresholdMarginDb: Double = 8.0,
         edgeGuardMs: Double = 40,
-        crossfadeMs: Double = 15
+        crossfadeMs: Double = 15,
+        absoluteSilenceCeilingDb: Double = -50
     ) {
         self.minSilenceDuration = minSilenceDuration
         self.minKeptSilence = minKeptSilence
@@ -43,5 +51,6 @@ public struct CadenceSettings: Equatable, Codable, Sendable {
         self.thresholdMarginDb = thresholdMarginDb
         self.edgeGuardMs = edgeGuardMs
         self.crossfadeMs = crossfadeMs
+        self.absoluteSilenceCeilingDb = absoluteSilenceCeilingDb
     }
 }

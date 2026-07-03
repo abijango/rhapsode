@@ -11,6 +11,11 @@ struct RhapsodeApp: App {
     let modelContainer: ModelContainer
     /// App-wide sync/download pipeline, observed by the shelves + downloads UI.
     @State private var sync: SyncManager
+    /// App-lifetime audiobook player so playback survives navigation (tab switches,
+    /// returning to the shelf) instead of being torn down with the player view.
+    @State private var audioPlayer: AudiobookPlayer
+    /// Global light/dark preference (Settings → Appearance). Applied at the root below.
+    @AppStorage(AppAppearance.storageKey) private var appearanceRaw = AppAppearance.system.rawValue
 
     init() {
         // Ensure Application Support exists before SwiftData creates its store there
@@ -31,18 +36,39 @@ struct RhapsodeApp: App {
         // Share one DropboxSource between the library pipeline and progress sync so
         // token refresh stays serialized through a single actor.
         let dropbox = DropboxSource()
-        _sync = State(initialValue: SyncManager(
+        let syncManager = SyncManager(
             source: dropbox,
             context: container.mainContext,
-            progress: DropboxProgressSync(source: dropbox)))
+            progress: DropboxProgressSync(source: dropbox))
+        _sync = State(initialValue: syncManager)
         // Register the background-refresh handler before launch completes.
         BackgroundRefresh.register(container: container)
         // Wire the container into BackgroundDownloader so its delegate callbacks
         // can reach SwiftData. Must happen before any background tasks fire.
         BackgroundDownloader.shared.container = container
-        // Wire the Cadence render coordinator (WP4); it drains anything enqueued before
-        // configuration once the container arrives.
-        Task { await CadenceRenderCoordinator.shared.configure(container: container) }
+        // When a freshly downloaded book finishes importing, re-pull cross-device
+        // progress so a position pushed by another device applies right away.
+        BackgroundDownloader.shared.onImportFinished = { [syncManager] in
+            Task { await syncManager.pullAndMergeProgress() }
+        }
+        // WP-B: continuous push — when the app-lifetime player reports a position change
+        // (throttled/forced inside the player), upload it cross-device. Wire the callback BEFORE
+        // storing the player in @State (mirrors `_sync = State(initialValue:)` above) so the wired
+        // instance is provably the one injected via `.environment(audioPlayer)`. Captures the same
+        // syncManager instance so token refresh stays serialized through the one actor.
+        let player = AudiobookPlayer()
+        player.onProgressChanged = { [syncManager] key in
+            Task { await syncManager.pushAudiobookProgress(sourcePath: key) }
+        }
+        _audioPlayer = State(initialValue: player)
+        // WP-C: let SyncManager reconcile the live player when a newer remote position is
+        // merged (auto-jump + prevents the player's cached position clobbering the merge).
+        syncManager.audioPlayer = player
+        // Wire the Cadence render coordinator; it drains anything enqueued before configuration
+        // once the container arrives.
+        Task {
+            await CadenceRenderCoordinator.shared.configure(container: container)
+        }
         // Show download notifications even while the app is in the foreground.
         NotificationPresenter.install()
         // Reconcile any downloads that were in-flight when the app was last killed.
@@ -55,20 +81,33 @@ struct RhapsodeApp: App {
                 #if DEBUG
                 if CommandLine.arguments.contains("-readerscreenshot") {
                     DebugReaderHarness()
+                } else if CommandLine.arguments.contains("-previewbookstats") {
+                    BookStatsPreviewHarness()
+                } else if CommandLine.arguments.contains("-previewplayer") {
+                    PlayerPreviewHarness().environment(sync)
                 } else {
                     RootTabView()
                         .environment(sync)
+                        .environment(audioPlayer)
                         .task {
                             if PhaseZeroSelfTest.isRequested {
                                 await PhaseZeroSelfTest.run(context: modelContainer.mainContext)
+                            }
+                            if LiveCadenceSelfTest.isRequested {
+                                await LiveCadenceSelfTest.run()
+                            }
+                            if CommandLine.arguments.contains("-seedstats") {
+                                Self.seedStats(context: modelContainer.mainContext)
                             }
                         }
                 }
                 #else
                 RootTabView()
                     .environment(sync)
+                    .environment(audioPlayer)
                 #endif
             }
+            .preferredColorScheme((AppAppearance(rawValue: appearanceRaw) ?? .system).colorScheme)
         }
         .modelContainer(modelContainer)
 #if targetEnvironment(macCatalyst)
@@ -99,5 +138,30 @@ struct RhapsodeApp: App {
         }
 #endif
     }
+
+    #if DEBUG
+    /// DEBUG-only: seed a few audiobooks with listened/saved stats so the Nerd Stats receipt can be
+    /// previewed with data (launch arg `-seedstats`). Idempotent — skips if already seeded.
+    @MainActor
+    static func seedStats(context: ModelContext) {
+        let existing = (try? context.fetch(FetchDescriptor<Audiobook>())) ?? []
+        guard !existing.contains(where: { $0.sourcePath.hasPrefix("seed:") }) else { return }
+        let seed: [(String, Double, Double)] = [
+            ("Harry Potter and the Goblet of Fire (Full-Cast Edition)", 11_520, 1_440),
+            ("Project Hail Mary", 6_000, 540),
+            ("Dune", 3_120, 180),
+            ("The Hobbit", 7_500, 840),
+        ]
+        for (title, played, saved) in seed {
+            let b = Audiobook(title: title, sourcePath: "seed:\(title)")
+            b.listenedSeconds = played
+            b.cadenceSavedSeconds = saved
+            context.insert(b)
+        }
+        try? context.save()
+        CadenceStats.totalPlayedSeconds = seed.reduce(0) { $0 + $1.1 }
+        CadenceStats.totalSavedSeconds = seed.reduce(0) { $0 + $1.2 }
+    }
+    #endif
 }
 

@@ -11,6 +11,9 @@ enum CadenceStats {
     // concurrency we reference it inline rather than holding it in static storage.
     private enum Key {
         static let totalSavedSeconds = "cadence.totalSavedSeconds"
+        static let totalRenderSeconds = "cadence.totalRenderSeconds"
+        static let totalPlayedSeconds = "cadence.totalPlayedSeconds"
+        static let updatedAt = "cadence.statsUpdatedAt"
     }
 
     /// Total seconds saved by the Cadence feature across all books, accumulated from
@@ -26,11 +29,74 @@ enum CadenceStats {
         }
     }
 
+    /// Total wall-clock seconds spent rendering trimmed audio across all books (a lifetime
+    /// running counter, accrued one render at a time). Clamped to zero.
+    static var totalRenderSeconds: TimeInterval {
+        get {
+            let raw = UserDefaults.standard.double(forKey: Key.totalRenderSeconds)
+            return raw < 0 ? 0 : raw
+        }
+        set {
+            let clamped = newValue < 0 ? 0 : newValue
+            UserDefaults.standard.set(clamped, forKey: Key.totalRenderSeconds)
+        }
+    }
+
+    /// Total seconds of trimmed/output CONTENT actually listened through across all books
+    /// (rate-independent — counts the per-tick trimmed-domain delta, not wall-clock). Accrues on
+    /// every valid playing tick regardless of trimming. Clamped to zero (never negative).
+    static var totalPlayedSeconds: TimeInterval {
+        get {
+            let raw = UserDefaults.standard.double(forKey: Key.totalPlayedSeconds)
+            return raw < 0 ? 0 : raw
+        }
+        set {
+            let clamped = newValue < 0 ? 0 : newValue
+            UserDefaults.standard.set(clamped, forKey: Key.totalPlayedSeconds)
+        }
+    }
+
+    /// When the stats last changed locally (or were applied from a remote backup). Drives the
+    /// last-writer-wins backup in Dropbox. nil = never recorded.
+    static var updatedAt: Date? {
+        get { UserDefaults.standard.object(forKey: Key.updatedAt) as? Date }
+        set { UserDefaults.standard.set(newValue, forKey: Key.updatedAt) }
+    }
+
     /// Add saved seconds to the cumulative total, clamping negatives to zero.
     /// - Parameter seconds: seconds to add; negative values are treated as zero (no-op).
     static func addSaved(_ seconds: TimeInterval) {
         let clamped = seconds < 0 ? 0 : seconds
+        guard clamped > 0 else { return }
         totalSavedSeconds += clamped
+        updatedAt = Date()
+    }
+
+    /// Add listened content seconds to the cumulative played total, clamping negatives to zero.
+    /// - Parameter seconds: seconds to add; negative values are treated as zero (no-op).
+    static func addPlayed(_ seconds: TimeInterval) {
+        let clamped = seconds < 0 ? 0 : seconds
+        guard clamped > 0 else { return }
+        totalPlayedSeconds += clamped
+        updatedAt = Date()
+    }
+
+    /// Add wall-clock render seconds to the lifetime render-time counter.
+    static func addRender(_ seconds: TimeInterval) {
+        let clamped = seconds < 0 ? 0 : seconds
+        guard clamped > 0 else { return }
+        totalRenderSeconds += clamped
+        updatedAt = Date()
+    }
+
+    /// Adopt totals from a (newer) remote backup. Does NOT stamp a new `updatedAt` — it carries the
+    /// remote's so the next push won't bounce. Caller decides the LWW comparison.
+    static func apply(savedSeconds: TimeInterval, renderSeconds: TimeInterval,
+                      playedSeconds: TimeInterval, updatedAt stamp: Date) {
+        totalSavedSeconds = savedSeconds
+        totalRenderSeconds = renderSeconds
+        totalPlayedSeconds = playedSeconds
+        updatedAt = stamp
     }
 
     /// Formatted string representation of total saved time in the form "X h Y min saved"

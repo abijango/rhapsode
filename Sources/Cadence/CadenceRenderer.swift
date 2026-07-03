@@ -27,6 +27,11 @@ struct CadenceRenderResult: Sendable {
     let regionCount: Int
     let timelineMap: CadenceTimelineMap
     let chapters: [CadenceChapterMark]
+    /// Projected seconds saved for EVERY tier (`Preset.rawValue` → seconds), computed from the
+    /// same decoded audio as the render. The expensive decode is shared; each extra tier is only
+    /// a cheap windowed-RMS + policy pass. Pre-splice ideal (within a crossfade delta of the
+    /// rendered actual), used for the per-book per-tier savings comparison.
+    let projectedSavedByTier: [String: TimeInterval]
 }
 
 enum CadenceRenderError: Error, CustomStringConvertible {
@@ -57,7 +62,9 @@ struct CadenceRenderer {
     /// 5 min keeps peak decode memory modest (≈100 MB stereo float32 @ 44.1 kHz per buffer).
     var maxChunkSeconds: TimeInterval = 300
 
-    func render(_ req: CadenceRenderRequest) throws -> CadenceRenderResult {
+    /// `onProgress` is called after each chunk with the fraction of THIS file's source duration
+    /// processed (0...1). Called on the render's (off-actor) thread — the coordinator hops it back.
+    func render(_ req: CadenceRenderRequest, onProgress: (@Sendable (Double) -> Void)? = nil) throws -> CadenceRenderResult {
         let settings = CadenceSettings(preset: req.preset)
 
         // Probe format + duration. Wraps any AVAudioFile failure as AudioIOError.undecodable so the
@@ -85,6 +92,10 @@ struct CadenceRenderer {
         var mapBuilder = CadenceTimelineMapBuilder()
         var cumulativeTrimmed: TimeInterval = 0
         var regionCount = 0
+        // Projected savings for EVERY tier, accumulated across chunks. The active tier reuses the
+        // regions the renderer already detected; the others are a cheap extra analysis on the same
+        // decoded `mono` buffer (the costly decode is shared). See `projectedSaved`.
+        var projectedSavedByTier: [String: TimeInterval] = [:]
 
         for w in windows {
             try Task.checkCancellation()   // cooperative cancel between chunks (WP4 coordinator)
@@ -96,15 +107,32 @@ struct CadenceRenderer {
                     throw CadenceRenderError.sampleRateMismatch(chunk: buffer.format.sampleRate, file: sampleRate)
                 }
                 let mono = AudioIO.downmixToMono(buffer)
-                let analysis = SilenceAnalyzer(settings: settings).analyze(monoSamples: mono, sampleRate: sampleRate)
+                // Compute the expensive loudness profile ONCE (tier-independent), then derive
+                // regions per tier from it — the active tier for the actual render, and every tier
+                // for the savings projection. Avoids re-running the windowed-RMS pass per tier.
+                let profile = SilenceAnalyzer.profile(monoSamples: mono, sampleRate: sampleRate)
+                let activeRegions = SilenceAnalyzer(settings: settings).regions(from: profile)
                 let rendered = try OfflineTrimRenderer(settings: settings)
-                    .renderMapped(buffer: buffer, regions: analysis.regions)
+                    .renderMapped(buffer: buffer, regions: activeRegions)
                 try writer.append(rendered.buffer)
                 mapBuilder.append(segments: rendered.segments, sampleRate: sampleRate,
                                   sourceBase: w.start, trimmedBase: cumulativeTrimmed)
                 cumulativeTrimmed += Double(rendered.buffer.frameLength) / sampleRate
-                regionCount += analysis.regions.count
+                regionCount += activeRegions.count
+
+                // Per-tier projection: reuse the active tier's regions; for the others derive
+                // regions from the SAME profile (cheap — no extra RMS), since each tier detects
+                // and shortens silences differently.
+                for preset in CadenceSettings.Preset.allCases {
+                    let tierSettings = preset == req.preset ? settings : CadenceSettings(preset: preset)
+                    let regions = preset == req.preset
+                        ? activeRegions
+                        : SilenceAnalyzer(settings: tierSettings).regions(from: profile)
+                    projectedSavedByTier[preset.rawValue, default: 0] += Self.projectedSaved(regions: regions, settings: tierSettings)
+                }
             }
+            // Fraction of this file's source duration processed (windows cover [0, originalDuration]).
+            onProgress?(originalDuration > 0 ? min(1.0, w.end / originalDuration) : 0)
         }
         writer.finish()
 
@@ -121,7 +149,18 @@ struct CadenceRenderer {
         return CadenceRenderResult(
             originalDuration: originalDuration, trimmedDuration: cumulativeTrimmed,
             savedSeconds: max(0, originalDuration - cumulativeTrimmed),
-            regionCount: regionCount, timelineMap: map, chapters: chapters)
+            regionCount: regionCount, timelineMap: map, chapters: chapters,
+            projectedSavedByTier: projectedSavedByTier)
+    }
+
+    /// Pre-splice projected saving for one tier: the sum over its detected silences of
+    /// `(D − target(D))`. Tier-independent decode/RMS is done by the caller; this is the cheap
+    /// policy step. Matches `TrimReport`'s ideal figure (actual rendered saving is a crossfade
+    /// delta less), and is identical for every tier so the comparison is apples-to-apples.
+    private static func projectedSaved(regions: [SilenceRegion], settings: CadenceSettings) -> TimeInterval {
+        regions.reduce(0.0) { acc, region in
+            acc + (region.duration - SilencePolicy.target(forSilenceDuration: region.duration, settings: settings))
+        }
     }
 
     struct Window: Equatable { let start: TimeInterval; let end: TimeInterval }

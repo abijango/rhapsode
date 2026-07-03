@@ -28,16 +28,21 @@ struct CadenceSettingsView: View {
 
     @State private var isPreparing = false
     @State private var pollingTask: Task<Void, Never>?
+    /// Per-tier projected savings for this book (summed across its rendered files). Refreshed on
+    /// appear and whenever a (re-)render lands (`isPreparing` → false).
+    @State private var savings: CadenceProjectedSavings?
+    /// Live render progress (0...1) from the coordinator while this book is being prepared.
+    @State private var renderProgress: Double?
 
     var body: some View {
         NavigationStack {
             Form {
                 Section {
                     Picker(selection: choiceBinding) {
-                        Text(useGlobalLabel).tag(Choice.useGlobal)
-                        Text("Off").tag(Choice.off)
+                        tierRow(useGlobalLabel, savedText: nil).tag(Choice.useGlobal)
+                        tierRow("Off", savedText: nil).tag(Choice.off)
                         ForEach(CadenceSettings.Preset.allCases, id: \.self) { preset in
-                            Text(preset.displayName).tag(Choice.preset(preset))
+                            tierRow(preset.displayName, savedText: savedText(for: preset)).tag(Choice.preset(preset))
                         }
                     } label: {
                         EmptyView()
@@ -47,14 +52,32 @@ struct CadenceSettingsView: View {
                 } header: {
                     Text("For This Audiobook")
                 } footer: {
-                    Text(footerText)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(footerText)
+                        if savings?.hasData == true {
+                            Text("Projected from this book’s silences.")
+                        } else if case .on = book.resolvedCadence {
+                            // No per-tier breakdown yet. Distinguish "rendered before this existed"
+                            // (has a rendition, just no projections) from "not prepared yet".
+                            if (savings?.originalDuration ?? 0) > 0 {
+                                Text("Switch tiers once to calculate per-tier savings.")
+                            } else {
+                                Text("Per-tier savings appear once this book is prepared.")
+                            }
+                        }
+                    }
                 }
 
                 if isPreparing {
                     Section {
-                        HStack(spacing: 8) {
-                            ProgressView()
-                            Text("Preparing…").font(.callout).foregroundStyle(.secondary)
+                        VStack(alignment: .leading, spacing: DS.Spacing.sm) {
+                            HStack(spacing: 8) {
+                                if renderProgress == nil { ProgressView() }
+                                Text(preparingLabel).font(.callout).foregroundStyle(.secondary)
+                            }
+                            if let progress = renderProgress, progress > 0 {
+                                LinearProgressBar(fraction: progress, height: 6)
+                            }
                         }
                     }
                 }
@@ -72,6 +95,20 @@ struct CadenceSettingsView: View {
                     Button("Done") { dismiss() }
                 }
             }
+            .task {
+                refreshSavings()
+                // Cadence is on for this book but nothing has been rendered yet: make sure a
+                // render is running (kick one if idle) and show live progress, rather than a
+                // silent empty state. A no-op once a rendition with projections exists.
+                if savings?.hasData != true, case .on(let tier) = book.resolvedCadence {
+                    if await !CadenceRenderCoordinator.shared.isWorking(on: book.id) {
+                        await CadenceRenderCoordinator.shared.enqueue(bookID: book.id)
+                    }
+                    startPreparingPoll(for: tier)
+                }
+            }
+            // A (re-)render landing flips isPreparing back to false — pull the fresh projections.
+            .onChange(of: isPreparing) { _, preparing in if !preparing { refreshSavings() } }
             .onDisappear { cancelPolling() }
         }
         .presentationDragIndicator(.visible)
@@ -151,24 +188,65 @@ struct CadenceSettingsView: View {
         let ctx = modelContext
         let p = player
         pollingTask = Task {
-            // Poll up to ~30 s for the rendition for the chosen tier to land.
-            for _ in 0..<300 {
-                try? await Task.sleep(nanoseconds: 100_000_000)
-                if Task.isCancelled { return }
+            while !Task.isCancelled {
+                // Swap the live player onto the trimmed source as soon as it's playable.
                 if AudiobookPlayer.selectTrimmedSource(bookID: bookID, relPath: relPath,
                                                        tier: tierRaw, context: ctx) != nil {
-                    isPreparing = false
                     p.applyCadenceChange()
+                }
+                refreshSavings()
+                renderProgress = await CadenceRenderCoordinator.shared.renderProgress(for: bookID)
+                if savings?.hasData == true { isPreparing = false; renderProgress = nil; return }
+                // Keep the spinner only while the render is actually queued/in-flight. If it
+                // stops with no projections (failed / DRM), drop it so the footer hint shows.
+                if await !CadenceRenderCoordinator.shared.isWorking(on: bookID) {
+                    isPreparing = false
+                    renderProgress = nil
                     return
                 }
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
             }
-            isPreparing = false   // timed out; original keeps playing
         }
+    }
+
+    /// "Preparing… 42%" once a fraction is known, otherwise the indeterminate label.
+    private var preparingLabel: String {
+        if let progress = renderProgress, progress > 0 {
+            return "Preparing… \(Int((progress * 100).rounded()))%"
+        }
+        return "Preparing…"
     }
 
     private func cancelPolling() {
         pollingTask?.cancel()
         pollingTask = nil
+        renderProgress = nil
+    }
+
+    // MARK: - Per-tier savings
+
+    /// A picker row: tier name on the left, projected reduction on the right (when known).
+    private func tierRow(_ name: String, savedText: String?) -> some View {
+        HStack {
+            Text(name)
+            if let savedText {
+                Spacer()
+                Text(savedText).foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    /// "47m shorter" for a tier with a known projection; nil when there is no data or it rounds
+    /// to nothing (so the row stays clean rather than showing "0m").
+    private func savedText(for preset: CadenceSettings.Preset) -> String? {
+        guard let savings, savings.hasData else { return nil }
+        let seconds = savings.saved(for: preset)
+        guard seconds >= 30 else { return nil }
+        return "\(Self.compactDuration(seconds)) shorter"
+    }
+
+    private func refreshSavings() {
+        savings = Audiobook.projectedSavings(forBookID: book.id, context: modelContext)
     }
 
     /// Compact per-book duration, e.g. "1h 3m", "12m", "<1m".

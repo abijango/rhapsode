@@ -107,8 +107,8 @@
   <text x="880" y="160" font-size="10.5" fill="#5b6472" text-anchor="middle">EPUB rendering (UIKit)</text>
   <!-- CadenceKit -->
   <rect x="752" y="262" width="256" height="50" rx="10" fill="#ffffff" stroke="#2f6f6a"/>
-  <text x="880" y="283" font-size="13" font-weight="600" fill="#1d2433" text-anchor="middle">CadenceKit package</text>
-  <text x="880" y="300" font-size="10.5" fill="#2f6f6a" text-anchor="middle">Accelerate + AVFoundation only</text>
+  <text x="880" y="283" font-size="13" font-weight="600" fill="#1d2433" text-anchor="middle">SmartSpeech engine</text>
+  <text x="880" y="300" font-size="10.5" fill="#2f6f6a" text-anchor="middle">CadenceKit · Accelerate + AVFoundation</text>
 
   <!-- ============ CONNECTORS ============ -->
   <!-- vertical band-to-band (double headed), center x=376 -->

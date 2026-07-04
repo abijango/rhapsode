@@ -11,7 +11,6 @@ enum CadenceStats {
     // concurrency we reference it inline rather than holding it in static storage.
     private enum Key {
         static let totalSavedSeconds = "cadence.totalSavedSeconds"
-        static let totalRenderSeconds = "cadence.totalRenderSeconds"
         static let totalPlayedSeconds = "cadence.totalPlayedSeconds"
         static let updatedAt = "cadence.statsUpdatedAt"
     }
@@ -26,19 +25,6 @@ enum CadenceStats {
         set {
             let clamped = newValue < 0 ? 0 : newValue
             UserDefaults.standard.set(clamped, forKey: Key.totalSavedSeconds)
-        }
-    }
-
-    /// Total wall-clock seconds spent rendering trimmed audio across all books (a lifetime
-    /// running counter, accrued one render at a time). Clamped to zero.
-    static var totalRenderSeconds: TimeInterval {
-        get {
-            let raw = UserDefaults.standard.double(forKey: Key.totalRenderSeconds)
-            return raw < 0 ? 0 : raw
-        }
-        set {
-            let clamped = newValue < 0 ? 0 : newValue
-            UserDefaults.standard.set(clamped, forKey: Key.totalRenderSeconds)
         }
     }
 
@@ -81,20 +67,10 @@ enum CadenceStats {
         updatedAt = Date()
     }
 
-    /// Add wall-clock render seconds to the lifetime render-time counter.
-    static func addRender(_ seconds: TimeInterval) {
-        let clamped = seconds < 0 ? 0 : seconds
-        guard clamped > 0 else { return }
-        totalRenderSeconds += clamped
-        updatedAt = Date()
-    }
-
     /// Adopt totals from a (newer) remote backup. Does NOT stamp a new `updatedAt` — it carries the
     /// remote's so the next push won't bounce. Caller decides the LWW comparison.
-    static func apply(savedSeconds: TimeInterval, renderSeconds: TimeInterval,
-                      playedSeconds: TimeInterval, updatedAt stamp: Date) {
+    static func apply(savedSeconds: TimeInterval, playedSeconds: TimeInterval, updatedAt stamp: Date) {
         totalSavedSeconds = savedSeconds
-        totalRenderSeconds = renderSeconds
         totalPlayedSeconds = playedSeconds
         updatedAt = stamp
     }

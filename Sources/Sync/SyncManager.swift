@@ -181,12 +181,11 @@ final class SyncManager {
         await pullCadenceStats()
     }
 
-    /// Back up the lifetime Cadence stats (time saved + render time) to Dropbox. Single shared
+    /// Back up the lifetime Cadence stats (time saved + time listened) to Dropbox. Single shared
     /// record, LWW by `updatedAt` (read-before-write guard inside `pushStats`).
     func pushCadenceStats() async {
         let record = CadenceStatsRecord(
             savedSeconds: CadenceStats.totalSavedSeconds,
-            renderSeconds: CadenceStats.totalRenderSeconds,
             playedSeconds: CadenceStats.totalPlayedSeconds,
             updatedAt: CadenceStats.updatedAt ?? Date())
         do { try await progress.pushStats(record) }
@@ -199,7 +198,6 @@ final class SyncManager {
         guard let record = try? await progress.pullStats() else { return }
         if record.isNewer(than: CadenceStats.updatedAt) {
             CadenceStats.apply(savedSeconds: record.savedSeconds,
-                               renderSeconds: record.renderSeconds,
                                // Old records lack playedSeconds — keep the local total rather than zero it.
                                playedSeconds: record.playedSeconds ?? CadenceStats.totalPlayedSeconds,
                                updatedAt: record.updatedAt)

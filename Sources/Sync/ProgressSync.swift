@@ -42,12 +42,12 @@ struct PlaybackProgress: Codable, Sendable, Equatable {
     }()
 }
 
-/// Lifetime Cadence stat totals (time saved + time spent rendering), backed up to the Dropbox app
+/// Lifetime Cadence stat totals (time saved + time listened), backed up to the Dropbox app
 /// folder so they carry over to a new device / reinstall. A single shared record, last-writer-wins
 /// by `updatedAt` — simple; concurrent multi-device adds can clobber (accepted trade-off).
+/// (A legacy `renderSeconds` field from the removed batch pre-render is silently ignored on decode.)
 struct CadenceStatsRecord: Codable, Sendable, Equatable {
     var savedSeconds: TimeInterval
-    var renderSeconds: TimeInterval
     /// Lifetime content seconds listened through. Optional for back-compat: records written before
     /// WP8 lack it and must still decode (via `try?`); apply as `?? current` to avoid zeroing.
     var playedSeconds: TimeInterval? = nil

@@ -3,7 +3,7 @@
 
   <!-- Title -->
   <text x="32" y="46" font-family="Iowan Old Style, Palatino, Charter, Georgia, serif" font-size="30" font-weight="700" fill="#1d2433">Rhapsode — Architecture</text>
-  <text x="32" y="70" font-size="14" fill="#5b6472">Offline-first audiobook &amp; EPUB player · SwiftUI + SwiftData · Dropbox App-folder source · Cadence silence-trimming</text>
+  <text x="32" y="70" font-size="14" fill="#5b6472">Offline-first audiobook &amp; EPUB player · SwiftUI + SwiftData · Dropbox App-folder source · SmartSpeech live silence-trimming</text>
 
   <!-- ============ BAND 1 — Presentation ============ -->
   <rect x="32" y="92" width="688" height="112" rx="12" fill="#eef3f1" stroke="#d4ded9"/>
@@ -16,12 +16,12 @@
   <g font-size="13.5" fill="#1d2433" text-anchor="middle" font-weight="600">
     <text x="152" y="150">Tab Shell &amp; Shelves</text>
     <text x="376" y="150">Player / Reader</text>
-    <text x="600" y="150">Cadence &amp; Settings</text>
+    <text x="600" y="150">Nerd Stats &amp; Settings</text>
   </g>
   <g font-size="11" fill="#5b6472" text-anchor="middle">
     <text x="152" y="170">Audiobooks · Books · Downloads</text>
-    <text x="376" y="170">PlayerView · ReaderView</text>
-    <text x="600" y="170">tier menu · time-saved · Dropbox</text>
+    <text x="376" y="170">PlayerView · SmartSpeech · ReaderView</text>
+    <text x="600" y="170">reclaimed stats · appearance · Dropbox</text>
   </g>
 
   <!-- ============ BAND 2 — Domain & Playback ============ -->
@@ -35,12 +35,12 @@
   <g font-size="13.5" fill="#1d2433" text-anchor="middle" font-weight="600">
     <text x="152" y="290">AudiobookPlayer</text>
     <text x="376" y="290">EbookReader</text>
-    <text x="600" y="290">Cadence Coordinator</text>
+    <text x="600" y="290">Live Trim Engine</text>
   </g>
   <g font-size="11" fill="#5b6472" text-anchor="middle">
-    <text x="152" y="310">AVPlayer · now-playing · resume</text>
+    <text x="152" y="310">AVAudioEngine · now-playing · resume</text>
     <text x="376" y="310">Readium · Locator</text>
-    <text x="600" y="310">render queue · cache · stat</text>
+    <text x="600" y="310">prescan · splice · crossfade</text>
   </g>
 
   <!-- ============ BAND 3 — Library, Sync & Source ============ -->
@@ -61,7 +61,7 @@
   </g>
   <g font-size="10.5" fill="#5b6472" text-anchor="middle">
     <text x="124" y="450">scan · longpoll · queue</text>
-    <text x="460" y="446">LWW · JSON</text>
+    <text x="460" y="446">pos + stats · LWW</text>
     <text x="628" y="450">OAuth PKCE · HTTP</text>
   </g>
 
@@ -75,22 +75,21 @@
   </g>
   <text x="244" y="566" font-size="13" font-weight="700" fill="#1d2433" text-anchor="middle">SwiftData · AppSchema</text>
   <g font-size="11.5" fill="#3a5878" text-anchor="middle" font-family="ui-monospace, SF Mono, Menlo, monospace">
-    <text x="244" y="590">Audiobook · AudiobookTrack · Book</text>
-    <text x="244" y="610">WatchedFolder · DownloadItem</text>
-    <text x="244" y="630">TrimmedRendition</text>
+    <text x="244" y="592">Audiobook · AudiobookTrack</text>
+    <text x="244" y="612">Book · WatchedFolder · DownloadItem</text>
   </g>
   <text x="516" y="566" font-size="12.5" font-weight="700" fill="#1d2433" text-anchor="middle">ContainerPaths</text>
   <g font-size="10.5" fill="#5b6472" text-anchor="middle">
-    <text x="516" y="592">Media —</text>
-    <text x="516" y="607">App Support</text>
-    <text x="516" y="628">Trims — Caches</text>
+    <text x="516" y="594">Media —</text>
+    <text x="516" y="609">App Support</text>
+    <text x="516" y="626">(no on-disk trims)</text>
   </g>
   <text x="648" y="566" font-size="12.5" font-weight="700" fill="#1d2433" text-anchor="middle">Keychain</text>
   <g font-size="10.5" fill="#5b6472" text-anchor="middle">
     <text x="648" y="592">Dropbox</text>
     <text x="648" y="607">OAuth token</text>
   </g>
-  <text x="244" y="648" font-size="9.5" fill="#8a93a0" text-anchor="middle" font-style="italic">relative paths · stable UUIDs · no .unique (CloudKit-friendly)</text>
+  <text x="244" y="644" font-size="9.5" fill="#8a93a0" text-anchor="middle" font-style="italic">relative paths · stable UUIDs · no .unique (CloudKit-friendly)</text>
 
   <!-- ============ EXTERNAL COLUMN ============ -->
   <text x="752" y="113" font-size="11" font-weight="700" letter-spacing="1.5" fill="#5b6472">EXTERNAL</text>
@@ -131,12 +130,12 @@
 
   <!-- Readium -> EbookReader -->
   <line x1="752" y1="147" x2="724" y2="270" stroke="#9aa6a2" stroke-width="1.5" stroke-dasharray="4 3"/>
-  <!-- CadenceKit -> Cadence Coordinator -->
+  <!-- CadenceKit -> Live Trim Engine -->
   <line x1="752" y1="287" x2="704" y2="290" stroke="#2f6f6a" stroke-width="1.5" stroke-dasharray="4 3"/>
 
   <!-- flow legend -->
-  <text x="736" y="510" font-size="10.5" fill="#5b6472" font-style="italic">download · longpoll · progress</text>
+  <text x="736" y="510" font-size="10.5" fill="#5b6472" font-style="italic">download · longpoll · progress + stats</text>
 
-  <!-- Cadence pipeline highlight note -->
-  <text x="600" y="214" font-size="10" fill="#2f6f6a" text-anchor="middle" font-style="italic">on download → render trim → cache</text>
+  <!-- Live-trim highlight note -->
+  <text x="600" y="220" font-size="10" fill="#2f6f6a" text-anchor="middle" font-style="italic">analyze-ahead → trim silence live at playback</text>
 </svg>

@@ -4,7 +4,7 @@ import CadenceKit
 
 /// EXPLORATION MODULE — the live splice half of the hybrid. Runs on its own serial queue, decoding
 /// the original file chunk-by-chunk, trimming each chunk with CadenceKit's validated splice
-/// (`OfflineTrimRenderer.renderMapped` — zero-crossing snap + equal-power crossfade), and scheduling
+/// (`TrimRenderer.renderMapped` — zero-crossing snap + equal-power crossfade), and scheduling
 /// the trimmed PCM into an `AVAudioPlayerNode`. This is the seam the research identified: silence
 /// removal is not a graph node, it's *which samples we schedule*.
 ///
@@ -195,7 +195,7 @@ final class LiveTrimProducer: @unchecked Sendable {
             let decoded = try AudioIO.decode(url, startSeconds: start, durationSeconds: end - start,
                                              maxSeconds: chunkSeconds + 5)
             let regions = trimming ? detectRegions(decoded, settings: tierSettings, floorDb: floor) : []
-            let rendered = try OfflineTrimRenderer(settings: tierSettings)
+            let rendered = try TrimRenderer(settings: tierSettings)
                 .renderMapped(buffer: decoded, regions: regions)
 
             // Bail if a seek happened while we were decoding/rendering.

@@ -3,10 +3,10 @@ import Foundation
 import Testing
 @testable import CadenceKit
 
-@Suite("OfflineTrimRenderer — splices")
-struct OfflineTrimRendererTests {
+@Suite("TrimRenderer — splices")
+struct TrimRendererTests {
     let sampleRate = 48_000.0
-    let renderer = OfflineTrimRenderer(settings: CadenceSettings())
+    let renderer = TrimRenderer(settings: CadenceSettings())
 
     @Test("plan keeps the first target seconds of each silence")
     func planKeepsTarget() {
@@ -28,11 +28,11 @@ struct OfflineTrimRendererTests {
     @Test("Equal-power gains satisfy out² + in² ≈ 1")
     func equalPower() {
         for p in stride(from: 0.0, through: 1.0, by: 0.05) {
-            let (out, incoming) = OfflineTrimRenderer.equalPowerGains(progress: p)
+            let (out, incoming) = TrimRenderer.equalPowerGains(progress: p)
             #expect(abs(out * out + incoming * incoming - 1.0) < 1e-9)
         }
-        #expect(OfflineTrimRenderer.equalPowerGains(progress: 0).out > 0.999)
-        #expect(OfflineTrimRenderer.equalPowerGains(progress: 1).incoming > 0.999)
+        #expect(TrimRenderer.equalPowerGains(progress: 0).out > 0.999)
+        #expect(TrimRenderer.equalPowerGains(progress: 1).incoming > 0.999)
     }
 
     @Test("Crossfade preserves power across distinct signals")
@@ -42,7 +42,7 @@ struct OfflineTrimRendererTests {
         var worst = 0.0
         for k in 0..<n {
             let p = Double(k) / Double(n - 1)
-            let (gOut, gIn) = OfflineTrimRenderer.equalPowerGains(progress: p)
+            let (gOut, gIn) = TrimRenderer.equalPowerGains(progress: p)
             let a = sin(2 * .pi * 5 * p)       // outgoing
             let b = cos(2 * .pi * 7 * p + 1.3) // incoming, uncorrelated
             let blended = a * gOut + b * gIn
@@ -81,7 +81,7 @@ struct OfflineTrimRendererTests {
     @Test("Zero-crossing snap lands on a sign change nearest the cut")
     func zeroCrossingSnap() {
         let ref: [Float] = [0.5, 0.5, -0.5, -0.5]
-        let snapped = OfflineTrimRenderer.snapZeroCrossing(ref, around: 2, lo: 1, hi: 3, window: 2, total: 4)
+        let snapped = TrimRenderer.snapZeroCrossing(ref, around: 2, lo: 1, hi: 3, window: 2, total: 4)
         #expect(snapped == 2)   // crossing between idx 1 (+) and idx 2 (−)
     }
 

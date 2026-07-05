@@ -3,7 +3,7 @@ import Foundation
 
 /// A trim plan in the sample-index domain: the source ranges copied verbatim, in
 /// order, and the joints where consecutive ranges are spliced together. Pure output
-/// of `OfflineTrimRenderer.plan` so the keep/savings math is testable without audio.
+/// of `TrimRenderer.plan` so the keep/savings math is testable without audio.
 public struct TrimPlan: Sendable {
     /// Source-sample ranges to copy, in output order. Adjacent ranges meet at a splice.
     public let keptIntervals: [Range<Int>]
@@ -49,7 +49,7 @@ public struct RenderOutput {
 /// Builds the trimmed output by copying speech + the first `target` seconds of each
 /// silence, then splicing the joins with a **zero-crossing snap + equal-power crossfade**
 /// (rule 4). A hard cut is a bug — it produces the artifact this harness tests against.
-public struct OfflineTrimRenderer {
+public struct TrimRenderer {
     public let settings: CadenceSettings
 
     /// Zero-crossing search window on each side of a cut (±2 ms).

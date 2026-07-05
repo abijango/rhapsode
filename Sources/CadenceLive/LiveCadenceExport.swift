@@ -9,7 +9,7 @@ import CadenceKit
 ///
 /// This is NOT how the live engine plays (that schedules PCM in real time) — it is a faithful offline
 /// capture of the *bytes* the live path produces, using `LiveTrimProducer`'s chunk length so the
-/// chunk-seam behavior matches. Since the per-chunk render is literally `OfflineTrimRenderer`, any
+/// chunk-seam behavior matches. Since the per-chunk render is literally `TrimRenderer`, any
 /// difference from the shipped renderer is seam placement only.
 enum LiveCadenceExport {
     /// Live-engine chunk length (keep in sync with `LiveTrimProducer.chunkSeconds`).
@@ -40,7 +40,7 @@ enum LiveCadenceExport {
                 let mono = AudioIO.downmixToMono(decoded)
                 let profile = SilenceAnalyzer.profile(monoSamples: mono, sampleRate: sampleRate)
                 let regions = SilenceAnalyzer(settings: settings).regions(from: profile)
-                let rendered = try OfflineTrimRenderer(settings: settings).render(buffer: decoded, regions: regions)
+                let rendered = try TrimRenderer(settings: settings).render(buffer: decoded, regions: regions)
                 try writer.append(rendered)
             }
             start = end

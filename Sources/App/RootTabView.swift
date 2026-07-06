@@ -108,8 +108,8 @@ struct RootTabView: View {
                     // wired onProgressChanged push (gated on a genuine, non-remote change), so we
                     // don't also call sync.push directly here (that would double-push or push stale).
                     audioPlayer.savePosition()
-                    // Back up lifetime Cadence stats (time saved + render time) before suspension.
-                    Task { await sync.pushCadenceStats() }
+                    // Back up lifetime SmartSpeech stats (time saved + render time) before suspension.
+                    Task { await sync.pushSmartSpeechStats() }
                 }
             }
         }

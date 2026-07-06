@@ -262,8 +262,8 @@ enum PhaseZeroSelfTest {
         failures += await runPhase3Checks(context: context)
         failures += runPhase4aChecks()
         failures += await runPhase5Checks(context: context)
-        // Batch Cadence self-tests were removed with the batch pre-render feature; live
-        // silence-trimming has its own harness (LiveCadenceSelfTest, arg -livecadenceselftest).
+        // Batch SmartSpeech self-tests were removed with the batch pre-render feature; live
+        // silence-trimming has its own harness (LiveSmartSpeechSelfTest, arg -livesmartspeechselftest).
         print("\(tag): DONE — \(failures == 0 ? "ALL PASS" : "\(failures) FAILED")")
         // Headless mode only (run() is invoked solely under `-phase0selftest`):
         // exit so stdout flushes (C `exit` flushes stdio; the app otherwise never

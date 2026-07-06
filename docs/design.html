@@ -111,7 +111,7 @@
   <section>
     <p class="eyebrow">System</p>
     <h2>Architecture at a glance</h2>
-    <div class="col"><p>Four layers, top to bottom: SwiftUI presentation, a domain/playback layer (an AVAudioEngine live-trim engine, Readium), the library/sync/source layer behind a single <code>LibrarySource</code> protocol, and SwiftData persistence with on-device storage. Dropbox, Readium and CadenceKit are the only external dependencies.</p></div>
+    <div class="col"><p>Four layers, top to bottom: SwiftUI presentation, a domain/playback layer (an AVAudioEngine live-trim engine, Readium), the library/sync/source layer behind a single <code>LibrarySource</code> protocol, and SwiftData persistence with on-device storage. Dropbox, Readium and SmartSpeechKit are the only external dependencies.</p></div>
     <div class="diagram" role="img" aria-label="Rhapsode layered architecture">
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1040 760" font-family="-apple-system, Segoe UI, system-ui, sans-serif" role="img" aria-label="Rhapsode architecture diagram">
   <rect x="0" y="0" width="1040" height="760" fill="#f7f8f6"/>
@@ -208,7 +208,7 @@
   <text x="880" y="160" font-size="10.5" fill="#5b6472" text-anchor="middle">EPUB rendering (UIKit)</text>
   <rect x="752" y="262" width="256" height="50" rx="10" fill="#ffffff" stroke="#2f6f6a"/>
   <text x="880" y="283" font-size="13" font-weight="600" fill="#1d2433" text-anchor="middle">SmartSpeech engine</text>
-  <text x="880" y="300" font-size="10.5" fill="#2f6f6a" text-anchor="middle">CadenceKit · Accelerate + AVFoundation</text>
+  <text x="880" y="300" font-size="10.5" fill="#2f6f6a" text-anchor="middle">SmartSpeechKit · Accelerate + AVFoundation</text>
   <g stroke="#9aa6a2" stroke-width="2">
     <line x1="376" y1="204" x2="376" y2="232"/>
     <line x1="376" y1="344" x2="376" y2="372"/>
@@ -228,7 +228,7 @@
   <text x="600" y="220" font-size="10" fill="#2f6f6a" text-anchor="middle" font-style="italic">analyze-ahead → trim silence live at playback</text>
 </svg>
     </div>
-    <p class="caption">Solid teal: the Dropbox boundary and the SmartSpeech live-trim path. Dashed: package/framework links. (“SmartSpeech” is the user-facing name; the code keeps the internal <code>Cadence*</code> / <code>CadenceKit</code> names — hence the module names below.) Everything above the source layer is backend-agnostic.</p>
+    <p class="caption">Solid teal: the Dropbox boundary and the SmartSpeech live-trim path (SmartSpeechKit DSP → engine). Dashed: package/framework links. Everything above the source layer is backend-agnostic.</p>
   </section>
 
   <section>
@@ -274,13 +274,13 @@
         <tr><td class="path">App/</td><td>Tab shell, shelves, settings, app lifecycle</td><td><span class="t">RhapsodeApp · RootTabView · SettingsView</span></td></tr>
         <tr><td class="path">Audiobook/</td><td>Import &amp; playback (both formats)</td><td><span class="t">AudiobookPlayer · AudiobookImporter · PlayerView</span></td></tr>
         <tr><td class="path">Ebook/</td><td>EPUB reading via Readium</td><td><span class="t">EbookReader · ReaderView</span></td></tr>
-        <tr><td class="path">Cadence/</td><td>Trim gating, timeline map, stats, Nerd Stats UI</td><td><span class="t">Audiobook+Cadence · CadenceTimelineMap · CadenceStats · NerdStatsView</span></td></tr>
-        <tr><td class="path">CadenceLive/</td><td>Live on-the-fly trim engine (AVAudioEngine)</td><td><span class="t">LiveAudioBackend · LiveTrimProducer · LiveSilencePrescan</span></td></tr>
+        <tr><td class="path">SmartSpeech/</td><td>Trim gating, timeline map, stats, Nerd Stats UI</td><td><span class="t">Audiobook+SmartSpeech · SmartSpeechTimelineMap · SmartSpeechStats · NerdStatsView</span></td></tr>
+        <tr><td class="path">SmartSpeechLive/</td><td>Live on-the-fly trim engine (AVAudioEngine)</td><td><span class="t">LiveAudioBackend · LiveTrimProducer · LiveSilencePrescan</span></td></tr>
         <tr><td class="path">Source/</td><td>Remote library behind one protocol</td><td><span class="t">LibrarySource · DropboxSource · KeychainTokenStore</span></td></tr>
         <tr><td class="path">Sync/</td><td>Scan, watch, download queue, progress sync</td><td><span class="t">SyncManager · BackgroundDownloader · ProgressSync</span></td></tr>
         <tr><td class="path">Model/</td><td>SwiftData schema + repository</td><td><span class="t">Models (AppSchema) · LibraryStore</span></td></tr>
         <tr><td class="path">Support/</td><td>Container paths, design system, self-test</td><td><span class="t">ContainerPaths · DesignSystem</span></td></tr>
-        <tr><td class="path">CadenceKit/</td><td>Standalone silence-analysis DSP package</td><td><span class="t">SilenceAnalyzer · SilencePolicy · AudioIO</span></td></tr>
+        <tr><td class="path">SmartSpeechKit/</td><td>Standalone silence-analysis DSP package</td><td><span class="t">SilenceAnalyzer · SilencePolicy · AudioIO</span></td></tr>
       </tbody>
     </table></div>
   </section>
@@ -295,7 +295,7 @@
           <li>SwiftData persistence (CloudKit-friendly schema)</li>
           <li>AVAudioEngine live-trim graph + MPNowPlayingInfoCenter / remote commands</li>
           <li>Readium Swift toolkit (EPUB)</li>
-          <li>CadenceKit — Accelerate (vDSP) + AVFoundation</li>
+          <li>SmartSpeechKit — Accelerate (vDSP) + AVFoundation</li>
           <li>Background URLSession · BGTaskScheduler · UNUserNotificationCenter</li>
           <li>XcodeGen project; headless self-test harness</li>
         </ul>

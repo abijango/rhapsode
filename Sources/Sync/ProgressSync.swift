@@ -42,11 +42,11 @@ struct PlaybackProgress: Codable, Sendable, Equatable {
     }()
 }
 
-/// Lifetime Cadence stat totals (time saved + time listened), backed up to the Dropbox app
+/// Lifetime SmartSpeech stat totals (time saved + time listened), backed up to the Dropbox app
 /// folder so they carry over to a new device / reinstall. A single shared record, last-writer-wins
 /// by `updatedAt` — simple; concurrent multi-device adds can clobber (accepted trade-off).
 /// (A legacy `renderSeconds` field from the removed batch pre-render is silently ignored on decode.)
-struct CadenceStatsRecord: Codable, Sendable, Equatable {
+struct SmartSpeechStatsRecord: Codable, Sendable, Equatable {
     var savedSeconds: TimeInterval
     /// Lifetime content seconds listened through. Optional for back-compat: records written before
     /// WP8 lack it and must still decode (via `try?`); apply as `?? current` to avoid zeroing.
@@ -68,10 +68,10 @@ protocol ProgressSync: Sendable {
     func push(_ progress: PlaybackProgress) async throws
     /// Fetch every item's progress currently stored remotely.
     func pullAll() async throws -> [PlaybackProgress]
-    /// Back up the lifetime Cadence stats (LWW read-before-write guard, like `push`).
-    func pushStats(_ stats: CadenceStatsRecord) async throws
-    /// Fetch the backed-up Cadence stats, or nil if none stored yet.
-    func pullStats() async throws -> CadenceStatsRecord?
+    /// Back up the lifetime SmartSpeech stats (LWW read-before-write guard, like `push`).
+    func pushStats(_ stats: SmartSpeechStatsRecord) async throws
+    /// Fetch the backed-up SmartSpeech stats, or nil if none stored yet.
+    func pullStats() async throws -> SmartSpeechStatsRecord?
 }
 
 /// No-op sync for the mock / debug / background-refresh paths (needs no Dropbox
@@ -79,8 +79,8 @@ protocol ProgressSync: Sendable {
 struct NoopProgressSync: ProgressSync {
     func push(_ progress: PlaybackProgress) async throws {}
     func pullAll() async throws -> [PlaybackProgress] { [] }
-    func pushStats(_ stats: CadenceStatsRecord) async throws {}
-    func pullStats() async throws -> CadenceStatsRecord? { nil }
+    func pushStats(_ stats: SmartSpeechStatsRecord) async throws {}
+    func pullStats() async throws -> SmartSpeechStatsRecord? { nil }
 }
 
 /// In-memory `ProgressSync` for headless tests. Mirrors `DropboxProgressSync`'s
@@ -99,10 +99,10 @@ actor MockProgressSync: ProgressSync {
 
     func pullAll() async throws -> [PlaybackProgress] { Array(store.values) }
 
-    private var stats: CadenceStatsRecord?
-    func pushStats(_ stats: CadenceStatsRecord) async throws {
+    private var stats: SmartSpeechStatsRecord?
+    func pushStats(_ stats: SmartSpeechStatsRecord) async throws {
         if let existing = self.stats, existing.updatedAt > stats.updatedAt { return }
         self.stats = stats
     }
-    func pullStats() async throws -> CadenceStatsRecord? { stats }
+    func pullStats() async throws -> SmartSpeechStatsRecord? { stats }
 }

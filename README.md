@@ -5,7 +5,7 @@
 Native SwiftUI for iPhone, iPad, and Mac (Catalyst). Every file is downloaded in full and played from local storage; nothing streams. Dropbox is reached over its plain HTTP API (no SDK), so the design ports cleanly to a planned Android client.
 
 <p align="center">
-  <img src="docs/architecture.svg" alt="Rhapsode layered architecture: SwiftUI presentation, domain/playback (an AVAudioEngine live-trim engine, Readium), library/sync/source behind a LibrarySource protocol, and SwiftData persistence — with Dropbox, Readium, and CadenceKit as the only external dependencies." width="900">
+  <img src="docs/architecture.svg" alt="Rhapsode layered architecture: SwiftUI presentation, domain/playback (an AVAudioEngine live-trim engine, Readium), library/sync/source behind a LibrarySource protocol, and SwiftData persistence — with Dropbox, Readium, and SmartSpeechKit as the only external dependencies." width="900">
 </p>
 
 > A fuller, interactive design write-up lives in [`docs/design.html`](docs/design.html). The canonical specs are [`docs/SPEC.md`](docs/SPEC.md) and [`docs/ROADMAP.md`](docs/ROADMAP.md).
@@ -47,7 +47,7 @@ Non-negotiable correctness rules:
 - All persisted positions/bookmarks/chapters live in **source time**; they are mapped to output time only at the playback boundary via the live map, so they stay stable across tier changes and on/off toggles.
 - Silence is **detected** on the mono downmix but **cut** from the original channels, zero-crossing-aligned with equal-power crossfades (a hard cut is a bug). An adaptive floor + absolute ceiling keep continuous music beds from being cut.
 
-`CadenceKit` is a standalone Swift package (the silence-analysis DSP) that imports only **Accelerate** + **AVFoundation** — no app or SwiftUI types — so it stays liftable. See [`specs/cadence-feature-spec.md`](specs/cadence-feature-spec.md) and [`specs/realtime-cadence-exploration.md`](specs/realtime-cadence-exploration.md).
+`SmartSpeechKit` is a standalone Swift package (the silence-analysis DSP) that imports only **Accelerate** + **AVFoundation** — no app or SwiftUI types — so it stays liftable. See [`specs/cadence-feature-spec.md`](specs/cadence-feature-spec.md) and [`specs/realtime-cadence-exploration.md`](specs/realtime-cadence-exploration.md).
 
 ---
 
@@ -58,7 +58,7 @@ Four layers, backend-agnostic above the source boundary:
 | Layer | What it does |
 |---|---|
 | **Presentation** (SwiftUI) | Tab shell, library shelves, player + SmartSpeech sheet, reader, Nerd Stats & settings, downloads |
-| **Domain & playback** | `AudiobookPlayer` driving the live-trim engine (`LiveAudioBackend`/`LiveTrimProducer`, AVAudioEngine + CadenceKit DSP), `EbookReader` (Readium) |
+| **Domain & playback** | `AudiobookPlayer` driving the live-trim engine (`LiveAudioBackend`/`LiveTrimProducer`, AVAudioEngine + SmartSpeechKit DSP), `EbookReader` (Readium) |
 | **Library / sync / source** | `SyncManager`, `BackgroundDownloader`, `ProgressSync`, and `DropboxSource` behind the `LibrarySource` protocol |
 | **Persistence & storage** | SwiftData (`AppSchema`), `ContainerPaths` (media in Application Support — no on-disk trims), Keychain |
 
@@ -70,14 +70,14 @@ All remote access goes through one `LibrarySource` protocol, so Dropbox is swapp
 |---|---|---|
 | `Sources/App/` | Tab shell, shelves, settings, lifecycle | `RhapsodeApp`, `RootTabView`, `SettingsView` |
 | `Sources/Audiobook/` | Import & playback (both formats) + SmartSpeech UI | `AudiobookPlayer`, `PlayerView`, `SmartSpeechSheet` |
-| `Sources/CadenceLive/` | Live on-the-fly trim engine (AVAudioEngine) | `LiveAudioBackend`, `LiveTrimProducer`, `LiveSilencePrescan` |
+| `Sources/SmartSpeechLive/` | Live on-the-fly trim engine (AVAudioEngine) | `LiveAudioBackend`, `LiveTrimProducer`, `LiveSilencePrescan` |
 | `Sources/Ebook/` | EPUB reading via Readium | `EbookReader`, `ReaderView` |
-| `Sources/Cadence/` | Trim gating, timeline map, stats, Nerd Stats UI | `Audiobook+Cadence`, `CadenceTimelineMap`, `CadenceStats`, `NerdStatsView` |
+| `Sources/SmartSpeech/` | Trim gating, timeline map, stats, Nerd Stats UI | `Audiobook+SmartSpeech`, `SmartSpeechTimelineMap`, `SmartSpeechStats`, `NerdStatsView` |
 | `Sources/Source/` | Remote library behind one protocol | `LibrarySource`, `DropboxSource`, `KeychainTokenStore` |
 | `Sources/Sync/` | Scan, watch, download queue, progress sync | `SyncManager`, `BackgroundDownloader`, `ProgressSync` |
 | `Sources/Model/` | SwiftData schema + repository | `Models` (`AppSchema`), `LibraryStore` |
 | `Sources/Support/` | Container paths, design system, self-test | `ContainerPaths`, `DesignSystem` |
-| `CadenceKit/` | Standalone silence-analysis DSP package | `SilenceAnalyzer`, `SilencePolicy`, `AudioIO` |
+| `SmartSpeechKit/` | Standalone silence-analysis DSP package | `SilenceAnalyzer`, `SilencePolicy`, `AudioIO` |
 
 ---
 
@@ -87,7 +87,7 @@ All remote access goes through one `LibrarySource` protocol, so Dropbox is swapp
 - **SwiftData** persistence — stable `UUID`s, relative paths only, no `@Attribute(.unique)` (CloudKit-friendly)
 - **AVAudioEngine** live-trim graph + `MPNowPlayingInfoCenter` / `MPRemoteCommandCenter`
 - **Readium Swift toolkit** for EPUB
-- **CadenceKit** — Accelerate (vDSP) + AVFoundation
+- **SmartSpeechKit** — Accelerate (vDSP) + AVFoundation
 - Background `URLSession`, `BGTaskScheduler`, `UNUserNotificationCenter` (no paid entitlements in the MVP)
 - **XcodeGen** project generation + a headless self-test harness
 
@@ -118,11 +118,11 @@ Two `#if DEBUG` harnesses verify the non-UI invariants end to end:
 xcrun simctl launch --console-pty <booted-device> com.naufalmir.rhapsode -phase0selftest 1
 
 # Live silence-trimming engine (position/resume/seek, music-bed sparing, multi-file)
-xcrun simctl launch --console-pty <booted-device> com.naufalmir.rhapsode -livecadenceselftest
+xcrun simctl launch --console-pty <booted-device> com.naufalmir.rhapsode -livesmartspeechselftest
 # → each prints PASS/FAIL per check
 ```
 
-CadenceKit also has its own unit tests: `cd CadenceKit && swift test`.
+SmartSpeechKit also has its own unit tests: `cd SmartSpeechKit && swift test`.
 
 ---
 
@@ -155,4 +155,4 @@ CadenceKit also has its own unit tests: `cd CadenceKit && swift test`.
 - [`docs/design.html`](docs/design.html) — interactive design & architecture overview
 - [`docs/SPEC.md`](docs/SPEC.md) — MVP build spec (sources rationale, data model, features)
 - [`docs/ROADMAP.md`](docs/ROADMAP.md) — post-MVP phases (background sync, iPad/macOS, cross-device sync)
-- [`specs/cadence-feature-spec.md`](specs/cadence-feature-spec.md) — the Cadence silence-trimming spec
+- [`specs/cadence-feature-spec.md`](specs/cadence-feature-spec.md) — the SmartSpeech silence-trimming spec

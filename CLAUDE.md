@@ -12,45 +12,51 @@ consume the new backend second, and drops the producer/render role entirely (bec
 consumer-only everywhere, including on Mac). Until that migration lands, the Dropbox-based
 notes elsewhere in this file (scopes, HTTP-API-not-SDK, App-folder) describe the CURRENT,
 still-live implementation — not the target architecture. Full research/rationale (backend
-comparison vs AWS/GCP, CadenceKit portability investigation, Synology NAS): see the spec's
+comparison vs AWS/GCP, SmartSpeechKit portability investigation, Synology NAS): see the spec's
 linked artifact.
 
-## Cadence (silence-trimming feature)
+## SmartSpeech (live silence-trimming feature)
 
-Spec: specs/cadence-feature-spec.md — read before working on this feature. Architecture
-is Path B (pre-render): analyse the downloaded audio, render a trimmed .m4a copy, play it
-with the EXISTING AVPlayer. Do NOT introduce AVAudioEngine or rewrite the playback layer.
+Specs: specs/realtime-cadence-exploration.md (the CURRENT live design) and
+specs/cadence-feature-spec.md (the original pre-render design — HISTORICAL; that batch path
+was removed once live trimming became the default player). "SmartSpeech" is the user-facing
+name and the internal code name; the external reference oracle is still "Cadence" (CadenceLab,
+below). Filenames like specs/cadence-feature-spec.md keep their original names.
+
+Architecture (CURRENT): trim silence LIVE during playback via AVAudioEngine. `AudiobookPlayer`
+drives `LiveAudioBackend` / `LiveTrimProducer` (AVAudioPlayerNode → AVAudioUnitTimePitch →
+mixer), fed by the SmartSpeechKit DSP. There is NO pre-render and NO on-disk trimmed copy —
+the original download is the only audio on device. (The earlier Path-B pre-render + AVPlayer
+design, and the producer/consumer render-share, have been removed.)
 
 ### Integration (this repo, not greenfield)
-- Bind to the existing code, don't invent parallel systems. Before writing WP3/WP5, survey
-  and reuse Rhapsode's current download pipeline, SwiftData models, and AVPlayer playback —
-  propose the integration points and confirm them before building.
-- This is an XcodeGen project. Declare packages/targets in project.yml and run
-  `xcodegen generate`; never hand-edit Rhapsode.xcodeproj (regeneration wipes GUI edits).
+- Bind to existing code; don't invent parallel systems. Reuse the download pipeline, SwiftData
+  models, and the `AudiobookPlayer` / `LiveAudioBackend` playback path.
+- XcodeGen project. Declare packages/targets in project.yml and run `xcodegen generate`;
+  never hand-edit Rhapsode.xcodeproj (regeneration wipes GUI edits).
 
-### CadenceKit
-- CadenceKit is a local Swift package. It imports ONLY Accelerate + AVFoundation — no
-  SwiftUI, no app types, no swift-argument-parser. It must stay liftable/standalone.
-- Keep tier preset values identical to the cadence CLI presets in CadenceLab (reference
-  oracle, §14). If a preset changes, change it in both.
+### SmartSpeechKit (formerly CadenceKit)
+- SmartSpeechKit is a local Swift package (the silence-analysis + splice DSP). It imports ONLY
+  Accelerate + AVFoundation — no SwiftUI, no app types. It must stay liftable/standalone.
+- Keep tier preset VALUES identical to the `cadence` CLI presets in CadenceLab (the external
+  reference oracle — still named Cadence). If a preset changes, change it in both.
 
 ### Correctness rules (non-negotiable)
-- Analysis uses a MONO downmix for silence detection only. The renderer cuts the
-  ORIGINAL-channel audio at those timestamps — never render from the downmix.
+- Analysis uses a MONO downmix for silence detection only. The producer cuts the
+  ORIGINAL-channel audio at those timestamps — never from the downmix.
 - Splices are zero-crossing-aligned + equal-power crossfaded. A hard cut is a bug (it
   produces the chopped/clicky artifact the feature exists to avoid).
-- The original download is the source of truth and is never modified. The trimmed .m4a is
-  a regenerable, evictable cache (Caches/), keyed to
-  contentFingerprint + analyzerVersion + rendererVersion + tier.
-- All persisted positions, bookmarks, and chapter marks are SOURCE-domain. Map to trimmed
-  time only at playback. Never persist trimmed-domain positions.
-- Bump analyzerVersion / rendererVersion when detection or render logic changes (forces
-  re-render and cache invalidation).
-- Multi-file books: one trimmed file per original file (preserve file boundaries so the
-  existing queue/gapless logic is untouched).
+- The original download is the source of truth and is never modified. Trimming is in-memory
+  and live — there is no evictable trimmed-.m4a cache anymore.
+- All persisted positions, bookmarks, and chapter marks are SOURCE-domain. Map to output time
+  only at playback, via the live source↔output map. Never persist output-domain positions.
+- Detection stability: a whole-file adaptive floor (`LiveSilencePrescan`) plus an absolute
+  ceiling so continuous music beds are not cut.
+- Multi-file books: one live producer session per original file (preserve file boundaries so
+  the existing queue/gapless logic is untouched).
 
 ### Verification
-- The cadence CLI in CadenceLab is the reference oracle: for the same input + tier, the
-  app's renderer output must match it. Use it to validate WP3.
-- Analyzer (golden synthetic PCM) and policy (table-driven) tests transfer with CadenceKit
-  and must stay green before any by-ear tuning.
+- The `cadence` CLI in CadenceLab is the reference oracle: for the same input + tier, the
+  splice output must match. Preset VALUES must stay identical to it.
+- Analyzer (golden synthetic PCM) and policy (table-driven) tests live in SmartSpeechKit and
+  must stay green before any by-ear tuning. Live-engine harness: `-livesmartspeechselftest`.

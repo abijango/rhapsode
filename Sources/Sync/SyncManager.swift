@@ -91,8 +91,8 @@ final class SyncManager {
         // Then pull any progress other devices wrote while we were away — the books
         // just imported above are now present to match against.
         await pullAndMergeProgress()
-        // Back up our own lifetime Cadence stats too (LWW skips if the remote is newer).
-        await pushCadenceStats()
+        // Back up our own lifetime SmartSpeech stats too (LWW skips if the remote is newer).
+        await pushSmartSpeechStats()
     }
 
     // MARK: Cross-device progress sync (Phase 5)
@@ -178,28 +178,28 @@ final class SyncManager {
             try? context.save()
             Self.log("pulled \(remotes.count) progress record(s)")
         }
-        await pullCadenceStats()
+        await pullSmartSpeechStats()
     }
 
-    /// Back up the lifetime Cadence stats (time saved + time listened) to Dropbox. Single shared
+    /// Back up the lifetime SmartSpeech stats (time saved + time listened) to Dropbox. Single shared
     /// record, LWW by `updatedAt` (read-before-write guard inside `pushStats`).
-    func pushCadenceStats() async {
-        let record = CadenceStatsRecord(
-            savedSeconds: CadenceStats.totalSavedSeconds,
-            playedSeconds: CadenceStats.totalPlayedSeconds,
-            updatedAt: CadenceStats.updatedAt ?? Date())
+    func pushSmartSpeechStats() async {
+        let record = SmartSpeechStatsRecord(
+            savedSeconds: SmartSpeechStats.totalSavedSeconds,
+            playedSeconds: SmartSpeechStats.totalPlayedSeconds,
+            updatedAt: SmartSpeechStats.updatedAt ?? Date())
         do { try await progress.pushStats(record) }
-        catch { Self.log("pushCadenceStats failed: \(error.localizedDescription)") }
+        catch { Self.log("pushSmartSpeechStats failed: \(error.localizedDescription)") }
     }
 
-    /// Adopt the backed-up Cadence stats if the remote record is newer (carry-over to a new
+    /// Adopt the backed-up SmartSpeech stats if the remote record is newer (carry-over to a new
     /// device / reinstall). Called inside `pullAndMergeProgress`.
-    private func pullCadenceStats() async {
+    private func pullSmartSpeechStats() async {
         guard let record = try? await progress.pullStats() else { return }
-        if record.isNewer(than: CadenceStats.updatedAt) {
-            CadenceStats.apply(savedSeconds: record.savedSeconds,
+        if record.isNewer(than: SmartSpeechStats.updatedAt) {
+            SmartSpeechStats.apply(savedSeconds: record.savedSeconds,
                                // Old records lack playedSeconds — keep the local total rather than zero it.
-                               playedSeconds: record.playedSeconds ?? CadenceStats.totalPlayedSeconds,
+                               playedSeconds: record.playedSeconds ?? SmartSpeechStats.totalPlayedSeconds,
                                updatedAt: record.updatedAt)
         }
     }

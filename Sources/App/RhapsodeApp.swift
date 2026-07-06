@@ -32,8 +32,9 @@ struct RhapsodeApp: App {
         } catch {
             // The SwiftData store is a rebuildable cache (books re-download from Dropbox; progress
             // and stats re-pull from /.rhapsode-sync + UserDefaults). If it can't open — e.g. an
-            // incompatible schema after removing a model like TrimmedRendition — delete and recreate
-            // rather than crashing on launch.
+            // incompatible schema — delete and recreate rather than crashing on launch. This IS a
+            // local data reset, so make it loud: a clean rename migration should never reach here.
+            NSLog("⚠️ Rhapsode: ModelContainer failed to open — RECREATING STORE (local library/progress reset). Error: %@", String(describing: error))
             for suffix in ["", "-wal", "-shm"] {
                 try? FileManager.default.removeItem(at: URL(fileURLWithPath: config.url.path + suffix))
             }
@@ -99,8 +100,8 @@ struct RhapsodeApp: App {
                             if PhaseZeroSelfTest.isRequested {
                                 await PhaseZeroSelfTest.run(context: modelContainer.mainContext)
                             }
-                            if LiveCadenceSelfTest.isRequested {
-                                await LiveCadenceSelfTest.run()
+                            if LiveSmartSpeechSelfTest.isRequested {
+                                await LiveSmartSpeechSelfTest.run()
                             }
                             if CommandLine.arguments.contains("-seedstats") {
                                 Self.seedStats(context: modelContainer.mainContext)
@@ -161,12 +162,12 @@ struct RhapsodeApp: App {
         for (title, played, saved) in seed {
             let b = Audiobook(title: title, sourcePath: "seed:\(title)")
             b.listenedSeconds = played
-            b.cadenceSavedSeconds = saved
+            b.smartSpeechSavedSeconds = saved
             context.insert(b)
         }
         try? context.save()
-        CadenceStats.totalPlayedSeconds = seed.reduce(0) { $0 + $1.1 }
-        CadenceStats.totalSavedSeconds = seed.reduce(0) { $0 + $1.2 }
+        SmartSpeechStats.totalPlayedSeconds = seed.reduce(0) { $0 + $1.1 }
+        SmartSpeechStats.totalSavedSeconds = seed.reduce(0) { $0 + $1.2 }
     }
     #endif
 }

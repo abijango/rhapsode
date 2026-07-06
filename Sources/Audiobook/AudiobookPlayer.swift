@@ -1,5 +1,5 @@
 import AVFoundation
-import CadenceKit
+import SmartSpeechKit
 import Foundation
 import MediaPlayer
 import SwiftData
@@ -17,7 +17,7 @@ import UIKit
 /// not `AVPlayer`. The backend speaks SOURCE time natively: the player asks for
 /// `backend.currentSource` and calls `backend.seek(toSource:)`, so all position
 /// math stays source-domain. Every book plays LIVE from the original file, gated by
-/// `resolvedCadence` (`.on` ⇒ trim silence on the fly; `.off` ⇒ play as-is).
+/// `resolvedSmartSpeech` (`.on` ⇒ trim silence on the fly; `.off` ⇒ play as-is).
 @MainActor
 @Observable
 final class AudiobookPlayer {
@@ -34,7 +34,7 @@ final class AudiobookPlayer {
     private var context: ModelContext?
     private var lastPersist = Date(timeIntervalSince1970: 0)
 
-    /// True when the live backend is trimming silence for the current file (`resolvedCadence == .on`).
+    /// True when the live backend is trimming silence for the current file (`resolvedSmartSpeech == .on`).
     /// Replaces the old `activeMap != nil` check — gates the time-saved stat accumulation.
     private var trimActive = false
     /// The file URL currently loaded into `backend` (nil = nothing loaded). A single-file M4B loads
@@ -91,7 +91,7 @@ final class AudiobookPlayer {
 
     #if DEBUG
     /// Debug-only: the timeline map fed to the stat-accumulation self-test seam.
-    private var debugStatMap: CadenceTimelineMap?
+    private var debugStatMap: SmartSpeechTimelineMap?
     #endif
 
     // MARK: Init
@@ -142,15 +142,15 @@ final class AudiobookPlayer {
 
         // WP7 — played: trimmed/output CONTENT seconds actually listened through, accrued on EVERY
         // valid playing tick regardless of trimming (rate-independent; this is the per-tick output delta).
-        CadenceStats.addPlayed(trimmedDelta)                                          // lifetime/global
+        SmartSpeechStats.addPlayed(trimmedDelta)                                          // lifetime/global
         if let book { book.listenedSeconds = (book.listenedSeconds ?? 0) + trimmedDelta }  // per-book
 
         // WP7 — saved: only meaningful while trimming (the source outran the output across a gap).
         guard trimActive else { return }
         let saved = max(0, sourceDelta - trimmedDelta)
         guard saved > 0 else { return }
-        CadenceStats.addSaved(saved)                                  // lifetime/global total
-        if let book { book.cadenceSavedSeconds = (book.cadenceSavedSeconds ?? 0) + saved }  // per-book
+        SmartSpeechStats.addSaved(saved)                                  // lifetime/global total
+        if let book { book.smartSpeechSavedSeconds = (book.smartSpeechSavedSeconds ?? 0) + saved }  // per-book
         // All persist via the throttled persist() in tick() (or force-save on pause).
     }
 
@@ -185,7 +185,7 @@ final class AudiobookPlayer {
 
     var currentTrack: AudiobookTrack? { tracks.indices.contains(currentIndex) ? tracks[currentIndex] : nil }
     var trackDuration: Double { currentTrack?.duration ?? 0 }
-    /// Whether live silence-trimming is active for the currently-loaded file (Cadence on for this
+    /// Whether live silence-trimming is active for the currently-loaded file (SmartSpeech on for this
     /// book). Exposed for the per-book live stats panel.
     var isTrimming: Bool { trimActive }
 
@@ -333,8 +333,8 @@ final class AudiobookPlayer {
         // Trim gate + tier from the single resolver: `.off` ⇒ play original as-is; `.on(preset)` ⇒
         // live-trim the original at that tier. Every book plays LIVE from the original file now.
         let trimEnabled: Bool
-        let preset: CadenceSettings.Preset
-        switch book.resolvedCadence {
+        let preset: SmartSpeechSettings.Preset
+        switch book.resolvedSmartSpeech {
         case .off:            trimEnabled = false; preset = .default
         case .on(let p):      trimEnabled = true;  preset = p
         }
@@ -375,9 +375,9 @@ final class AudiobookPlayer {
 
 
     /// Re-evaluate the trim setting for the current book and reload the backend at the preserved
-    /// source position so the change (Cadence toggled on/off, or tier changed) takes effect without
-    /// losing the listener's place. Called from: (a) Cadence toggle mid-play; (b) WP9 tier change.
-    func applyCadenceChange() {
+    /// source position so the change (SmartSpeech toggled on/off, or tier changed) takes effect without
+    /// losing the listener's place. Called from: (a) SmartSpeech toggle mid-play; (b) WP9 tier change.
+    func applySmartSpeechChange() {
         guard let book, currentTrack != nil else { return }
 
         // Capture the current source position BEFORE reloading.
@@ -385,7 +385,7 @@ final class AudiobookPlayer {
         let wasPlaying = isPlaying
 
         let trimEnabled: Bool
-        switch book.resolvedCadence {
+        switch book.resolvedSmartSpeech {
         case .off: trimEnabled = false
         case .on:  trimEnabled = true
         }
@@ -525,7 +525,7 @@ final class AudiobookPlayer {
 
     /// Absolute position within the whole book, in source-domain seconds.
     /// `bookTime` reads `backend.currentSource` (already source-domain), so this is
-    /// honest whether or not Cadence trimming is active.
+    /// honest whether or not SmartSpeech trimming is active.
     var bookPosition: Double { bookTime }
 
     /// Fraction of the whole book completed, clamped 0...1 and NaN-safe (0 when
@@ -659,18 +659,18 @@ final class AudiobookPlayer {
 
 #if DEBUG
 /// Test seam for the headless self-tests. Repointed from the old AVPlayer internals to the live
-/// backend so `CadenceSelfTest` still builds. Not compiled in release.
+/// backend so `SmartSpeechSelfTest` still builds. Not compiled in release.
 extension AudiobookPlayer {
     /// A backend session is loaded (backend loads synchronously, so this is true right after `load`).
     var debugItemReady: Bool { loadedURL != nil }
-    /// Live trimming is active for the current book (`resolvedCadence == .on`).
+    /// Live trimming is active for the current book (`resolvedSmartSpeech == .on`).
     var debugIsTrimmed: Bool { trimActive }
     /// Backend output (trimmed-domain, session-relative) seconds.
     var debugPlayerTimeSeconds: Double { backend.currentOutput }
     /// Source-domain position via the read path — for asserting a seek round-trips to S.
     var debugBookTime: Double { bookTime }
     func debugSeek(toSourceTime t: Double) { seekWithinBook(toBookTime: t) }
-    func debugApplyCadenceChange() { applyCadenceChange() }
+    func debugApplySmartSpeechChange() { applySmartSpeechChange() }
     /// WP8 test seam: arm the resume nudge flag and immediately trigger the nudge (without setting
     /// `isPlaying`). Drives the pure nudge logic deterministically without launching real playback.
     func debugSmartResumeNudge() {
@@ -684,7 +684,7 @@ extension AudiobookPlayer {
     /// Prepare the player for a simulated trimmed-playback stat session. Stores `map` as the debug
     /// stat map and marks `trimActive`/`isPlaying = true` so `accumulateSaved` will count. No audio,
     /// no network — just the stat accumulation logic driven by `debugFeedPlayerTick`.
-    func debugBeginCadenceStatSession(map: CadenceTimelineMap, book: Audiobook? = nil) {
+    func debugBeginSmartSpeechStatSession(map: SmartSpeechTimelineMap, book: Audiobook? = nil) {
         self.book = book
         debugStatMap = map
         trimActive = true
@@ -694,7 +694,7 @@ extension AudiobookPlayer {
     }
 
     /// Per-book accrued savings for the session's book (S2), for the self-test to assert.
-    var debugBookSavedSeconds: Double? { book?.cadenceSavedSeconds }
+    var debugBookSavedSeconds: Double? { book?.smartSpeechSavedSeconds }
 
     /// Feed a single simulated tick at `playerTime` (trimmed-domain seconds), exactly as `tick()`
     /// does. The source time is derived via the debug stat map's `toSource(playerTime)`.
@@ -702,8 +702,8 @@ extension AudiobookPlayer {
         accumulateSaved(playerNow: playerTime, sourceNow: debugStatMap?.toSource(playerTime) ?? playerTime)
     }
 
-    /// Tear down the stat session started by `debugBeginCadenceStatSession`.
-    func debugEndCadenceStatSession() {
+    /// Tear down the stat session started by `debugBeginSmartSpeechStatSession`.
+    func debugEndSmartSpeechStatSession() {
         isPlaying = false
         trimActive = false
         lastPlayerTime = nil

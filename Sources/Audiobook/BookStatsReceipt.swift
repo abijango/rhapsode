@@ -9,7 +9,7 @@ struct BookStatsReceipt: View {
 
     var body: some View {
         let played = book.listenedSeconds ?? 0
-        let saved = book.cadenceSavedSeconds ?? 0
+        let saved = book.smartSpeechSavedSeconds ?? 0
         let pct = played > 0 ? Int((saved / played * 100).rounded()) : 0
         return VStack(spacing: 0) {
             VStack(spacing: 3) {
@@ -68,7 +68,7 @@ struct BookStatsPreviewHarness: View {
     var body: some View {
         let book = Audiobook(title: "Harry Potter and the Goblet of Fire", sourcePath: "preview")
         book.listenedSeconds = 11_520
-        book.cadenceSavedSeconds = 1_440
+        book.smartSpeechSavedSeconds = 1_440
         let player = AudiobookPlayer()
         player.rate = 1.5
         return ZStack {

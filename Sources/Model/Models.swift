@@ -48,20 +48,22 @@ final class Audiobook {
     /// sync). Drives last-writer-wins for cross-device progress sync (Phase 5).
     /// Optional with a nil default — additive, CloudKit-safe lightweight migration.
     var progressUpdatedAt: Date?
-    /// Cadence (silence-trimming) per-book tier override, as `CadenceSettings.Preset.rawValue`
+    /// SmartSpeech (silence-trimming) per-book tier override, as `SmartSpeechSettings.Preset.rawValue`
     /// ("default"/"more"/"aggressive"). `nil` → inherit the global default tier. Resolve via
-    /// `effectiveCadenceTier`. Additive optional → lightweight, CloudKit-safe migration.
-    var cadenceTier: String?
-    /// Set to `true` when the audio is undecodable (e.g. DRM-protected) — Cadence rendering and
+    /// `effectiveSmartSpeechTier`. Additive optional → lightweight, CloudKit-safe migration.
+    /// `originalName` keeps the stored column as `cadenceTier` (its name before the SmartSpeech
+    /// rename) so existing per-book settings migrate in place instead of resetting.
+    @Attribute(originalName: "cadenceTier") var smartSpeechTier: String?
+    /// Set to `true` when the audio is undecodable (e.g. DRM-protected) — SmartSpeech rendering and
     /// selection are skipped permanently for this book. Additive optional (default nil treated as
-    /// false) → lightweight, CloudKit-safe migration. Mirror of `cadenceTier` pattern.
-    var cadenceUnavailable: Bool?
-    /// Cumulative seconds of silence Cadence has trimmed away **for this book**, accrued as the
+    /// false) → lightweight, CloudKit-safe migration. Mirror of `smartSpeechTier` pattern.
+    @Attribute(originalName: "cadenceUnavailable") var smartSpeechUnavailable: Bool?
+    /// Cumulative seconds of silence SmartSpeech has trimmed away **for this book**, accrued as the
     /// user actually listens through trimmed audio. Drives the per-book stat and the global
     /// "across N audiobooks" count. Additive optional (nil treated as 0) → lightweight migration.
-    var cadenceSavedSeconds: Double?
+    @Attribute(originalName: "cadenceSavedSeconds") var smartSpeechSavedSeconds: Double?
     /// Cumulative seconds of trimmed/output CONTENT actually listened through **for this book**
-    /// (rate-independent — the per-tick trimmed-domain delta, accrued whether or not Cadence is
+    /// (rate-independent — the per-tick trimmed-domain delta, accrued whether or not SmartSpeech is
     /// trimming). Drives the per-book "played" stat. Additive optional (nil treated as 0) →
     /// lightweight, CloudKit-safe migration.
     var listenedSeconds: Double?
@@ -77,9 +79,9 @@ final class Audiobook {
         lastOffsetSeconds: Double = 0,
         totalDuration: Double = 0,
         progressUpdatedAt: Date? = nil,
-        cadenceTier: String? = nil,
-        cadenceUnavailable: Bool? = nil,
-        cadenceSavedSeconds: Double? = nil,
+        smartSpeechTier: String? = nil,
+        smartSpeechUnavailable: Bool? = nil,
+        smartSpeechSavedSeconds: Double? = nil,
         listenedSeconds: Double? = nil
     ) {
         self.id = id
@@ -92,9 +94,9 @@ final class Audiobook {
         self.lastOffsetSeconds = lastOffsetSeconds
         self.totalDuration = totalDuration
         self.progressUpdatedAt = progressUpdatedAt
-        self.cadenceTier = cadenceTier
-        self.cadenceUnavailable = cadenceUnavailable
-        self.cadenceSavedSeconds = cadenceSavedSeconds
+        self.smartSpeechTier = smartSpeechTier
+        self.smartSpeechUnavailable = smartSpeechUnavailable
+        self.smartSpeechSavedSeconds = smartSpeechSavedSeconds
         self.listenedSeconds = listenedSeconds
     }
 

@@ -1,10 +1,10 @@
 import SwiftUI
 import SwiftData
-import CadenceKit
+import SmartSpeechKit
 
 /// "SmartSpeech" — the player's speed + silence-trimming controls in one sheet (the dock's gauge
 /// button opens it). Playback speed drives `player.rate`; the trim toggle + tier drive this book's
-/// `resolvedCadence` and reload the live engine via `applyCadenceChange()` — no batch render.
+/// `resolvedSmartSpeech` and reload the live engine via `applySmartSpeechChange()` — no batch render.
 struct SmartSpeechSheet: View {
     let book: Audiobook
     let player: AudiobookPlayer
@@ -14,7 +14,7 @@ struct SmartSpeechSheet: View {
 
     private let minRate: Float = 0.8, maxRate: Float = 3.0
 
-    private var trimOn: Bool { if case .on = book.resolvedCadence { return true }; return false }
+    private var trimOn: Bool { if case .on = book.resolvedSmartSpeech { return true }; return false }
 
     var body: some View {
         NavigationStack {
@@ -105,23 +105,23 @@ struct SmartSpeechSheet: View {
                 Toggle("", isOn: Binding(get: { trimOn }, set: { setTrim($0) })).labelsHidden()
                     .tint(DS.Palette.Reclaim.mint)
             }
-            MintSegmented(labels: CadenceSettings.Preset.allCases.map(\.displayName),
-                          selected: trimOn ? CadenceSettings.Preset.allCases.firstIndex(of: book.effectiveCadenceTier) : nil,
+            MintSegmented(labels: SmartSpeechSettings.Preset.allCases.map(\.displayName),
+                          selected: trimOn ? SmartSpeechSettings.Preset.allCases.firstIndex(of: book.effectiveSmartSpeechTier) : nil,
                           disabled: !trimOn) { i in
-                setTier(CadenceSettings.Preset.allCases[i])
+                setTier(SmartSpeechSettings.Preset.allCases[i])
             }
         }
     }
 
     private func setTrim(_ on: Bool) {
-        book.cadenceTier = on ? book.effectiveCadenceTier.rawValue : cadenceOffValue
+        book.smartSpeechTier = on ? book.effectiveSmartSpeechTier.rawValue : smartSpeechOffValue
         try? modelContext.save()
-        player.applyCadenceChange()
+        player.applySmartSpeechChange()
     }
-    private func setTier(_ preset: CadenceSettings.Preset) {
-        book.cadenceTier = preset.rawValue
+    private func setTier(_ preset: SmartSpeechSettings.Preset) {
+        book.smartSpeechTier = preset.rawValue
         try? modelContext.save()
-        player.applyCadenceChange()
+        player.applySmartSpeechChange()
     }
 
     // MARK: Chrome

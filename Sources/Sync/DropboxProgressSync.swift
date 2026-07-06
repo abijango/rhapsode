@@ -49,13 +49,13 @@ struct DropboxProgressSync: ProgressSync {
         return result
     }
 
-    /// Fixed path for the single shared Cadence stats backup.
+    /// Fixed path for the single shared SmartSpeech stats backup.
     static let statsPath = "\(folder)/cadence-stats.json"
 
-    func pushStats(_ stats: CadenceStatsRecord) async throws {
+    func pushStats(_ stats: SmartSpeechStatsRecord) async throws {
         // Same read-before-write LWW guard as `push`: don't clobber a strictly-newer remote.
         if let data = try? await source.readFile(at: Self.statsPath),
-           let existing = try? PlaybackProgress.decoder.decode(CadenceStatsRecord.self, from: data),
+           let existing = try? PlaybackProgress.decoder.decode(SmartSpeechStatsRecord.self, from: data),
            existing.updatedAt > stats.updatedAt {
             return
         }
@@ -63,9 +63,9 @@ struct DropboxProgressSync: ProgressSync {
         try await source.writeFile(data, to: Self.statsPath)
     }
 
-    func pullStats() async throws -> CadenceStatsRecord? {
+    func pullStats() async throws -> SmartSpeechStatsRecord? {
         guard let data = try? await source.readFile(at: Self.statsPath) else { return nil }
-        return try? PlaybackProgress.decoder.decode(CadenceStatsRecord.self, from: data)
+        return try? PlaybackProgress.decoder.decode(SmartSpeechStatsRecord.self, from: data)
     }
 
     /// Stable, ASCII, filesystem-safe file path for an item key (SHA-256 hex). The

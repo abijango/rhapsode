@@ -1,4 +1,4 @@
-import CadenceKit
+import SmartSpeechKit
 import SwiftData
 import SwiftUI
 
@@ -10,11 +10,11 @@ struct SettingsView: View {
     @State private var isConnecting = false
     @State private var errorMessage: String?
 
-    // MARK: Cadence (global) — mirrors of the UserDefaults-backed prefs (not @Observable).
-    @State private var cadenceEnabled = CadencePreferences.isEnabled
-    @State private var cadenceDefaultTier = CadencePreferences.defaultTier
-    @State private var cadenceTotalSaved: TimeInterval = 0
-    @State private var cadenceBookCount = 0
+    // MARK: SmartSpeech (global) — mirrors of the UserDefaults-backed prefs (not @Observable).
+    @State private var smartSpeechEnabled = SmartSpeechPreferences.isEnabled
+    @State private var smartSpeechDefaultTier = SmartSpeechPreferences.defaultTier
+    @State private var smartSpeechTotalSaved: TimeInterval = 0
+    @State private var smartSpeechBookCount = 0
     /// Global light/dark preference; applied at the app root. Player + Nerd Stats stay branded-dark.
     @AppStorage(AppAppearance.storageKey) private var appearanceRaw = AppAppearance.system.rawValue
 
@@ -61,30 +61,30 @@ struct SettingsView: View {
                 }
 
                 #if DEBUG
-                // EXPLORATION: live (on-the-fly) Cadence spike — isolated, additive, DEBUG-only.
+                // EXPLORATION: live (on-the-fly) SmartSpeech spike — isolated, additive, DEBUG-only.
                 // See specs/realtime-cadence-exploration.md. Does not touch the shipped player.
                 Section("Experiments") {
-                    NavigationLink("Live Cadence (spike)") { LiveCadencePlayerView() }
+                    NavigationLink("Live SmartSpeech (spike)") { LiveSmartSpeechPlayerView() }
                 }
                 #endif
 
-                // MARK: Cadence (global) — lifetime stat hero + master switch + default profile.
+                // MARK: SmartSpeech (global) — lifetime stat hero + master switch + default profile.
                 Section {
-                    CadenceTimeSavedCard(totalSeconds: cadenceTotalSaved, bookCount: cadenceBookCount)
+                    SmartSpeechTimeSavedCard(totalSeconds: smartSpeechTotalSaved, bookCount: smartSpeechBookCount)
                         .listRowInsets(EdgeInsets())
                         .listRowBackground(Color.clear)
                 }
 
                 Section {
-                    Toggle("Enable \(CadenceBranding.featureName)", isOn: Binding(
-                        get: { cadenceEnabled },
-                        set: { cadenceEnabled = $0; CadencePreferences.isEnabled = $0 }))
+                    Toggle("Enable \(SmartSpeechBranding.featureName)", isOn: Binding(
+                        get: { smartSpeechEnabled },
+                        set: { smartSpeechEnabled = $0; SmartSpeechPreferences.isEnabled = $0 }))
 
-                    if cadenceEnabled {
+                    if smartSpeechEnabled {
                         Picker("Default Sensitivity", selection: Binding(
-                            get: { cadenceDefaultTier },
-                            set: { cadenceDefaultTier = $0; CadencePreferences.defaultTier = $0 })) {
-                            ForEach(CadenceSettings.Preset.allCases, id: \.self) { preset in
+                            get: { smartSpeechDefaultTier },
+                            set: { smartSpeechDefaultTier = $0; SmartSpeechPreferences.defaultTier = $0 })) {
+                            ForEach(SmartSpeechSettings.Preset.allCases, id: \.self) { preset in
                                 Text(preset.displayName).tag(preset)
                             }
                         }
@@ -95,9 +95,9 @@ struct SettingsView: View {
                             .foregroundStyle(.secondary)
                     }
                 } header: {
-                    Text(CadenceBranding.featureName)
+                    Text(SmartSpeechBranding.featureName)
                 } footer: {
-                    Text("Each audiobook can override this from its player — pick a different profile, or turn \(CadenceBranding.featureName) off just for that book.")
+                    Text("Each audiobook can override this from its player — pick a different profile, or turn \(SmartSpeechBranding.featureName) off just for that book.")
                 }
 
                 Section {
@@ -115,7 +115,7 @@ struct SettingsView: View {
                 #endif
             }
             .navigationTitle("Settings")
-            .task { refreshConnection(); refreshCadence() }
+            .task { refreshConnection(); refreshSmartSpeech() }
         }
     }
 
@@ -123,12 +123,12 @@ struct SettingsView: View {
         connection = ((try? keychain.load()) ?? nil) != nil ? .connected : .disconnected
     }
 
-    private func refreshCadence() {
-        cadenceEnabled = CadencePreferences.isEnabled
-        cadenceDefaultTier = CadencePreferences.defaultTier
-        cadenceTotalSaved = CadenceStats.totalSavedSeconds
+    private func refreshSmartSpeech() {
+        smartSpeechEnabled = SmartSpeechPreferences.isEnabled
+        smartSpeechDefaultTier = SmartSpeechPreferences.defaultTier
+        smartSpeechTotalSaved = SmartSpeechStats.totalSavedSeconds
         let books = (try? modelContext.fetch(FetchDescriptor<Audiobook>())) ?? []
-        cadenceBookCount = Audiobook.countWithCadenceSavings(books)
+        smartSpeechBookCount = Audiobook.countWithSmartSpeechSavings(books)
     }
 
     @MainActor

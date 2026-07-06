@@ -129,7 +129,7 @@ struct PlayerView: View {
 
     private func thisBookPanel(side: CGFloat) -> some View {
         let played = audiobook.listenedSeconds ?? 0
-        let saved = audiobook.cadenceSavedSeconds ?? 0
+        let saved = audiobook.smartSpeechSavedSeconds ?? 0
         let pct = played > 0 ? Int((saved / played * 100).rounded()) : 0
         return panelSurface(side: side) {
             Text("This book").font(BrandFont.display(18, .bold)).foregroundStyle(C.text)
@@ -220,7 +220,7 @@ struct PlayerView: View {
         scrubbing ? scrubFraction * player.totalDuration : player.bookPosition
     }
 
-    private var savedSeconds: Double { audiobook.cadenceSavedSeconds ?? 0 }
+    private var savedSeconds: Double { audiobook.smartSpeechSavedSeconds ?? 0 }
 
     private var chapterLine: String {
         let name = (player.currentTrack?.title ?? audiobook.author ?? "").uppercased()
@@ -343,7 +343,7 @@ struct PlayerPreviewHarness: View {
                              sourcePath: "preview")
         book.author = "J. K. Rowling"
         book.listenedSeconds = 11_520
-        book.cadenceSavedSeconds = 1_470
+        book.smartSpeechSavedSeconds = 1_470
         book.totalDuration = 40_000
         let tracks = [
             AudiobookTrack(title: "Opening Credits", fileRelPath: "a", duration: 64, order: 0),

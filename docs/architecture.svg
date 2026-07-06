@@ -105,10 +105,10 @@
   <rect x="752" y="122" width="256" height="50" rx="10" fill="#ffffff" stroke="#c7d0cc"/>
   <text x="880" y="143" font-size="13" font-weight="600" fill="#1d2433" text-anchor="middle">Readium Swift toolkit</text>
   <text x="880" y="160" font-size="10.5" fill="#5b6472" text-anchor="middle">EPUB rendering (UIKit)</text>
-  <!-- CadenceKit -->
+  <!-- SmartSpeechKit -->
   <rect x="752" y="262" width="256" height="50" rx="10" fill="#ffffff" stroke="#2f6f6a"/>
   <text x="880" y="283" font-size="13" font-weight="600" fill="#1d2433" text-anchor="middle">SmartSpeech engine</text>
-  <text x="880" y="300" font-size="10.5" fill="#2f6f6a" text-anchor="middle">CadenceKit · Accelerate + AVFoundation</text>
+  <text x="880" y="300" font-size="10.5" fill="#2f6f6a" text-anchor="middle">SmartSpeechKit · Accelerate + AVFoundation</text>
 
   <!-- ============ CONNECTORS ============ -->
   <!-- vertical band-to-band (double headed), center x=376 -->
@@ -130,7 +130,7 @@
 
   <!-- Readium -> EbookReader -->
   <line x1="752" y1="147" x2="724" y2="270" stroke="#9aa6a2" stroke-width="1.5" stroke-dasharray="4 3"/>
-  <!-- CadenceKit -> Live Trim Engine -->
+  <!-- SmartSpeechKit -> Live Trim Engine -->
   <line x1="752" y1="287" x2="704" y2="290" stroke="#2f6f6a" stroke-width="1.5" stroke-dasharray="4 3"/>
 
   <!-- flow legend -->

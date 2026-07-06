@@ -12,9 +12,13 @@ import UIKit
 /// ~1×/s so the hero ticks up live; the per-book rows come from SwiftData.
 struct NerdStatsView: View {
     @Query(sort: \Audiobook.title) private var books: [Audiobook]
+    @Environment(\.modelContext) private var modelContext
+    @Environment(SyncManager.self) private var sync
 
     @State private var totalPlayed: TimeInterval = 0
     @State private var totalSaved: TimeInterval = 0
+    @State private var showRecalcConfirm = false
+    @State private var noticeText: String?
 
     /// Books that have reclaimed any silence, most-reclaimed first (drives the "Most reclaimed" list).
     private var reclaimedBooks: [Audiobook] {
@@ -43,6 +47,29 @@ struct NerdStatsView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbarBackground(DS.Palette.Reclaim.bg1, for: .navigationBar)
             .toolbarBackground(.visible, for: .navigationBar)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Menu {
+                        Button { backUpNow() } label: {
+                            Label("Back up stats now", systemImage: "icloud.and.arrow.up")
+                        }
+                        Button { showRecalcConfirm = true } label: {
+                            Label("Recalculate from library", systemImage: "arrow.triangle.2.circlepath")
+                        }
+                    } label: {
+                        Image(systemName: "ellipsis.circle").tint(DS.Palette.Reclaim.mint)
+                    }
+                }
+            }
+            .confirmationDialog("Recalculate lifetime stats?", isPresented: $showRecalcConfirm, titleVisibility: .visible) {
+                Button("Recalculate", role: .destructive) { recalcStats() }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("Sets the lifetime reclaimed/listened totals to the sum across your current books, then backs them up. Use this if the total looks wrong.")
+            }
+            .alert("Stats", isPresented: Binding(get: { noticeText != nil }, set: { if !$0 { noticeText = nil } })) {
+                Button("OK", role: .cancel) {}
+            } message: { Text(noticeText ?? "") }
             .task {
                 while !Task.isCancelled {
                     totalPlayed = SmartSpeechStats.totalPlayedSeconds
@@ -50,6 +77,26 @@ struct NerdStatsView: View {
                     try? await Task.sleep(for: .seconds(1))
                 }
             }
+        }
+    }
+
+    /// Rebuild the lifetime totals from the per-book values, then back them up. Fixes a lifetime
+    /// counter that has drifted from the library.
+    private func recalcStats() {
+        let saved = books.reduce(0.0) { $0 + ($1.smartSpeechSavedSeconds ?? 0) }
+        let played = books.reduce(0.0) { $0 + ($1.listenedSeconds ?? 0) }
+        SmartSpeechStats.overwrite(savedSeconds: saved, playedSeconds: played)
+        totalSaved = saved; totalPlayed = played
+        Task { await sync.pushSmartSpeechStats() }
+        noticeText = "Recalculated from your library and backed up."
+    }
+
+    /// Force a backup of the lifetime stats to the Dropbox app folder (they also back up
+    /// automatically, but this makes it explicit so they can't be lost).
+    private func backUpNow() {
+        Task {
+            await sync.pushSmartSpeechStats()
+            noticeText = "Your stats are backed up to Dropbox."
         }
     }
 

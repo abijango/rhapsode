@@ -15,6 +15,7 @@ struct SettingsView: View {
     @State private var smartSpeechDefaultTier = SmartSpeechPreferences.defaultTier
     @State private var smartSpeechTotalSaved: TimeInterval = 0
     @State private var smartSpeechBookCount = 0
+    @State private var showRecalcConfirm = false
     /// Global light/dark preference; applied at the app root. Player + Nerd Stats stay branded-dark.
     @AppStorage(AppAppearance.storageKey) private var appearanceRaw = AppAppearance.system.rawValue
 
@@ -73,6 +74,9 @@ struct SettingsView: View {
                     SmartSpeechTimeSavedCard(totalSeconds: smartSpeechTotalSaved, bookCount: smartSpeechBookCount)
                         .listRowInsets(EdgeInsets())
                         .listRowBackground(Color.clear)
+                    Button("Recalculate from library") { showRecalcConfirm = true }
+                } footer: {
+                    Text("Rebuilds the lifetime total from your current books' saved time — use this if the total looks wrong.")
                 }
 
                 Section {
@@ -116,7 +120,24 @@ struct SettingsView: View {
             }
             .navigationTitle("Settings")
             .task { refreshConnection(); refreshSmartSpeech() }
+            .confirmationDialog("Recalculate lifetime stats?", isPresented: $showRecalcConfirm, titleVisibility: .visible) {
+                Button("Recalculate", role: .destructive) { recalcStats() }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("Sets the lifetime reclaimed/listened totals to the sum across your current books. This also syncs to your other devices.")
+            }
         }
+    }
+
+    /// Rebuild the lifetime totals from the per-book values, then push cross-device. Fixes a lifetime
+    /// counter that has drifted from the library (e.g. stale seeded/test data).
+    private func recalcStats() {
+        let books = (try? modelContext.fetch(FetchDescriptor<Audiobook>())) ?? []
+        let saved = books.reduce(0.0) { $0 + ($1.smartSpeechSavedSeconds ?? 0) }
+        let played = books.reduce(0.0) { $0 + ($1.listenedSeconds ?? 0) }
+        SmartSpeechStats.overwrite(savedSeconds: saved, playedSeconds: played)
+        refreshSmartSpeech()
+        Task { await sync.pushSmartSpeechStats() }
     }
 
     private func refreshConnection() {

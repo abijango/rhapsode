@@ -67,6 +67,15 @@ enum SmartSpeechStats {
         updatedAt = Date()
     }
 
+    /// Overwrite the lifetime totals locally and stamp `updatedAt = now` so the next cross-device
+    /// push wins last-writer-wins. Used by "Recalculate" in Settings to rebuild the totals from the
+    /// actual per-book data (e.g. to clear stale/seeded values).
+    static func overwrite(savedSeconds: TimeInterval, playedSeconds: TimeInterval) {
+        totalSavedSeconds = max(0, savedSeconds)
+        totalPlayedSeconds = max(0, playedSeconds)
+        updatedAt = Date()
+    }
+
     /// Adopt totals from a (newer) remote backup. Does NOT stamp a new `updatedAt` — it carries the
     /// remote's so the next push won't bounce. Caller decides the LWW comparison.
     static func apply(savedSeconds: TimeInterval, playedSeconds: TimeInterval, updatedAt stamp: Date) {

@@ -148,11 +148,12 @@ struct RhapsodeApp: App {
 
     #if DEBUG
     /// DEBUG-only: seed a few audiobooks with listened/saved stats so the Nerd Stats receipt can be
-    /// previewed with data (launch arg `-seedstats`). Idempotent — skips if already seeded.
+    /// previewed with data (launch arg `-seedstats`). Only runs on a COMPLETELY EMPTY library so it
+    /// can never overwrite a real install's lifetime stats (it writes fixed totals to UserDefaults).
     @MainActor
     static func seedStats(context: ModelContext) {
         let existing = (try? context.fetch(FetchDescriptor<Audiobook>())) ?? []
-        guard !existing.contains(where: { $0.sourcePath.hasPrefix("seed:") }) else { return }
+        guard existing.isEmpty else { return }
         let seed: [(String, Double, Double)] = [
             ("Harry Potter and the Goblet of Fire (Full-Cast Edition)", 11_520, 1_440),
             ("Project Hail Mary", 6_000, 540),

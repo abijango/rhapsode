@@ -121,7 +121,8 @@ final class SyncManager {
         let p = PlaybackProgress(
             key: sourcePath, kind: .audiobooks,
             lastTrackIndex: book.lastTrackIndex, lastOffsetSeconds: book.lastOffsetSeconds,
-            readingLocatorJSON: nil, listenedSeconds: book.listenedSeconds, updatedAt: updatedAt)
+            readingLocatorJSON: nil, listenedSeconds: book.listenedSeconds,
+            savedSeconds: book.smartSpeechSavedSeconds, updatedAt: updatedAt)
         do { try await progress.push(p) }
         catch {
             Self.log("pushAudiobookProgress failed: \(error.localizedDescription)")
@@ -215,6 +216,11 @@ final class SyncManager {
             // position LWW guard, so a stale-position remote can't clobber a higher local listened total.
             if let remoteListened = p.listenedSeconds {
                 book.listenedSeconds = max(book.listenedSeconds ?? 0, remoteListened)
+            }
+            // Per-book reclaimed time — same monotonic max-merge, so it survives reinstalls and
+            // a stale-position remote can't lower it.
+            if let remoteSaved = p.savedSeconds {
+                book.smartSpeechSavedSeconds = max(book.smartSpeechSavedSeconds ?? 0, remoteSaved)
             }
             guard p.isNewer(than: book.progressUpdatedAt) else { return }
             book.lastTrackIndex = p.lastTrackIndex

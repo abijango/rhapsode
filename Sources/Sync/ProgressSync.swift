@@ -17,6 +17,10 @@ struct PlaybackProgress: Codable, Sendable, Equatable {
     /// Cumulative content seconds listened for this audiobook (monotonic; merged with `max`, not
     /// LWW). Optional for back-compat: JSON written before WP8 lacks it and must still decode.
     var listenedSeconds: Double? = nil
+    /// Cumulative silence seconds SmartSpeech has trimmed for this book (monotonic; merged with
+    /// `max`, like `listenedSeconds`). Optional for back-compat. Backs up the per-book "reclaimed"
+    /// figure so the Nerd Stats breakdown + Recalculate survive a reinstall / new device.
+    var savedSeconds: Double? = nil
     var updatedAt: Date
 
     /// Last-writer-wins decision: is `self` newer than a local change stamped at

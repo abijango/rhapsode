@@ -12,8 +12,14 @@ struct CoverTile: View {
     /// always shown — including "0%" / "Not started" — so the status is visible.
     var progress: Double?
 
+    /// On iPad / Mac (regular size class) covers are large, so scale the title, author, and
+    /// especially the progress bar + % up to stay readable on a big, high-resolution screen.
+    /// iPhone (compact) keeps the denser layout.
+    @Environment(\.horizontalSizeClass) private var hSize
+    private var isRegular: Bool { hSize == .regular }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: DS.Spacing.xs) {
+        VStack(alignment: .leading, spacing: isRegular ? DS.Spacing.sm : DS.Spacing.xs) {
             RoundedRectangle(cornerRadius: DS.Radius.cover)
                 .fill(DS.Palette.coverPlaceholder)
                 .aspectRatio(DS.Shelf.coverAspect, contentMode: .fit)
@@ -36,21 +42,21 @@ struct CoverTile: View {
                 .hoverEffect(.automatic)
 
             Text(title)
-                .font(.subheadline)
+                .font(isRegular ? .headline : .subheadline)
                 .lineLimit(2)
 
             if let subtitle {
                 Text(subtitle)
-                    .font(.caption)
+                    .font(isRegular ? .subheadline : .caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
 
             if let progress {
-                HStack(spacing: DS.Spacing.xs) {
-                    LinearProgressBar(fraction: progress, height: 4)
+                HStack(spacing: isRegular ? DS.Spacing.sm : DS.Spacing.xs) {
+                    LinearProgressBar(fraction: progress, height: isRegular ? 14 : 4)
                     Text(Self.progressLabel(progress))
-                        .font(.caption2.monospacedDigit())
+                        .font((isRegular ? Font.callout.weight(.semibold) : Font.caption2).monospacedDigit())
                         .foregroundStyle(progress >= 0.995 ? DS.Palette.accent : .secondary)
                         .fixedSize()
                 }
@@ -74,7 +80,7 @@ struct CoverTile: View {
                         .frame(width: CGFloat(min(1, max(0, progress))) * geo.size.width)
                 }
             }
-            .frame(height: 5)
+            .frame(height: isRegular ? 8 : 5)
         }
     }
 

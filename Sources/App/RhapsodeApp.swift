@@ -123,7 +123,7 @@ struct RhapsodeApp: App {
         // runtime in RootTabView via UIWindowScene.sizeRestrictions (see
         // configureCatalystWindow) since the right lever/timing on Catalyst is
         // scene-based, not a Scene modifier.
-        .defaultSize(width: 1_000, height: 720)
+        .defaultSize(width: 1_440, height: 900)
         // MARK: Mac Catalyst — menu-bar commands
         .commands {
             // Remove the "New Window" item — this app is a single-library browser

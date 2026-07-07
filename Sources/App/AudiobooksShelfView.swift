@@ -6,10 +6,7 @@ import SwiftUI
 struct AudiobooksShelfView: View {
     @Environment(\.modelContext) private var modelContext
     @Environment(SyncManager.self) private var sync
-    @Environment(\.horizontalSizeClass) private var hSizeClass
     @Query(sort: \Audiobook.title) private var audiobooks: [Audiobook]
-
-    private var columns: [GridItem] { DS.Shelf.columns(regular: hSizeClass == .regular) }
 
     var body: some View {
         NavigationStack {
@@ -21,28 +18,25 @@ struct AudiobooksShelfView: View {
                         description: Text("Drop an M4B or MP3 folder into your Dropbox Audiobooks folder.")
                     )
                 } else {
-                    ScrollView {
-                        LazyVGrid(columns: columns, spacing: DS.Shelf.spacing) {
-                            ForEach(audiobooks) { book in
-                                NavigationLink {
-                                    PlayerView(audiobook: book)
-                                } label: {
-                                    CoverTile(
-                                        title: book.title,
-                                        subtitle: book.author,
-                                        coverPath: book.coverPath,
-                                        progress: book.fractionComplete
-                                    )
-                                }
-                                .tint(.primary)
-                                .contextMenu {
-                                    Button("Delete", systemImage: "trash", role: .destructive) {
-                                        LibraryStore(context: modelContext).deleteAudiobook(book)
-                                    }
+                    CoverGrid {
+                        ForEach(audiobooks) { book in
+                            NavigationLink {
+                                PlayerView(audiobook: book)
+                            } label: {
+                                CoverTile(
+                                    title: book.title,
+                                    subtitle: book.author,
+                                    coverPath: book.coverPath,
+                                    progress: book.fractionComplete
+                                )
+                            }
+                            .tint(.primary)
+                            .contextMenu {
+                                Button("Delete", systemImage: "trash", role: .destructive) {
+                                    LibraryStore(context: modelContext).deleteAudiobook(book)
                                 }
                             }
                         }
-                        .padding(DS.Spacing.md)
                     }
                 }
             }

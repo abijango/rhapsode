@@ -424,10 +424,10 @@ enum PhaseZeroSelfTest {
         check("RootLayoutMode: regular → split",  RootLayoutMode.resolve(.regular)  == .split)
         check("RootLayoutMode: nil → tabs",       RootLayoutMode.resolve(nil)        == .tabs)
 
-        // Design system: the wider regular minimum must be strictly larger than
-        // the compact minimum so the adaptive grid actually uses more columns.
-        check("DS.Shelf: regular minWidth > compact minWidth",
-              DS.Shelf.minCoverWidthRegular > DS.Shelf.minCoverWidth)
+        // Design system: the fixed regular cover width must be larger than the compact minimum
+        // so iPad/Mac get bigger covers than iPhone.
+        check("DS.Shelf: regular cover width > compact minWidth",
+              DS.Shelf.coverWidthRegular > DS.Shelf.minCoverWidth)
 
         return failures
     }

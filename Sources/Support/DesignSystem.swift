@@ -24,21 +24,20 @@ enum DS {
     enum Shelf {
         /// Minimum cover width; the grid flows as many columns as fit.
         static let minCoverWidth: CGFloat = 120
-        /// Wider minimum on iPad / Mac (regular size class) so covers are large and the
-        /// title + progress read clearly on a big, high-resolution screen.
-        static let minCoverWidthRegular: CGFloat = 300
-        /// Cap the cover width on regular so covers stay a consistent size — without it, a window
-        /// that fits only two columns balloons each cover to half the width, then snaps them small
-        /// as soon as a third column fits. With a max, growing the window ADDS columns instead.
-        static let maxCoverWidthRegular: CGFloat = 360
+        /// FIXED cover width on iPad / Mac (regular size class). A fixed width (min == max in the
+        /// adaptive item) means resizing the window only changes the number of columns and the gaps
+        /// between them — the cover size never changes. A ranged/min-only item instead stretches
+        /// covers to fill, so they balloon then snap as columns are added/removed.
+        static let coverWidthRegular: CGFloat = 320
         static let coverAspect: CGFloat = 2.0 / 3.0 // width / height
         static let spacing: CGFloat = Spacing.md
 
-        /// Adaptive grid columns for the shelves — bounded on regular so covers don't resize with
-        /// the window (see `maxCoverWidthRegular`). Shared by the Audiobooks + E-books shelves.
+        /// Adaptive grid columns for the shelves. On regular, the item is a FIXED width so covers
+        /// stay a stable size as the window resizes (only column count / gaps change). Shared by the
+        /// Audiobooks + E-books shelves. On compact (iPhone), covers flex from a small minimum.
         static func columns(regular: Bool) -> [GridItem] {
             regular
-                ? [GridItem(.adaptive(minimum: minCoverWidthRegular, maximum: maxCoverWidthRegular), spacing: spacing)]
+                ? [GridItem(.adaptive(minimum: coverWidthRegular, maximum: coverWidthRegular), spacing: spacing)]
                 : [GridItem(.adaptive(minimum: minCoverWidth), spacing: spacing)]
         }
     }

@@ -9,12 +9,7 @@ struct BooksShelfView: View {
     @Environment(\.horizontalSizeClass) private var hSizeClass
     @Query(sort: \Book.title) private var books: [Book]
 
-    private var columns: [GridItem] {
-        let minWidth = hSizeClass == .regular
-            ? DS.Shelf.minCoverWidthRegular
-            : DS.Shelf.minCoverWidth
-        return [GridItem(.adaptive(minimum: minWidth), spacing: DS.Shelf.spacing)]
-    }
+    private var columns: [GridItem] { DS.Shelf.columns(regular: hSizeClass == .regular) }
 
     var body: some View {
         NavigationStack {

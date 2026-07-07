@@ -26,9 +26,21 @@ enum DS {
         static let minCoverWidth: CGFloat = 120
         /// Wider minimum on iPad / Mac (regular size class) so covers are large and the
         /// title + progress read clearly on a big, high-resolution screen.
-        static let minCoverWidthRegular: CGFloat = 240
+        static let minCoverWidthRegular: CGFloat = 300
+        /// Cap the cover width on regular so covers stay a consistent size — without it, a window
+        /// that fits only two columns balloons each cover to half the width, then snaps them small
+        /// as soon as a third column fits. With a max, growing the window ADDS columns instead.
+        static let maxCoverWidthRegular: CGFloat = 360
         static let coverAspect: CGFloat = 2.0 / 3.0 // width / height
         static let spacing: CGFloat = Spacing.md
+
+        /// Adaptive grid columns for the shelves — bounded on regular so covers don't resize with
+        /// the window (see `maxCoverWidthRegular`). Shared by the Audiobooks + E-books shelves.
+        static func columns(regular: Bool) -> [GridItem] {
+            regular
+                ? [GridItem(.adaptive(minimum: minCoverWidthRegular, maximum: maxCoverWidthRegular), spacing: spacing)]
+                : [GridItem(.adaptive(minimum: minCoverWidth), spacing: spacing)]
+        }
     }
 
     /// Semantic colors layered on the system palette (Liquid-Glass friendly).

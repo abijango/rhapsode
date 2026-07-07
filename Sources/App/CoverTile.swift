@@ -19,7 +19,7 @@ struct CoverTile: View {
     private var isRegular: Bool { hSize == .regular }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: isRegular ? DS.Spacing.sm : DS.Spacing.xs) {
+        VStack(alignment: .leading, spacing: isRegular ? DS.Spacing.md : DS.Spacing.xs) {
             RoundedRectangle(cornerRadius: DS.Radius.cover)
                 .fill(DS.Palette.coverPlaceholder)
                 .aspectRatio(DS.Shelf.coverAspect, contentMode: .fit)
@@ -54,9 +54,9 @@ struct CoverTile: View {
 
             if let progress {
                 HStack(spacing: isRegular ? DS.Spacing.sm : DS.Spacing.xs) {
-                    LinearProgressBar(fraction: progress, height: isRegular ? 14 : 4)
+                    LinearProgressBar(fraction: progress, height: isRegular ? 20 : 4)
                     Text(Self.progressLabel(progress))
-                        .font((isRegular ? Font.callout.weight(.semibold) : Font.caption2).monospacedDigit())
+                        .font((isRegular ? Font.headline : Font.caption2).monospacedDigit())
                         .foregroundStyle(progress >= 0.995 ? DS.Palette.accent : .secondary)
                         .fixedSize()
                 }

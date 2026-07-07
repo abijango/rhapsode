@@ -9,12 +9,7 @@ struct AudiobooksShelfView: View {
     @Environment(\.horizontalSizeClass) private var hSizeClass
     @Query(sort: \Audiobook.title) private var audiobooks: [Audiobook]
 
-    private var columns: [GridItem] {
-        let minWidth = hSizeClass == .regular
-            ? DS.Shelf.minCoverWidthRegular
-            : DS.Shelf.minCoverWidth
-        return [GridItem(.adaptive(minimum: minWidth), spacing: DS.Shelf.spacing)]
-    }
+    private var columns: [GridItem] { DS.Shelf.columns(regular: hSizeClass == .regular) }
 
     var body: some View {
         NavigationStack {

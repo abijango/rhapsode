@@ -29,65 +29,53 @@ Apps never need Dropbox/ABS/Hardcover for core sync. Optional Hardcover runs **o
 
 ## 2. Manual steps (you do these; agents do not invent your NAS paths)
 
-### 2.1 Decide library paths on the NAS
+### 2.1 Library paths on **this** NAS (already chosen)
 
-Use **existing** folders if you already have them (from ABS or manual organization). Example:
+Matches `/volume1/docker/rhapsode-server/compose.yaml` (Mac: `/Volumes/docker/rhapsode-server/`).
 
-```text
-/volume1/media/audiobooks/     # m4b, mp3 folders, etc.
-/volume1/media/ebooks/         # epub
-```
+| Host path | Role |
+|-----------|------|
+| `/volume1/Storage/Audiobooks` | Audiobooks (m4b etc.) — ~Speakarr / manual library |
+| `/volume1/Storage/Books` | Calibre-style EPUBs (Readarr `/books`) |
+| `/volume1/docker/rhapsode-server/data` | SQLite + server state (RW) |
 
-Conventions (v1 scanner — keep simple):
+House style from `/volume1/docker/compose/compose.yaml`: `user 1026:100`, `TZ=Europe/London`, watchtower labels, ABS-style **bridge port** (not host network).
 
-**Audiobooks**
+**Port:** host **13379** → container 8080 (ABS uses 13378).
 
-- Single file: `Author/Title.m4b` or `Title.m4b`
-- Multi-file: `Author/Title/*.mp3` (folder = one book)
-- Optional cover: `cover.jpg` next to files
+**Note:** Main compose still mounts **Books** into ABS as `/audiobooks`. Real **m4b** files live under **Audiobooks**. Rhapsode Server mounts them correctly; you may want to realign ABS later.
 
-**E-books**
+Scanner conventions (v1) stay flexible: single-file m4b, multi-file folders, Calibre `Author/Title (id)/` epubs.
 
-- `Author/Title.epub` or flat `Title.epub`
+### 2.2 Data directory
 
-You can refine the scanner later; start with whatever layout you already use and document the **actual paths** in your compose file.
-
-### 2.2 Create a data directory for the server
-
-Separate from media (writable):
+Already created:
 
 ```text
 /volume1/docker/rhapsode-server/
-  data/          # SQLite + keys (container volume)
-  # optional: docker-compose.yml lives here or in the git repo
+  compose.yaml
+  .env.example
+  data/          # SQLite
+  config/        # reserved
+  README.md
 ```
 
-Do **not** put SQLite inside a media library folder that you might sync/delete carelessly.
+Do **not** put the DB under `Storage/Books` or `Storage/Audiobooks`.
 
-### 2.3 Docker Compose (target shape)
+### 2.3 Docker Compose
 
-Implementers will add `rhapsode-server/docker-compose.yml` in-repo. Operator-side you will roughly:
+**On the NAS (canonical for deploy):**
 
-```yaml
-services:
-  rhapsode-server:
-    image: rhapsode-server:local   # or build: .
-    ports:
-      - "8080:8080"                # or only expose on docker network if proxy handles it
-    environment:
-      RHAPSODE_DATA_DIR: /data
-      RHAPSODE_LIBRARY_AUDIO: /library/audio
-      RHAPSODE_LIBRARY_EBOOK: /library/ebook
-      RHAPSODE_BIND: 0.0.0.0:8080
-      # RHAPSODE_BOOTSTRAP_TOKEN set once for first admin device — see §3
-    volumes:
-      - /volume1/docker/rhapsode-server/data:/data
-      - /volume1/media/audiobooks:/library/audio:ro
-      - /volume1/media/ebooks:/library/ebook:ro
-    restart: unless-stopped
+```bash
+cd /volume1/docker/rhapsode-server   # or /Volumes/docker/rhapsode-server from Mac
+cp .env.example .env                 # set RHAPSODE_BOOTSTRAP_TOKEN
+# after image exists:
+docker compose -f compose.yaml up -d
 ```
 
-**Synology Container Manager:** create project from compose, or build on a machine with Docker Build and load the image.
+Image tag: `rhapsode-server:local` (build from the Rust crate when implemented; until then compose will not start).
+
+In-repo reference copy can mirror this later under `rhapsode-server/docker-compose.yml`.
 
 ### 2.4 Reverse proxy (HTTPS)
 

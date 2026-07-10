@@ -1,6 +1,5 @@
 # Dev / reference compose. Production Synology file:
 #   /volume1/docker/rhapsode-server/compose.yaml
-version: "2"
 services:
   rhapsode-server:
     container_name: rhapsode-server

@@ -123,8 +123,20 @@ fn walk_audio_dir(root: &Path, dir: &Path, out: &mut Vec<DiscoveredItem>) -> Api
         }
     }
 
-    if !audio_files_here.is_empty() {
-        audio_files_here.sort();
+    audio_files_here.sort();
+
+    // Flat library root (e.g. /Audiobooks/*.m4b): each file is its own book.
+    // Never name a book after the mount directory ("audio").
+    let at_root = dir == root;
+    if at_root {
+        for path in &audio_files_here {
+            out.push(single_audio_item(root, path)?);
+        }
+    } else if audio_files_here.len() == 1 {
+        // One file in a folder: still one book (title from filename).
+        out.push(single_audio_item(root, &audio_files_here[0])?);
+    } else if audio_files_here.len() > 1 {
+        // Multi-file book folder: chapter mp3s etc.
         let mut files = Vec::new();
         for (i, path) in audio_files_here.iter().enumerate() {
             let rel = path
@@ -140,16 +152,17 @@ fn walk_audio_dir(root: &Path, dir: &Path, out: &mut Vec<DiscoveredItem>) -> Api
                 sort_order: i as i32,
             });
         }
-        let first = &audio_files_here[0];
-        let title = if audio_files_here.len() == 1 {
-            title_from_path(first)
-        } else {
-            dir.file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or("Unknown")
-                .to_string()
-        };
-        let author = author_from_parent(first, root);
+        let title = dir
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("Unknown")
+            .to_string();
+        let author = dir
+            .parent()
+            .filter(|p| *p != root)
+            .and_then(|p| p.file_name())
+            .and_then(|s| s.to_str())
+            .map(|s| s.to_string());
         let content_key = format!(
             "audio:{}",
             files
@@ -173,6 +186,29 @@ fn walk_audio_dir(root: &Path, dir: &Path, out: &mut Vec<DiscoveredItem>) -> Api
         walk_audio_dir(root, &sub, out)?;
     }
     Ok(())
+}
+
+fn single_audio_item(root: &Path, path: &Path) -> ApiResult<DiscoveredItem> {
+    let rel = path
+        .strip_prefix(root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('\\', "/");
+    let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    let files = vec![DiscoveredFile {
+        role: "audio",
+        rel_path: rel.clone(),
+        size,
+        sort_order: 0,
+    }];
+    Ok(DiscoveredItem {
+        content_key: format!("audio:{}:{}", rel, size),
+        kind: "audio".into(),
+        title: title_from_path(path),
+        author: author_from_parent(path, root),
+        rel_path: rel,
+        files,
+    })
 }
 
 fn collect_ebooks(root: &Path) -> ApiResult<Vec<DiscoveredItem>> {
@@ -276,6 +312,15 @@ pub fn scan_libraries(db: &Db, audio_root: &Path, ebook_root: &Path) -> ApiResul
     for item in audio.into_iter().chain(ebooks.into_iter()) {
         upsert_item(db, &item, &now)?;
         upserted += 1;
+    }
+
+    // Drop items not seen this scan (e.g. old wrong grouping of flat m4bs).
+    {
+        let conn = db.conn();
+        conn.execute(
+            "DELETE FROM library_items WHERE missing = 1",
+            [],
+        )?;
     }
 
     Ok(ScanReport {
@@ -437,6 +482,37 @@ pub fn list_files(db: &Db, item_id: &str) -> ApiResult<Vec<MediaFileDto>> {
         })
     })?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::io::Write;
+
+    #[test]
+    fn flat_m4b_files_are_separate_items() {
+        let dir = tempfile::tempdir().unwrap();
+        let audio = dir.path().join("audio");
+        fs::create_dir_all(&audio).unwrap();
+        for name in [
+            "Book 1 - Philosopher.m4b",
+            "Book 2 - Chamber.m4b",
+            "Book 3 - Azkaban.m4b",
+        ] {
+            let mut f = fs::File::create(audio.join(name)).unwrap();
+            f.write_all(b"x").unwrap();
+        }
+        let ebook = dir.path().join("ebook");
+        fs::create_dir_all(&ebook).unwrap();
+
+        let items = collect_audio(&audio).unwrap();
+        assert_eq!(items.len(), 3, "each root m4b should be its own book");
+        let titles: Vec<_> = items.iter().map(|i| i.title.as_str()).collect();
+        assert!(titles.contains(&"Book 1 - Philosopher"));
+        assert!(titles.contains(&"Book 2 - Chamber"));
+        assert!(!titles.iter().any(|t| *t == "audio"));
+    }
 }
 
 pub fn resolve_file_path(

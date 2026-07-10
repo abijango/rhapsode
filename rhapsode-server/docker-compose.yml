@@ -1,0 +1,30 @@
+# Dev / reference compose. Production Synology file:
+#   /volume1/docker/rhapsode-server/compose.yaml
+version: "2"
+services:
+  rhapsode-server:
+    container_name: rhapsode-server
+    image: rhapsode-server:local
+    build: .
+    environment:
+      - TZ=Europe/London
+      - RHAPSODE_DATA_DIR=/data
+      - RHAPSODE_LIBRARY_AUDIO=/library/audio
+      - RHAPSODE_LIBRARY_EBOOK=/library/ebook
+      - RHAPSODE_BIND=0.0.0.0:8080
+      - RHAPSODE_LOG=info
+      - RHAPSODE_BOOTSTRAP_TOKEN=${RHAPSODE_BOOTSTRAP_TOKEN:-}
+    volumes:
+      - ./data:/data
+      - ./fixtures/audio:/library/audio:ro
+      - ./fixtures/ebook:/library/ebook:ro
+    ports:
+      - "13379:8080"
+    user: "1026:100"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s

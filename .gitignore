@@ -24,6 +24,11 @@ Package.resolved
 # macOS
 .DS_Store
 
+# rhapsode-server (Rust)
+rhapsode-server/target/
+rhapsode-server/data/
+rhapsode-server/.env
+
 # Claude Code / MCP tooling caches
 .claude/
 .playwright-mcp/

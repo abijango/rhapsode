@@ -213,6 +213,10 @@ final class SyncManager {
     /// points the user at the reconnect that fixes it.
     private static func progressSyncErrorMessage(_ error: Error) -> String {
         Self.log("progress sync user alert: \(error)")
+        if SmbConfig.shouldUseSmb {
+            return "Couldn't sync progress to the NAS (SMB). Check that your user can write "
+                + "to the sync folder (\(SmbConfig.syncPath)) on the share."
+        }
         if RhapsodeServerConfig.shouldUseServer {
             return "Couldn't sync progress to Rhapsode Server. Check the server URL, "
                 + "that you're on Tailscale/LAN, and that your device token is still valid."
@@ -419,19 +423,33 @@ final class SyncManager {
     /// (back off, then re-seed the cursor and retry). Never ingests its files as library
     /// content (it is not a `WatchedFolder` and `pullAndMergeProgress` reads it directly).
     private func watchProgress() async {
+        // Progress folder path depends on backend (Dropbox app folder vs SMB share).
+        let progressFolder: String = {
+            if usesSmbBackend { return SmbProgressSync.folder }
+            return DropboxProgressSync.folder
+        }()
+        // Server progress is polled via its own API elsewhere; skip Dropbox-style watch.
+        if usesServerBackend { return }
+
         var cursor: String?
         while !Task.isCancelled {
             do {
                 if cursor == nil {
-                    cursor = try await source.latestCursor(DropboxProgressSync.folder)
+                    cursor = try await source.latestCursor(progressFolder)
                 }
                 guard let c = cursor else { return }
                 let hasChanges = try await source.longpoll(cursor: c)
                 if Task.isCancelled { return }
                 if hasChanges {
-                    let (_, newCursor) = try await source.changes(since: c)
-                    cursor = newCursor
-                    await pullAndMergeProgress()
+                    // SMB longpoll is a timer; always pull. Dropbox uses real deltas.
+                    if usesSmbBackend {
+                        cursor = try? await source.latestCursor(progressFolder)
+                        await pullAndMergeProgress()
+                    } else {
+                        let (_, newCursor) = try await source.changes(since: c)
+                        cursor = newCursor
+                        await pullAndMergeProgress()
+                    }
                 }
             } catch {
                 // Folder missing (no push yet) or transient error — re-seed + back off.

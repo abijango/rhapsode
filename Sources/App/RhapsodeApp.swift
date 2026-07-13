@@ -50,11 +50,12 @@ struct RhapsodeApp: App {
         let syncManager: SyncManager
         if SmbConfig.shouldUseSmb {
             let smb = SmbLibrarySource()
-            // Progress JSON on the share lands in MVP B; local-only until then.
+            // Cross-device resume: same PlaybackProgress JSON as Dropbox, under
+            // the share’s `.rhapsode-sync/` (or profile syncPath).
             syncManager = SyncManager(
                 source: smb,
                 context: container.mainContext,
-                progress: NoopProgressSync())
+                progress: SmbProgressSync(source: smb))
         } else if RhapsodeServerConfig.shouldUseServer {
             let client = RhapsodeServerClient()
             let server = RhapsodeServerSource(client: client)

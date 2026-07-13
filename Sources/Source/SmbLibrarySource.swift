@@ -157,6 +157,40 @@ actor SmbLibrarySource: LibrarySource {
         try data.write(to: destination, options: .atomic)
     }
 
+    /// Small-file write for progress / stats JSON under the share (e.g. `.rhapsode-sync/…`).
+    func writeFile(_ data: Data, to path: String) async throws {
+        let client = try await connectedManager()
+        let smbPath = Self.mapLibraryPath(path)
+        // Ensure parent directory exists (createDirectory is idempotent for existing).
+        let parent = (smbPath as NSString).deletingLastPathComponent
+        if !parent.isEmpty, parent != "." {
+            var built = ""
+            for part in parent.split(separator: "/") {
+                built = built.isEmpty ? String(part) : "\(built)/\(part)"
+                try? await client.createDirectory(atPath: built)
+            }
+        }
+        do {
+            try await client.write(data: data, toPath: smbPath, progress: nil)
+        } catch {
+            throw Self.mapError(error, context: "Write “\(smbPath)”")
+        }
+    }
+
+    /// Small-file read for progress / stats JSON. Returns `nil` if missing.
+    func readFile(at path: String) async throws -> Data? {
+        let client = try await connectedManager()
+        let smbPath = Self.mapLibraryPath(path)
+        do {
+            return try await client.contents(atPath: smbPath)
+        } catch {
+            // Missing path is common before the first push — treat as nil.
+            let ns = error as NSError
+            if ns.code == 2 { return nil } // ENOENT
+            throw Self.mapError(error, context: "Read “\(smbPath)”")
+        }
+    }
+
     func ensureFolderExists(_ path: String) async throws {
         let client = try await connectedManager()
         let smbPath = Self.mapLibraryPath(path)

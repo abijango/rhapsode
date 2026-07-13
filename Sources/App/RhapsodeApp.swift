@@ -45,13 +45,32 @@ struct RhapsodeApp: App {
             }
         }
         modelContainer = container
-        // Share one DropboxSource between the library pipeline and progress sync so
-        // token refresh stays serialized through a single actor.
-        let dropbox = DropboxSource()
-        let syncManager = SyncManager(
-            source: dropbox,
-            context: container.mainContext,
-            progress: DropboxProgressSync(source: dropbox))
+        // Backend preference is read at launch (change in Settings, then relaunch):
+        // SMB NAS > rhapsode-server (parked) > Dropbox.
+        let syncManager: SyncManager
+        if SmbConfig.shouldUseSmb {
+            let smb = SmbLibrarySource()
+            // Progress JSON on the share lands in MVP B; local-only until then.
+            syncManager = SyncManager(
+                source: smb,
+                context: container.mainContext,
+                progress: NoopProgressSync())
+        } else if RhapsodeServerConfig.shouldUseServer {
+            let client = RhapsodeServerClient()
+            let server = RhapsodeServerSource(client: client)
+            syncManager = SyncManager(
+                source: server,
+                context: container.mainContext,
+                progress: RhapsodeServerProgressSync(client: client))
+        } else {
+            // Share one DropboxSource between library + progress so token refresh
+            // stays serialized through a single actor.
+            let dropbox = DropboxSource()
+            syncManager = SyncManager(
+                source: dropbox,
+                context: container.mainContext,
+                progress: DropboxProgressSync(source: dropbox))
+        }
         _sync = State(initialValue: syncManager)
         // Register the background-refresh handler before launch completes.
         BackgroundRefresh.register(container: container)

@@ -52,6 +52,13 @@ struct DropboxProgressSync: ProgressSync {
     /// Fixed path for the single shared SmartSpeech stats backup.
     static let statsPath = "\(folder)/cadence-stats.json"
 
+    static func collectionsPath(for kind: FolderKind) -> String {
+        switch kind {
+        case .audiobooks: "\(folder)/collections-audiobooks.json"
+        case .books: "\(folder)/collections-books.json"
+        }
+    }
+
     func pushStats(_ stats: SmartSpeechStatsRecord) async throws {
         // Same read-before-write LWW guard as `push`: don't clobber a strictly-newer remote.
         if let data = try? await source.readFile(at: Self.statsPath),
@@ -66,6 +73,22 @@ struct DropboxProgressSync: ProgressSync {
     func pullStats() async throws -> SmartSpeechStatsRecord? {
         guard let data = try? await source.readFile(at: Self.statsPath) else { return nil }
         return try? PlaybackProgress.decoder.decode(SmartSpeechStatsRecord.self, from: data)
+    }
+
+    func pushCollections(_ manifest: CollectionsManifest) async throws {
+        let path = Self.collectionsPath(for: manifest.kind)
+        if let data = try? await source.readFile(at: path),
+           let existing = try? PlaybackProgress.decoder.decode(CollectionsManifest.self, from: data),
+           existing.updatedAt > manifest.updatedAt {
+            return
+        }
+        let data = try PlaybackProgress.encoder.encode(manifest)
+        try await source.writeFile(data, to: path)
+    }
+
+    func pullCollections(kind: FolderKind) async throws -> CollectionsManifest? {
+        guard let data = try? await source.readFile(at: Self.collectionsPath(for: kind)) else { return nil }
+        return try? PlaybackProgress.decoder.decode(CollectionsManifest.self, from: data)
     }
 
     /// Stable, ASCII, filesystem-safe file path for an item key (SHA-256 hex). The

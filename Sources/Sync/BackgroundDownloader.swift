@@ -1,12 +1,16 @@
 import Foundation
 import SwiftData
 
-/// Background `URLSession` download manager (Phase 3a).
+/// Background `URLSession` download manager (Phase 3a + 3b).
 ///
 /// Uses `URLSessionConfiguration.background(...)` so the OS continues transfers
 /// when the app is suspended and can relaunch the app to deliver completions.
 /// The singleton is recreated at launch with the SAME session identifier so any
 /// in-flight tasks reattach to this delegate automatically.
+///
+/// Phase 3b: MP3-folder audiobooks enqueue one background task per child file,
+/// sharing a `groupID`. When every child reaches `.done`, the folder is imported
+/// once (not per-file).
 ///
 /// Thread-safety contract:
 ///   • `URLSessionDownloadDelegate` methods fire on an arbitrary serial queue
@@ -53,14 +57,16 @@ final class BackgroundDownloader: NSObject {
     // MARK: Enqueue
 
     /// Bake a fresh access token into a `URLRequest` and hand the task to the OS.
-    ///
-    /// - Parameters:
-    ///   - request: A fully formed request from `DropboxSource.downloadRequest(for:)`.
-    ///   - item:    The already-inserted `DownloadItem` (state = .downloading).
-    ///   - destRelPath: Container-relative destination (e.g. "Books/novel.epub").
-    func enqueue(request: URLRequest, item: DownloadItem, destRelPath: String) {
+    func enqueue(request: URLRequest, item: DownloadItem, destRelPath: String, groupTitle: String? = nil) {
         enqueue(request: request, payload: TaskPayload(
-            itemID: item.id, destRelPath: destRelPath, kind: item.kind, title: item.title ?? ""))
+            itemID: item.id,
+            destRelPath: destRelPath,
+            kind: item.kind,
+            title: item.title ?? "",
+            groupID: item.groupID,
+            groupFolderRelPath: item.groupFolderRelPath,
+            groupTitle: groupTitle
+        ))
     }
 
     /// Enqueue with a prebuilt payload.
@@ -78,9 +84,6 @@ final class BackgroundDownloader: NSObject {
     /// On launch, find any `DownloadItem` stuck in `.downloading` that has no live
     /// background task (i.e. the task was lost when the app was killed mid-download)
     /// and mark it `.failed` so the UI doesn't show it as stuck.
-    ///
-    /// The matching logic is extracted into a pure static function so it can be
-    /// unit-tested without touching the live session.
     func reconcileOnLaunch() {
         guard let container else { return }
         session.getAllTasks { tasks in
@@ -104,12 +107,117 @@ final class BackgroundDownloader: NSObject {
 
     /// Pure function: given the set of downloading items and live task IDs, return
     /// the items whose IDs are absent from `liveTaskIDs` (orphaned by a kill).
-    /// Extracted so the self-test can verify the decision logic without a live session.
     static func orphanedItems(
         downloading: [DownloadItem],
         liveTaskIDs: Set<UUID>
     ) -> [DownloadItem] {
         downloading.filter { !liveTaskIDs.contains($0.id) }
+    }
+
+    /// True when every member of `groupID` is `.done` and none are `.failed`.
+    /// Extracted for headless self-test coverage.
+    static func shouldImportGroup(items: [DownloadItem], groupID: String) -> Bool {
+        let members = items.filter { $0.groupID == groupID }
+        guard !members.isEmpty else { return false }
+        if members.contains(where: { $0.state == .failed }) { return false }
+        return members.allSatisfy { $0.state == .done }
+    }
+
+    // MARK: Group import (Phase 3b)
+
+    @MainActor
+    private func tryImportGroupIfComplete(
+        groupID: String,
+        folderRel: String,
+        groupTitle: String,
+        kind: FolderKind,
+        ctx: ModelContext
+    ) async {
+        let all = (try? ctx.fetch(FetchDescriptor<DownloadItem>())) ?? []
+        guard Self.shouldImportGroup(items: all, groupID: groupID) else { return }
+
+        // Another completion may have imported already — skip if the shelf has it.
+        if isFolderAlreadyImported(folderRel: folderRel, kind: kind, ctx: ctx) { return }
+
+        guard let folderURL = try? ContainerPaths.url(forRelativePath: folderRel) else { return }
+
+        do {
+            switch kind {
+            case .audiobooks:
+                let audiobook = try await AudiobookImporter.makeAudiobook(fromLocal: folderURL)
+                ctx.insert(audiobook)
+            case .books:
+                return // folder groups are audiobook-only
+            }
+            try ctx.save()
+            removeGroupItems(groupID: groupID, ctx: ctx)
+            onImportFinished?()
+
+            let notifier = NotificationService()
+            await notifier.notifyDownloadFinished(title: groupTitle)
+        } catch {
+            for item in all where item.groupID == groupID { item.state = .failed }
+            try? ctx.save()
+            SyncManager.log("group import failed for \(folderRel): \(error)")
+        }
+    }
+
+    @MainActor
+    private func removeGroupItems(groupID: String, ctx: ModelContext) {
+        let all = (try? ctx.fetch(FetchDescriptor<DownloadItem>())) ?? []
+        for item in all where item.groupID == groupID {
+            ctx.delete(item)
+        }
+        try? ctx.save()
+    }
+
+    @MainActor
+    private func removeItem(id: UUID, ctx: ModelContext) {
+        if let item = findItem(id: id, ctx: ctx) {
+            ctx.delete(item)
+            try? ctx.save()
+        }
+    }
+
+    @MainActor
+    private func isFolderAlreadyImported(folderRel: String, kind: FolderKind, ctx: ModelContext) -> Bool {
+        switch kind {
+        case .audiobooks:
+            return (try? ctx.fetch(FetchDescriptor<Audiobook>()))?
+                .contains { $0.sourcePath == folderRel } ?? false
+        case .books:
+            return (try? ctx.fetch(FetchDescriptor<Book>()))?
+                .contains { $0.fileRelPath == folderRel } ?? false
+        }
+    }
+
+    @MainActor
+    private func importSingleFile(at destURL: URL, kind: FolderKind, ctx: ModelContext) async throws {
+        switch kind {
+        case .audiobooks:
+            let audiobook = try await AudiobookImporter.makeAudiobook(fromLocal: destURL)
+            ctx.insert(audiobook)
+        case .books:
+            ctx.insert(try await EbookImporter.makeBook(fromLocal: destURL))
+        }
+        try ctx.save()
+    }
+
+    @MainActor
+    private func markItemFailed(id: UUID, ctx: ModelContext) {
+        if let item = findItem(id: id, ctx: ctx) {
+            item.state = .failed
+            try? ctx.save()
+        }
+    }
+
+    @MainActor
+    private func markItemDone(id: UUID, ctx: ModelContext) {
+        if let item = findItem(id: id, ctx: ctx) {
+            if item.totalBytes > 0 { item.bytesReceived = item.totalBytes }
+            item.state = .done
+            try? ctx.save()
+        }
     }
 }
 
@@ -125,46 +233,28 @@ extension BackgroundDownloader: URLSessionDownloadDelegate {
         downloadTask: URLSessionDownloadTask,
         didFinishDownloadingTo location: URL
     ) {
-        // Decode the payload baked in at enqueue time.
         guard let description = downloadTask.taskDescription,
               let data = description.data(using: .utf8),
               let payload = try? JSONDecoder().decode(TaskPayload.self, from: data)
         else { return }
 
-        // Check HTTP status — Dropbox returns 401/409 as "successful" downloads of
-        // an error body. Treat non-2xx as failure.
         if let http = downloadTask.response as? HTTPURLResponse,
            !(200..<300).contains(http.statusCode) {
-            let status = http.statusCode
             Task { @MainActor in
                 guard let ctx = self.container?.mainContext else { return }
-                if let item = self.findItem(id: payload.itemID, ctx: ctx) {
-                    if status == 401 {
-                        // Token expired after a long suspension: mark failed so the
-                        // UI shows it; the user can re-trigger via Scan Now.
-                        item.state = .failed
-                    } else {
-                        item.state = .failed
-                    }
-                    try? ctx.save()
-                }
+                self.markItemFailed(id: payload.itemID, ctx: ctx)
             }
             return
         }
 
-        // Resolve the destination URL now, still on the delegate queue.
         guard let destURL = try? ContainerPaths.url(forRelativePath: payload.destRelPath) else {
             Task { @MainActor in
                 guard let ctx = self.container?.mainContext else { return }
-                if let item = self.findItem(id: payload.itemID, ctx: ctx) {
-                    item.state = .failed
-                    try? ctx.save()
-                }
+                self.markItemFailed(id: payload.itemID, ctx: ctx)
             }
             return
         }
 
-        // Move the temp file synchronously before this callback returns.
         let fm = FileManager.default
         do {
             try fm.createDirectory(
@@ -178,59 +268,41 @@ extension BackgroundDownloader: URLSessionDownloadDelegate {
         } catch {
             Task { @MainActor in
                 guard let ctx = self.container?.mainContext else { return }
-                if let item = self.findItem(id: payload.itemID, ctx: ctx) {
-                    item.state = .failed
-                    try? ctx.save()
-                }
+                self.markItemFailed(id: payload.itemID, ctx: ctx)
             }
             return
         }
 
-        // Hop to MainActor for import + SwiftData updates.
         let kind = payload.kind
         let title = payload.title
         Task { @MainActor in
             guard let ctx = self.container?.mainContext else { return }
-            do {
-                var newAudiobookID: UUID?
-                switch kind {
-                case .audiobooks:
-                    let audiobook = try await AudiobookImporter.makeAudiobook(fromLocal: destURL)
-                    ctx.insert(audiobook)
-                    newAudiobookID = audiobook.id
-                case .books:
-                    ctx.insert(try await EbookImporter.makeBook(fromLocal: destURL))
-                }
-                try ctx.save()
+            self.markItemDone(id: payload.itemID, ctx: ctx)
 
-                if let item = self.findItem(id: payload.itemID, ctx: ctx) {
-                    item.bytesReceived = item.totalBytes
-                    item.state = .done
-                    try? ctx.save()
-                }
+            if let groupID = payload.groupID, let folderRel = payload.groupFolderRelPath {
+                let groupTitle = payload.groupTitle ?? title
+                await self.tryImportGroupIfComplete(
+                    groupID: groupID,
+                    folderRel: folderRel,
+                    groupTitle: groupTitle,
+                    kind: kind,
+                    ctx: ctx
+                )
+            } else {
+                do {
+                    try await self.importSingleFile(at: destURL, kind: kind, ctx: ctx)
+                    self.removeItem(id: payload.itemID, ctx: ctx)
+                    self.onImportFinished?()
 
-                // The matching book now exists locally — pull any progress another
-                // device pushed for it so cross-device resume lands immediately.
-                self.onImportFinished?()
-
-                // Playback is now LIVE silence-trimming (the pre-rendered .m4a is not used at
-                // playback), so we no longer batch-render every download. Batch rendering is an
-                // on-demand utility from Settings (WP5). Leaving auto-render on would waste CPU +
-                // storage producing files nothing plays.
-                _ = newAudiobookID
-
-                let notifier = NotificationService()
-                await notifier.notifyDownloadFinished(title: title)
-            } catch {
-                if let item = self.findItem(id: payload.itemID, ctx: ctx) {
-                    item.state = .failed
-                    try? ctx.save()
+                    let notifier = NotificationService()
+                    await notifier.notifyDownloadFinished(title: title)
+                } catch {
+                    self.markItemFailed(id: payload.itemID, ctx: ctx)
                 }
             }
         }
     }
 
-    /// Called periodically with progress updates.
     nonisolated func urlSession(
         _ session: URLSession,
         downloadTask: URLSessionDownloadTask,
@@ -250,20 +322,16 @@ extension BackgroundDownloader: URLSessionDownloadDelegate {
                 if totalBytesExpectedToWrite > 0 {
                     item.totalBytes = totalBytesExpectedToWrite
                 }
-                // No explicit save: SwiftData observes @Model changes automatically.
             }
         }
     }
 
-    /// Called when a task completes (successfully or not). For network-level errors
-    /// (no connection, timeout): mark failed. Success is handled in
-    /// `didFinishDownloadingTo`, so only act when error != nil.
     nonisolated func urlSession(
         _ session: URLSession,
         task: URLSessionTask,
         didCompleteWithError error: Error?
     ) {
-        guard error != nil else { return } // success path handled in didFinishDownloadingTo
+        guard error != nil else { return }
 
         guard let description = task.taskDescription,
               let data = description.data(using: .utf8),
@@ -272,15 +340,10 @@ extension BackgroundDownloader: URLSessionDownloadDelegate {
 
         Task { @MainActor in
             guard let ctx = self.container?.mainContext else { return }
-            if let item = self.findItem(id: payload.itemID, ctx: ctx) {
-                item.state = .failed
-                try? ctx.save()
-            }
+            self.markItemFailed(id: payload.itemID, ctx: ctx)
         }
     }
 
-    /// Called by the system when all queued background events for this session have
-    /// been delivered. Invoke the stored completion handler on the main thread.
     nonisolated func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {
         Task { @MainActor in
             if let handler = self.backgroundSessionCompletionHandler {
@@ -289,8 +352,6 @@ extension BackgroundDownloader: URLSessionDownloadDelegate {
             }
         }
     }
-
-    // MARK: Helpers
 
     @MainActor
     private func findItem(id: UUID, ctx: ModelContext) -> DownloadItem? {
@@ -307,4 +368,28 @@ struct TaskPayload: Codable, Sendable {
     let destRelPath: String
     let kind: FolderKind
     let title: String
+    /// Phase 3b: set when this task is one file in an MP3-folder group.
+    let groupID: String?
+    /// Phase 3b: container-relative folder to import when the group completes.
+    let groupFolderRelPath: String?
+    /// Phase 3b: human-readable folder name for the finished notification.
+    let groupTitle: String?
+
+    init(
+        itemID: UUID,
+        destRelPath: String,
+        kind: FolderKind,
+        title: String,
+        groupID: String? = nil,
+        groupFolderRelPath: String? = nil,
+        groupTitle: String? = nil
+    ) {
+        self.itemID = itemID
+        self.destRelPath = destRelPath
+        self.kind = kind
+        self.title = title
+        self.groupID = groupID
+        self.groupFolderRelPath = groupFolderRelPath
+        self.groupTitle = groupTitle
+    }
 }

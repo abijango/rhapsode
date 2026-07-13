@@ -56,10 +56,17 @@ async fn health() -> axum::Json<serde_json::Value> {
 async fn health_v1(
     state: axum::extract::State<Arc<AppState>>,
 ) -> Result<axum::Json<serde_json::Value>, crate::error::ApiError> {
-    let n = state.db.user_count()?;
+    // Keep this off the async worker: SQLite + Mutex would stall the runtime
+    // (and client probes) while a library scan holds the DB lock.
+    // Clients use `/health` for reachability; this endpoint is diagnostic.
+    let state2 = Arc::clone(&state);
+    let users = tokio::task::spawn_blocking(move || state2.db.user_count().ok())
+        .await
+        .ok()
+        .flatten();
     Ok(axum::Json(serde_json::json!({
         "ok": true,
-        "users": n,
+        "users": users,
         "scan_running": state.scan_running(),
     })))
 }

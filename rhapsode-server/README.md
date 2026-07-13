@@ -27,11 +27,27 @@ curl -s -X POST http://127.0.0.1:8080/v1/auth/bootstrap \
 # save api_token from response as TOKEN
 export TOKEN=rhp_...
 
-curl -s -X POST http://127.0.0.1:8080/v1/library/scan \
+# Incremental reindex (default) — only new/changed/deleted files
+curl -s -X POST 'http://127.0.0.1:8080/v1/library/scan?mode=incremental' \
   -H "Authorization: Bearer $TOKEN"
 
+# Full rebuild
+curl -s -X POST 'http://127.0.0.1:8080/v1/library/scan?mode=full' \
+  -H "Authorization: Bearer $TOKEN"
+
+# Catalogue from SQLite (includes primary_file — no N+1)
 curl -s http://127.0.0.1:8080/v1/library -H "Authorization: Bearer $TOKEN"
 ```
+
+## Indexing model
+
+1. **Catalogue lives in SQLite** — `GET /v1/library` never walks disk.
+2. **Startup** runs one incremental scan in the background.
+3. **Periodic** incremental scan (default every **15 minutes**).
+4. **Manual** `POST /v1/library/scan?mode=incremental|full`.
+5. **Download** resolves `media_files.rel_path` from the DB and streams the file.
+
+Incremental compares each file’s **size + mtime** to the last index; unchanged books are skipped.
 
 ## Docker
 
@@ -52,3 +68,4 @@ For Synology, load/tag the same image and use the host compose under `/volume1/d
 | `RHAPSODE_BIND` | `0.0.0.0:8080` |
 | `RHAPSODE_BOOTSTRAP_TOKEN` | unset (bootstrap disabled) |
 | `RHAPSODE_LOG` | `info` |
+| `RHAPSODE_SCAN_INTERVAL_SECS` | `900` (15m; `0` disables background scan) |

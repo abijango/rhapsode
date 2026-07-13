@@ -1,6 +1,6 @@
 use crate::auth::AuthUser;
 use crate::error::{ApiError, ApiResult};
-use crate::library;
+use crate::library::{self, ScanMode};
 use crate::state::AppState;
 use axum::body::Body;
 use axum::extract::{Path, Query, State};
@@ -17,12 +17,21 @@ pub struct LibraryQuery {
     pub kind: Option<String>,
 }
 
+#[derive(Deserialize)]
+pub struct ScanQuery {
+    /// `incremental` (default) or `full`.
+    pub mode: Option<String>,
+}
+
 pub async fn list_library(
     State(state): State<Arc<AppState>>,
     _user: AuthUser,
     Query(q): Query<LibraryQuery>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let items = library::list_items(&state.db, q.kind.as_deref())?;
+    let kind = q.kind.clone();
+    let items = state
+        .db_blocking(move |db| library::list_items(db, kind.as_deref()))
+        .await?;
     Ok(Json(serde_json::json!({ "items": items })))
 }
 
@@ -31,7 +40,10 @@ pub async fn get_item(
     _user: AuthUser,
     Path(id): Path<String>,
 ) -> ApiResult<Json<library::LibraryItemDto>> {
-    Ok(Json(library::get_item(&state.db, &id)?))
+    let item = state
+        .db_blocking(move |db| library::get_item(db, &id))
+        .await?;
+    Ok(Json(item))
 }
 
 pub async fn list_files(
@@ -39,40 +51,47 @@ pub async fn list_files(
     _user: AuthUser,
     Path(id): Path<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let files = library::list_files(&state.db, &id)?;
+    let files = state
+        .db_blocking(move |db| library::list_files(db, &id))
+        .await?;
     Ok(Json(serde_json::json!({ "files": files })))
 }
 
 pub async fn scan_library(
     State(state): State<Arc<AppState>>,
     _user: AuthUser,
+    Query(q): Query<ScanQuery>,
 ) -> ApiResult<Json<serde_json::Value>> {
     if !state.try_begin_scan() {
         return Err(ApiError::Conflict("scan already running".into()));
     }
+    let mode = ScanMode::parse(q.mode.as_deref());
     let audio = state.config.library_audio.clone();
     let ebook = state.config.library_ebook.clone();
-    let db_path = state.config.database_path();
-    // Run scan on blocking thread; reopen is heavy — use same Db via spawn_blocking
-    let state2 = state.clone();
+    let state2 = Arc::clone(&state);
     let report = tokio::task::spawn_blocking(move || {
-        let result = library::scan_libraries(&state2.db, &audio, &ebook);
+        let result = library::scan_libraries(&state2.db, &audio, &ebook, mode);
         state2.end_scan();
         result
     })
     .await
     .map_err(|e| ApiError::Internal(e.into()))??;
 
-    let _ = db_path; // silence
     Ok(Json(serde_json::json!({
         "ok": true,
+        "mode": report.mode,
         "audio_items": report.audio_items,
         "ebook_items": report.ebook_items,
         "upserted": report.upserted,
+        "skipped_unchanged": report.skipped_unchanged,
+        "removed": report.removed,
     })))
 }
 
-pub async fn scan_status(State(state): State<Arc<AppState>>, _user: AuthUser) -> Json<serde_json::Value> {
+pub async fn scan_status(
+    State(state): State<Arc<AppState>>,
+    _user: AuthUser,
+) -> Json<serde_json::Value> {
     Json(serde_json::json!({ "running": state.scan_running() }))
 }
 
@@ -82,13 +101,13 @@ pub async fn download_file(
     Path((id, file_id)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> ApiResult<Response> {
-    let path = library::resolve_file_path(
-        &state.db,
-        &state.config.library_audio,
-        &state.config.library_ebook,
-        &id,
-        &file_id,
-    )?;
+    let audio = state.config.library_audio.clone();
+    let ebook = state.config.library_ebook.clone();
+    let path = state
+        .db_blocking(move |db| {
+            library::resolve_file_path(db, &audio, &ebook, &id, &file_id)
+        })
+        .await?;
 
     let meta = tokio::fs::metadata(&path)
         .await
@@ -99,7 +118,6 @@ pub async fn download_file(
         .essence_str()
         .to_string();
 
-    // Optional Range: bytes=start-end
     let range = headers
         .get(header::RANGE)
         .and_then(|v| v.to_str().ok())
@@ -174,5 +192,3 @@ fn parse_bytes_range(h: &str) -> Option<(u64, Option<u64>)> {
     };
     Some((start, end))
 }
-
-

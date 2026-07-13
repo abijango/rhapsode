@@ -2,19 +2,6 @@ HTTP-API-not-SDK for Dropbox, **App-folder access (paths relative to app folder,
 - Agents B and C develop against Agent A's mock so they don't block on real OAuth.
 - **Dropbox scopes:** read (`files.metadata.read` + `files.content.read`) for library list/longpoll/download, plus **app-folder write** (`files.content.write`) added in Phase 5 — used ONLY to write small progress JSON files under `/.rhapsode-sync` for cross-device progress sync. Still App-folder-scoped (never Full Dropbox); chosen over CloudKit so the sync layer ports to the planned Android client unchanged.
 
-
-## Backend migration (Dropbox → Cloudflare) — planned, not yet built
-
-Spec: specs/cloudflare-backend-migration-spec.md — read before touching sync/storage code.
-Rhapsode is migrating off Dropbox to Cloudflare R2 + Workers + D1. Sequencing: a new
-standalone Mac companion app renders + uploads first; Rhapsode itself is rewritten to
-consume the new backend second, and drops the producer/render role entirely (becomes
-consumer-only everywhere, including on Mac). Until that migration lands, the Dropbox-based
-notes elsewhere in this file (scopes, HTTP-API-not-SDK, App-folder) describe the CURRENT,
-still-live implementation — not the target architecture. Full research/rationale (backend
-comparison vs AWS/GCP, SmartSpeechKit portability investigation, Synology NAS): see the spec's
-linked artifact.
-
 ## SmartSpeech (live silence-trimming feature)
 
 Specs: specs/realtime-cadence-exploration.md (the CURRENT live design) and

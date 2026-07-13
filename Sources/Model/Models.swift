@@ -67,6 +67,9 @@ final class Audiobook {
     /// trimming). Drives the per-book "played" stat. Additive optional (nil treated as 0) →
     /// lightweight, CloudKit-safe migration.
     var listenedSeconds: Double?
+    /// User-defined collections (tags) for filtering the shelf. Per-shelf scope via `LibraryCollection.kind`.
+    @Relationship(deleteRule: .nullify)
+    var collections: [LibraryCollection]
 
     init(
         id: UUID = UUID(),
@@ -82,7 +85,8 @@ final class Audiobook {
         smartSpeechTier: String? = nil,
         smartSpeechUnavailable: Bool? = nil,
         smartSpeechSavedSeconds: Double? = nil,
-        listenedSeconds: Double? = nil
+        listenedSeconds: Double? = nil,
+        collections: [LibraryCollection] = []
     ) {
         self.id = id
         self.title = title
@@ -98,6 +102,7 @@ final class Audiobook {
         self.smartSpeechUnavailable = smartSpeechUnavailable
         self.smartSpeechSavedSeconds = smartSpeechSavedSeconds
         self.listenedSeconds = listenedSeconds
+        self.collections = collections
     }
 
     /// Tracks in playback order. Always sort by `order` — never rely on the
@@ -168,6 +173,14 @@ final class Book {
     /// When the reading position was last changed locally (or applied from a remote
     /// sync). Drives last-writer-wins for cross-device progress sync (Phase 5).
     var progressUpdatedAt: Date?
+    /// Cumulative seconds spent reading with this book open in the foreground.
+    /// Additive optional (nil treated as 0) → lightweight, CloudKit-safe migration.
+    var readingSeconds: Double?
+    /// Set when `fractionComplete` crosses ~98%. Additive optional → lightweight migration.
+    var finishedAt: Date?
+    /// User-defined collections (tags) for filtering the shelf. Per-shelf scope via `LibraryCollection.kind`.
+    @Relationship(deleteRule: .nullify)
+    var collections: [LibraryCollection]
 
     init(
         id: UUID = UUID(),
@@ -176,7 +189,10 @@ final class Book {
         coverPath: String? = nil,
         fileRelPath: String,
         readingLocator: String? = nil,
-        progressUpdatedAt: Date? = nil
+        progressUpdatedAt: Date? = nil,
+        readingSeconds: Double? = nil,
+        finishedAt: Date? = nil,
+        collections: [LibraryCollection] = []
     ) {
         self.id = id
         self.title = title
@@ -185,6 +201,9 @@ final class Book {
         self.fileRelPath = fileRelPath
         self.readingLocator = readingLocator
         self.progressUpdatedAt = progressUpdatedAt
+        self.readingSeconds = readingSeconds
+        self.finishedAt = finishedAt
+        self.collections = collections
     }
 
     /// Overall reading progress (0...1) for the shelf, parsed from the persisted
@@ -198,6 +217,36 @@ final class Book {
               let locations = obj["locations"] as? [String: Any],
               let total = locations["totalProgression"] as? Double else { return 0 }
         return min(1, max(0, total))
+    }
+}
+
+/// A user-defined collection (tag) for grouping shelf items. Scoped per shelf via `kind` —
+/// audiobook collections never mix with e-book collections.
+@Model
+final class LibraryCollection {
+    var id: UUID
+    var name: String
+    var kind: FolderKind
+    var createdAt: Date
+    @Relationship(inverse: \Audiobook.collections)
+    var audiobooks: [Audiobook]
+    @Relationship(inverse: \Book.collections)
+    var books: [Book]
+
+    init(
+        id: UUID = UUID(),
+        name: String,
+        kind: FolderKind,
+        createdAt: Date = Date(),
+        audiobooks: [Audiobook] = [],
+        books: [Book] = []
+    ) {
+        self.id = id
+        self.name = name
+        self.kind = kind
+        self.createdAt = createdAt
+        self.audiobooks = audiobooks
+        self.books = books
     }
 }
 
@@ -234,6 +283,15 @@ final class DownloadItem {
     var state: DownloadState
     var bytesReceived: Int64
     var totalBytes: Int64
+    /// Shared by every child transfer when downloading an MP3-folder audiobook (Phase 3b).
+    /// `nil` for single-file downloads. Additive optional → lightweight migration.
+    var groupID: String?
+    /// Container-relative folder path to import once every child in `groupID` reaches `.done`
+    /// (e.g. `Audiobooks/MyBook`). Set on each group member; `nil` for single-file items.
+    var groupFolderRelPath: String?
+    /// Dropbox path used to build `downloadRequest` (e.g. `/Audiobooks/MyBook/track01.mp3`).
+    /// Stored for retry after a failed background transfer. Additive optional → lightweight migration.
+    var remotePath: String?
 
     init(
         id: UUID = UUID(),
@@ -242,7 +300,10 @@ final class DownloadItem {
         kind: FolderKind,
         state: DownloadState = .pending,
         bytesReceived: Int64 = 0,
-        totalBytes: Int64 = 0
+        totalBytes: Int64 = 0,
+        groupID: String? = nil,
+        groupFolderRelPath: String? = nil,
+        remotePath: String? = nil
     ) {
         self.id = id
         self.remoteEntryID = remoteEntryID
@@ -251,6 +312,9 @@ final class DownloadItem {
         self.state = state
         self.bytesReceived = bytesReceived
         self.totalBytes = totalBytes
+        self.groupID = groupID
+        self.groupFolderRelPath = groupFolderRelPath
+        self.remotePath = remotePath
     }
 }
 
@@ -262,6 +326,7 @@ enum AppSchema {
         Audiobook.self,
         AudiobookTrack.self,
         Book.self,
+        LibraryCollection.self,
         WatchedFolder.self,
         DownloadItem.self,
     ]

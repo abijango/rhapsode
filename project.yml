@@ -25,6 +25,10 @@ packages:
   # Local SPM package (the SmartSpeech silence-analysis DSP). Path is relative to the repo root.
   SmartSpeechKit:
     path: SmartSpeechKit
+  # SMB2/3 client (vendored 4.0.3, static link — see Packages/AMSMB2/Package.swift).
+  # Upstream dynamic product breaks Mac Catalyst (dyld Team ID mismatch).
+  AMSMB2:
+    path: Packages/AMSMB2
 
 targets:
   Rhapsode:
@@ -41,6 +45,9 @@ targets:
       # Bundled IBM Plex Mono (OFL) — the Nerd Stats / per-book receipt typeface.
       - path: SupportingFiles/Fonts
         buildPhase: resources
+      # Bundled Literata + Atkinson Hyperlegible (OFL) — served into the EPUB webview by Readium.
+      - path: SupportingFiles/ReaderFonts
+        buildPhase: resources
     dependencies:
       - package: Readium
         product: ReadiumShared
@@ -52,6 +59,8 @@ targets:
         product: ReadiumAdapterGCDWebServer
       - package: SmartSpeechKit
         product: SmartSpeechKit
+      - package: AMSMB2
+        product: AMSMB2
     # Explicit (not auto-generated) Info.plist: the auto-generated plist only
     # supports a whitelist of INFOPLIST_KEY_* settings, and we need arbitrary keys
     # — UIBackgroundModes now, a CFBundleURLTypes OAuth callback scheme in Phase 1.
@@ -95,6 +104,27 @@ targets:
         # Phase 4a (iPad): allow multiple windows of the app (Stage Manager,
         # drag-to-new-window, side-by-side same-app). SwiftUI's App lifecycle
         # manages the scenes; no UIWindowSceneSessionRole config needed.
+        # rhapsode-server is plain HTTP over Tailscale/LAN.
+        # IMPORTANT: do NOT set NSAllowsLocalNetworking alongside
+        # NSAllowsArbitraryLoads — on iOS 10+/macOS 10.12+ the presence of
+        # NSAllowsLocalNetworking makes NSAllowsArbitraryLoads ignored (effective
+        # NO). Tailscale MagicDNS (*.ts.net) is NOT treated as "local networking",
+        # so that combo blocked our server. Exception domain covers MagicDNS;
+        # NSAllowsArbitraryLoads covers IP/LAN hosts without a domain exception.
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
+          NSExceptionDomains:
+            ts.net:
+              NSIncludesSubdomains: true
+              NSExceptionAllowsInsecureHTTPLoads: true
+              NSExceptionMinimumTLSVersion: "1.0"
+              NSExceptionRequiresForwardSecrecy: false
+        # Required for iOS/iPadOS (and some Catalyst paths) to reach LAN IPs.
+        NSLocalNetworkUsageDescription: >-
+          Rhapsode connects to your self-hosted library server on the local network.
+        # Empty Bonjour services array still allows arbitrary local TCP (iOS 14+).
+        NSBonjourServices:
+          - _http._tcp
         UIApplicationSceneManifest:
           UIApplicationSupportsMultipleScenes: true
     settings:

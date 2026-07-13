@@ -22,19 +22,65 @@ enum DS {
 
     /// Library shelf grid metrics.
     enum Shelf {
-        /// Minimum cover width; the grid flows as many columns as fit.
+        /// Legacy minimum — kept for tests; compact shelves now use `compactCoverWidth`.
         static let minCoverWidth: CGFloat = 120
-        /// FIXED cover width on iPad / Mac (regular size class). A fixed width (min == max in the
-        /// adaptive item) means resizing the window only changes the number of columns and the gaps
-        /// between them — the cover size never changes. A ranged/min-only item instead stretches
-        /// covers to fill, so they balloon then snap as columns are added/removed.
-        static let coverWidthRegular: CGFloat = 320
+        /// FIXED cover width on iPad (regular size class). Resizing only changes column count.
+        static let coverWidthPad: CGFloat = 320
+        /// FIXED cover width on Mac Catalyst — larger canvas, bigger art.
+        static let coverWidthMac: CGFloat = 420
+        /// Regular-size-class cover width for the current platform.
+        static var coverWidthRegular: CGFloat {
+            #if targetEnvironment(macCatalyst)
+            coverWidthMac
+            #else
+            coverWidthPad
+            #endif
+        }
+        /// Default e-book cover (portrait). Used as placeholder aspect when no image yet.
         static let coverAspect: CGFloat = 2.0 / 3.0 // width / height
+        /// Default audiobook cover (Audible / square art).
+        static let audiobookCoverAspect: CGFloat = 1.0
+        /// Clamp live image aspect so one ultra-wide/tall file cannot break the grid.
+        static let coverAspectMin: CGFloat = 0.55   // taller than ~9:16
+        static let coverAspectMax: CGFloat = 1.15   // slightly wider than square
+
+        /// Placeholder aspect before art loads (or when missing).
+        static func placeholderCoverAspect(for kind: FolderKind) -> CGFloat {
+            kind == .audiobooks ? audiobookCoverAspect : coverAspect
+        }
+
+        /// Prefer the image’s real width/height so the tile box matches the art (no letterbox).
+        static func coverAspect(for image: UIImage?, kind: FolderKind) -> CGFloat {
+            guard let image else { return placeholderCoverAspect(for: kind) }
+            let w = image.size.width
+            let h = image.size.height
+            guard w > 1, h > 1 else { return placeholderCoverAspect(for: kind) }
+            let raw = w / h
+            return min(max(raw, coverAspectMin), coverAspectMax)
+        }
+
         static let spacing: CGFloat = Spacing.md
+        /// Compact shelves (iPhone, iPad detail column) always use two wide columns when space
+        /// allows — the old adaptive minimum let three skinny columns fit on wider phones.
+        static let compactColumnCount = 2
+        /// Below this usable inner width, drop to one column (very narrow split / landscape).
+        static let compactSingleColumnThreshold: CGFloat = 260
+
+        /// Column count for a compact shelf given the inner width (after horizontal padding).
+        static func compactColumnCount(forUsableWidth usable: CGFloat) -> Int {
+            usable >= compactSingleColumnThreshold ? compactColumnCount : 1
+        }
+
+        /// Cover width that fills the available compact width with `compactColumnCount` columns.
+        static func compactCoverWidth(forUsableWidth usable: CGFloat) -> CGFloat {
+            let n = CGFloat(compactColumnCount(forUsableWidth: usable))
+            guard n > 0, usable > 0 else { return minCoverWidth }
+            return (usable - (n - 1) * spacing) / n
+        }
 
         /// Adaptive grid columns for the shelves. On regular, the item is a FIXED width so covers
         /// stay a stable size as the window resizes (only column count / gaps change). Shared by the
-        /// Audiobooks + E-books shelves. On compact (iPhone), covers flex from a small minimum.
+        /// Audiobooks + E-books shelves. Compact uses `compactCoverWidth` via `CoverGrid`.
         static func columns(regular: Bool) -> [GridItem] {
             regular
                 ? [GridItem(.adaptive(minimum: coverWidthRegular, maximum: coverWidthRegular), spacing: spacing)]

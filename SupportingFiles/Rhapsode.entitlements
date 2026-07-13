@@ -6,5 +6,10 @@
 	<array>
 		<string>$(AppIdentifierPrefix)com.naufalmir.rhapsode</string>
 	</array>
+	<!-- Mac Catalyst: allow loading signed SPM/framework code during local debug
+	     when Team IDs differ (also covered by static AMSMB2; kept as safety net). -->
+	<key>com.apple.security.cs.disable-library-validation</key>
+	<true/>
 </dict>
 </plist>
+

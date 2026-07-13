@@ -47,13 +47,24 @@ enum EbookImporter {
     }
 
     private static func extractCover(_ publication: Publication, baseName: String) async -> String? {
-        guard let image = (try? await publication.cover().get()) ?? nil,
-              let data = image.jpegData(compressionQuality: 0.8) else { return nil }
+        guard let data = await coverJPEGData(from: publication) else { return nil }
         let rel = "Covers/\(UUID().uuidString).jpg"
         guard let dest = try? ContainerPaths.url(forRelativePath: rel) else { return nil }
         try? FileManager.default.createDirectory(at: dest.deletingLastPathComponent(), withIntermediateDirectories: true)
         try? data.write(to: dest)
         return FileManager.default.fileExists(atPath: dest.path) ? rel : nil
+    }
+
+    /// JPEG bytes for the publication cover, or nil. Used by import and by remote cover prefetch.
+    static func coverJPEGData(from publication: Publication) async -> Data? {
+        guard let image = (try? await publication.cover().get()) ?? nil else { return nil }
+        return image.jpegData(compressionQuality: 0.82)
+    }
+
+    /// Open a local EPUB and return its cover as JPEG (does not write to Covers/).
+    static func coverJPEGData(fromLocalEPUB url: URL) async -> Data? {
+        guard let publication = try? await openPublication(at: url) else { return nil }
+        return await coverJPEGData(from: publication)
     }
 
     private static func relPath(_ url: URL) throws -> String {

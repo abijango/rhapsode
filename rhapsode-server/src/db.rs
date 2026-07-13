@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use rusqlite::{params, Connection};
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
+use std::time::Duration;
 
 pub struct Db {
     conn: Mutex<Connection>,
@@ -14,10 +15,12 @@ impl Db {
         }
         let conn = Connection::open(path)
             .with_context(|| format!("open sqlite {}", path.display()))?;
+        conn.busy_timeout(Duration::from_secs(8))?;
         conn.execute_batch(
             "
             PRAGMA foreign_keys = ON;
             PRAGMA journal_mode = WAL;
+            PRAGMA synchronous = NORMAL;
             ",
         )?;
         let db = Self {
@@ -102,8 +105,16 @@ impl Db {
 
             CREATE INDEX IF NOT EXISTS idx_media_files_item ON media_files(item_id);
             CREATE INDEX IF NOT EXISTS idx_devices_token ON devices(token_hash);
+            CREATE INDEX IF NOT EXISTS idx_media_files_rel ON media_files(rel_path);
             "#,
         )?;
+
+        // Additive column for incremental scan (ignore if already present).
+        let _ = conn.execute(
+            "ALTER TABLE media_files ADD COLUMN mtime_secs INTEGER",
+            [],
+        );
+
         Ok(())
     }
 

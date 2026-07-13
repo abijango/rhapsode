@@ -66,7 +66,14 @@ enum LibrarySourceError: Error, Sendable, LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .notAuthenticated: "Not connected to Dropbox."
+        case .notAuthenticated:
+            if SmbConfig.shouldUseSmb {
+                "Not connected to SMB (NAS)."
+            } else if RhapsodeServerConfig.shouldUseServer {
+                "Not connected to Rhapsode Server."
+            } else {
+                "Not connected to Dropbox."
+            }
         case .notFound(let path): "Not found: \(path)"
         case .network(let underlying): "Network error: \(underlying)"
         case .decoding(let detail): "Couldn’t read response: \(detail)"

@@ -2,16 +2,16 @@ import SwiftData
 import SwiftUI
 import UIKit
 
-/// "Nerd Stats" — a top-level destination (between E-books and Settings). The "Reclaimed" view:
-/// a celebratory hero (total silence reclaimed) over an artwork-led per-book list, each row showing
-/// listened time, silence saved, and % saved. Always-dark Ink & Mint branded surface; Hanken Grotesk
-/// display + IBM Plex Mono data. Future home for e-book reading stats too.
+/// "Nerd Stats" — a top-level destination (between E-books and Settings). Audiobook "Reclaimed"
+/// stats (silence trimmed) plus an e-book "Reading" section (foreground time + progress). Ink & Mint
+/// for audiobooks; warm sepia accent for e-books. Hanken Grotesk display + IBM Plex Mono data.
 ///
 /// "Listened"/"played" = trimmed CONTENT seconds actually heard (rate-independent); "saved" = silence
 /// collapsed while trimming was active. Lifetime totals live in `SmartSpeechStats` (UserDefaults), polled
 /// ~1×/s so the hero ticks up live; the per-book rows come from SwiftData.
 struct NerdStatsView: View {
     @Query(sort: \Audiobook.title) private var books: [Audiobook]
+    @Query(sort: \Book.title) private var ebooks: [Book]
     @Environment(\.modelContext) private var modelContext
     @Environment(SyncManager.self) private var sync
 
@@ -26,6 +26,21 @@ struct NerdStatsView: View {
             .filter { ($0.smartSpeechSavedSeconds ?? 0) > 0 }
             .sorted { ($0.smartSpeechSavedSeconds ?? 0) > ($1.smartSpeechSavedSeconds ?? 0) }
     }
+    /// E-books with any recorded reading time, most-read first.
+    private var readEbooks: [Book] {
+        ebooks
+            .filter { ($0.readingSeconds ?? 0) > 0 }
+            .sorted { ($0.readingSeconds ?? 0) > ($1.readingSeconds ?? 0) }
+    }
+    private var totalReading: TimeInterval {
+        ebooks.reduce(0) { $0 + ($1.readingSeconds ?? 0) }
+    }
+    private var finishedCount: Int { ebooks.filter { $0.finishedAt != nil }.count }
+    private var inProgressCount: Int {
+        ebooks.filter { ($0.readingSeconds ?? 0) > 0 && $0.finishedAt == nil }.count
+    }
+    private var hasAudiobookStats: Bool { !reclaimedBooks.isEmpty || totalSaved > 0 }
+    private var hasEbookStats: Bool { totalReading > 0 }
     private var maxSaved: Double { reclaimedBooks.first?.smartSpeechSavedSeconds ?? 1 }
     private var overallPct: Int {
         totalPlayed > 0 ? Int((totalSaved / totalPlayed * 100).rounded()) : 0
@@ -35,7 +50,7 @@ struct NerdStatsView: View {
         NavigationStack {
             ScrollView {
                 Group {
-                    if reclaimedBooks.isEmpty && totalSaved <= 0 { empty } else { content }
+                    if !hasAudiobookStats && !hasEbookStats { empty } else { content }
                 }
                 .frame(maxWidth: 620)
                 .frame(maxWidth: .infinity)
@@ -110,24 +125,43 @@ struct NerdStatsView: View {
 
     private var content: some View {
         VStack(alignment: .leading, spacing: 0) {
-            hero
-            Text("MOST RECLAIMED")
-                .font(ReceiptFont.mono(11)).kerning(2)
-                .foregroundStyle(DS.Palette.Reclaim.muted)
-                .padding(.top, DS.Spacing.xl)
-                .padding(.bottom, DS.Spacing.sm)
-            if reclaimedBooks.isEmpty {
-                Text("No books in your library have recorded savings yet — the lifetime total above may include books no longer here. Per-book rows appear as you listen.")
-                    .font(ReceiptFont.mono(12))
+            if hasAudiobookStats {
+                audiobookHero
+                Text("AUDIOBOOKS · SMARTSPEECH")
+                    .font(ReceiptFont.mono(11)).kerning(2)
                     .foregroundStyle(DS.Palette.Reclaim.muted)
-                    .fixedSize(horizontal: false, vertical: true)
-            } else {
-                ForEach(reclaimedBooks) { book in row(book) }
+                    .padding(.top, DS.Spacing.xl)
+                    .padding(.bottom, DS.Spacing.sm)
+                if reclaimedBooks.isEmpty {
+                    Text("No books in your library have recorded savings yet — the lifetime total above may include books no longer here. Per-book rows appear as you listen.")
+                        .font(ReceiptFont.mono(12))
+                        .foregroundStyle(DS.Palette.Reclaim.muted)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else {
+                    ForEach(reclaimedBooks) { book in audiobookRow(book) }
+                }
+            }
+            if hasEbookStats {
+                ebookHero
+                    .padding(.top, hasAudiobookStats ? DS.Spacing.xl : 0)
+                Text("E-BOOKS · READING")
+                    .font(ReceiptFont.mono(11)).kerning(2)
+                    .foregroundStyle(DS.Palette.Reclaim.muted)
+                    .padding(.top, DS.Spacing.xl)
+                    .padding(.bottom, DS.Spacing.sm)
+                if readEbooks.isEmpty {
+                    Text("No e-books in your library have recorded reading time yet.")
+                        .font(ReceiptFont.mono(12))
+                        .foregroundStyle(DS.Palette.Reclaim.muted)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else {
+                    ForEach(readEbooks) { book in ebookRow(book) }
+                }
             }
         }
     }
 
-    private var hero: some View {
+    private var audiobookHero: some View {
         VStack(alignment: .leading, spacing: 0) {
             Text(reclaimedBooks.isEmpty ? "LIFETIME"
                  : "LIFETIME · \(reclaimedBooks.count) BOOK\(reclaimedBooks.count == 1 ? "" : "S")")
@@ -153,18 +187,42 @@ struct NerdStatsView: View {
         }
     }
 
-    private func row(_ book: Audiobook) -> some View {
+    private var ebookHero: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text("LIFETIME · \(readEbooks.count) BOOK\(readEbooks.count == 1 ? "" : "S")")
+                .font(ReceiptFont.mono(11)).kerning(2)
+                .foregroundStyle(DS.Palette.Reclaim.muted)
+                .padding(.bottom, DS.Spacing.md)
+            Text("You've read for")
+                .font(BrandFont.display(17, .medium))
+                .foregroundStyle(DS.Palette.Reclaim.muted)
+            Text(Self.hms(totalReading))
+                .font(BrandFont.display(58, .heavy))
+                .foregroundStyle(Self.ebookAccent)
+                .minimumScaleFactor(0.5)
+                .lineLimit(1)
+                .padding(.top, 2)
+            (Text("\(finishedCount) finished")
+                + Text(" · ")
+                + Text("\(inProgressCount) in progress").foregroundColor(DS.Palette.Reclaim.text))
+                .font(ReceiptFont.mono(12))
+                .foregroundStyle(DS.Palette.Reclaim.muted)
+                .padding(.top, DS.Spacing.sm)
+        }
+    }
+
+    private func audiobookRow(_ book: Audiobook) -> some View {
         let played = book.listenedSeconds ?? 0
         let saved = book.smartSpeechSavedSeconds ?? 0
         let pct = played > 0 ? Int((saved / played * 100).rounded()) : 0
         return HStack(alignment: .center, spacing: 13) {
-            coverThumb(book)
+            audiobookCoverThumb(book)
             VStack(alignment: .leading, spacing: 8) {
                 Text(shortTitle(book.title))
                     .font(BrandFont.display(16, .bold))
                     .foregroundStyle(DS.Palette.Reclaim.text)
                     .lineLimit(1)
-                miniBar(fraction: maxSaved > 0 ? saved / maxSaved : 0)
+                miniBar(fraction: maxSaved > 0 ? saved / maxSaved : 0, fill: DS.Palette.Reclaim.mintBright)
                 Text("\(Self.hoursListened(played)) listened")
                     .font(ReceiptFont.mono(11))
                     .foregroundStyle(DS.Palette.Reclaim.muted)
@@ -184,19 +242,43 @@ struct NerdStatsView: View {
         }
     }
 
-    private func miniBar(fraction: Double) -> some View {
-        GeometryReader { geo in
-            ZStack(alignment: .leading) {
-                Capsule().fill(DS.Palette.Reclaim.track)
-                Capsule().fill(DS.Palette.Reclaim.mintBright)
-                    .frame(width: max(0, min(1, fraction)) * geo.size.width)
+    private func ebookRow(_ book: Book) -> some View {
+        let read = book.readingSeconds ?? 0
+        let progress = book.fractionComplete
+        let pct = Int((progress * 100).rounded())
+        return HStack(alignment: .center, spacing: 13) {
+            ebookCoverThumb(book)
+            VStack(alignment: .leading, spacing: 8) {
+                Text(shortTitle(book.title))
+                    .font(BrandFont.display(16, .bold))
+                    .foregroundStyle(DS.Palette.Reclaim.text)
+                    .lineLimit(1)
+                miniBar(fraction: progress, fill: DS.Palette.Reclaim.mintBright)
+                Text(book.finishedAt != nil ? "Finished" : "\(pct)% through")
+                    .font(ReceiptFont.mono(11))
+                    .foregroundStyle(DS.Palette.Reclaim.muted)
+            }
+            VStack(alignment: .trailing, spacing: 6) {
+                Text(Self.hms(read))
+                    .font(ReceiptFont.mono(15, .bold))
+                    .foregroundStyle(DS.Palette.Reclaim.mintBright)
+                Text("read")
+                    .font(ReceiptFont.mono(11))
+                    .foregroundStyle(DS.Palette.Reclaim.muted)
             }
         }
-        .frame(height: 6)
+        .padding(.vertical, 11)
+        .overlay(alignment: .bottom) {
+            Rectangle().fill(DS.Palette.Reclaim.hairline).frame(height: 1)
+        }
+    }
+
+    private func miniBar(fraction: Double, fill: Color) -> some View {
+        LinearProgressBar(fraction: fraction, height: 6, fill: fill, track: DS.Palette.Reclaim.track)
     }
 
     @ViewBuilder
-    private func coverThumb(_ book: Audiobook) -> some View {
+    private func audiobookCoverThumb(_ book: Audiobook) -> some View {
         let shape = RoundedRectangle(cornerRadius: 9, style: .continuous)
         if let rel = book.coverPath,
            let url = try? ContainerPaths.url(forRelativePath: rel),
@@ -211,14 +293,30 @@ struct NerdStatsView: View {
         }
     }
 
+    @ViewBuilder
+    private func ebookCoverThumb(_ book: Book) -> some View {
+        let shape = RoundedRectangle(cornerRadius: 9, style: .continuous)
+        if let rel = book.coverPath,
+           let url = try? ContainerPaths.url(forRelativePath: rel),
+           let image = UIImage(contentsOfFile: url.path) {
+            Image(uiImage: image).resizable().scaledToFill()
+                .frame(width: 44, height: 44).clipShape(shape)
+        } else {
+            shape.fill(DS.Palette.Reclaim.surface)
+                .frame(width: 44, height: 44)
+                .overlay(Image(systemName: "book.closed")
+                    .font(.system(size: 16)).foregroundStyle(DS.Palette.Reclaim.muted))
+        }
+    }
+
     private var empty: some View {
         VStack(spacing: DS.Spacing.md) {
             Text("LIFETIME").font(ReceiptFont.mono(11)).kerning(2)
                 .foregroundStyle(DS.Palette.Reclaim.muted)
-            Text("Nothing reclaimed yet")
+            Text("No stats yet")
                 .font(BrandFont.display(24, .bold))
                 .foregroundStyle(DS.Palette.Reclaim.text)
-            Text("Play an audiobook with trimming on and\nyour reclaimed time shows up here.")
+            Text("Listen with SmartSpeech or read an e-book\nand your stats show up here.")
                 .font(ReceiptFont.mono(12))
                 .foregroundStyle(DS.Palette.Reclaim.muted)
                 .multilineTextAlignment(.center)
@@ -228,6 +326,7 @@ struct NerdStatsView: View {
     }
 
     static let saved = DS.Palette.Reclaim.mintBright
+    static let ebookAccent = Color.adaptive(light: 0xC47D2A, dark: 0xE8A855)
 
     // MARK: Formatting
 

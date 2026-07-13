@@ -23,7 +23,7 @@ Recommended order: **3 → 4a (iPad) → 5 (sync) → 4b (macOS)**. Rationale at
 
 **Still device-only PENDING (orchestrator/user's on-device step):** OS suspension + background completion delivery; cold-relaunch `handleEventsForBackgroundURLSession`→`urlSessionDidFinishEvents`; `BGTaskScheduler` firing; 401-after-suspension re-enqueue; iPad hardware-keyboard shortcuts (space=play/pause, arrow=page-turn — arrows may be eaten by Readium's webview); multi-window scene stress. Plus the open MVP live check: real M4B + MP3-folder download from Dropbox.
 
-**Remaining phases:** 3b (MP3-folder background groups — needs `groupID` on `DownloadItem`, a `Models.swift` edit, do serially), 5 (CloudKit progress sync), 4b (macOS Catalyst).
+**Remaining phases:** ~~3b (MP3-folder background groups)~~ **DONE** — `groupID` on `DownloadItem`, one background task per child, folder import on group completion. 5 (CloudKit progress sync) was superseded by Dropbox `/.rhapsode-sync` (built). 4b (macOS Catalyst) — built.
 
 **Pending on-device verification (simulator can't show these):** lock-screen / Control-Center Now Playing controls; true background downloads; `BGTaskScheduler` firing. Plus a user-side check: live **M4B + MP3-folder** download from real Dropbox (only single-file EPUB confirmed live so far).
 
@@ -64,9 +64,9 @@ Recommended order: **3 → 4a (iPad) → 5 (sync) → 4b (macOS)**. Rationale at
 
 **Launch reconciliation:** on launch, ask the session for `getAllTasks` and mark any `DownloadItem` stuck in `.downloading` with no live task as `.failed` (or re-enqueue). Handles the "killed mid-download, task lost" case.
 
-### 3b. MP3-folder audiobooks (the hard sub-case)
+### 3b. MP3-folder audiobooks — DONE
 
-A folder isn't one transfer. Add `groupID: String?` to `DownloadItem` (additive, optional → safe migration). For a folder entry: `listFolder` its children, create one `DownloadItem` per child sharing a `groupID`, enqueue each as a background task. On each child completion, check whether **all** items in the group are `.done`; if so, run the folder import once. Group state lives in the `DownloadItem` rows, so it survives relaunch. **Ship 3a first; 3b is a follow-up** (single files cover EPUB + the common single-file M4B).
+A folder isn't one transfer. `DownloadItem` carries optional `groupID` + `groupFolderRelPath`. For a folder entry: `listFolder` its children (`.mp3` + `cover.jpg`/`folder.jpg`), create one `DownloadItem` per child sharing a `groupID`, enqueue each as a background task. On each child completion, `BackgroundDownloader.shouldImportGroup` checks whether **all** items in the group are `.done` (and none `.failed`); if so, run the folder import once and fire a single finished notification. Group state lives in the `DownloadItem` rows, so it survives relaunch.
 
 ### 3c. Wire `BGTaskScheduler` to the background session
 

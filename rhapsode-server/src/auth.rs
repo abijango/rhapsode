@@ -121,7 +121,11 @@ impl FromRequestParts<Arc<crate::state::AppState>> for AuthUser {
         let token = auth
             .strip_prefix("Bearer ")
             .or_else(|| auth.strip_prefix("bearer "))
-            .ok_or(ApiError::Unauthorized)?;
-        lookup_bearer(&state.db, token)
+            .ok_or(ApiError::Unauthorized)?
+            .to_string();
+        let state = Arc::clone(state);
+        tokio::task::spawn_blocking(move || lookup_bearer(&state.db, &token))
+            .await
+            .map_err(|e| ApiError::Internal(e.into()))?
     }
 }

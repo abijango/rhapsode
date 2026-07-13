@@ -21,6 +21,9 @@ struct PlaybackProgress: Codable, Sendable, Equatable {
     /// `max`, like `listenedSeconds`). Optional for back-compat. Backs up the per-book "reclaimed"
     /// figure so the Nerd Stats breakdown + Recalculate survive a reinstall / new device.
     var savedSeconds: Double? = nil
+    /// Cumulative foreground reading seconds for this ebook (monotonic; merged with `max`, like
+    /// `listenedSeconds`). Optional for back-compat.
+    var readingSeconds: Double? = nil
     var updatedAt: Date
 
     /// Last-writer-wins decision: is `self` newer than a local change stamped at
@@ -76,6 +79,10 @@ protocol ProgressSync: Sendable {
     func pushStats(_ stats: SmartSpeechStatsRecord) async throws
     /// Fetch the backed-up SmartSpeech stats, or nil if none stored yet.
     func pullStats() async throws -> SmartSpeechStatsRecord?
+    /// Back up a shelf's collections manifest (LWW read-before-write guard, like `pushStats`).
+    func pushCollections(_ manifest: CollectionsManifest) async throws
+    /// Fetch the backed-up collections manifest for one shelf, or nil if none stored yet.
+    func pullCollections(kind: FolderKind) async throws -> CollectionsManifest?
 }
 
 /// No-op sync for the mock / debug / background-refresh paths (needs no Dropbox
@@ -85,6 +92,8 @@ struct NoopProgressSync: ProgressSync {
     func pullAll() async throws -> [PlaybackProgress] { [] }
     func pushStats(_ stats: SmartSpeechStatsRecord) async throws {}
     func pullStats() async throws -> SmartSpeechStatsRecord? { nil }
+    func pushCollections(_ manifest: CollectionsManifest) async throws {}
+    func pullCollections(kind: FolderKind) async throws -> CollectionsManifest? { nil }
 }
 
 /// In-memory `ProgressSync` for headless tests. Mirrors `DropboxProgressSync`'s
@@ -109,4 +118,13 @@ actor MockProgressSync: ProgressSync {
         self.stats = stats
     }
     func pullStats() async throws -> SmartSpeechStatsRecord? { stats }
+
+    private var collectionManifests: [FolderKind: CollectionsManifest] = [:]
+    func pushCollections(_ manifest: CollectionsManifest) async throws {
+        if let existing = collectionManifests[manifest.kind], existing.updatedAt > manifest.updatedAt { return }
+        collectionManifests[manifest.kind] = manifest
+    }
+    func pullCollections(kind: FolderKind) async throws -> CollectionsManifest? {
+        collectionManifests[kind]
+    }
 }

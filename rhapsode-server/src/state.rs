@@ -1,5 +1,6 @@
 use crate::config::Config;
 use crate::db::Db;
+use crate::error::{ApiError, ApiResult};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -30,5 +31,17 @@ impl AppState {
 
     pub fn scan_running(&self) -> bool {
         self.scan_running.load(Ordering::SeqCst)
+    }
+
+    /// Run a closure against SQLite on a blocking thread so Tokio workers stay free.
+    pub async fn db_blocking<F, T>(self: &Arc<Self>, f: F) -> ApiResult<T>
+    where
+        F: FnOnce(&Db) -> ApiResult<T> + Send + 'static,
+        T: Send + 'static,
+    {
+        let state = Arc::clone(self);
+        tokio::task::spawn_blocking(move || f(&state.db))
+            .await
+            .map_err(|e| ApiError::Internal(e.into()))?
     }
 }

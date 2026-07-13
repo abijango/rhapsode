@@ -1,6 +1,7 @@
 use anyhow::{bail, Context, Result};
 use std::env;
 use std::path::PathBuf;
+use std::time::Duration;
 
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -10,6 +11,8 @@ pub struct Config {
     pub bind: String,
     pub bootstrap_token: Option<String>,
     pub log_filter: String,
+    /// Background incremental scan interval. `None` / 0 = disabled.
+    pub scan_interval: Option<Duration>,
 }
 
 impl Config {
@@ -28,6 +31,19 @@ impl Config {
             .ok()
             .filter(|s| !s.is_empty());
         let log_filter = env::var("RHAPSODE_LOG").unwrap_or_else(|_| "info".into());
+
+        // Default 15 minutes. Set RHAPSODE_SCAN_INTERVAL_SECS=0 to disable.
+        let scan_interval = match env::var("RHAPSODE_SCAN_INTERVAL_SECS") {
+            Ok(s) => {
+                let n: u64 = s.parse().unwrap_or(900);
+                if n == 0 {
+                    None
+                } else {
+                    Some(Duration::from_secs(n))
+                }
+            }
+            Err(_) => Some(Duration::from_secs(900)),
+        };
 
         std::fs::create_dir_all(&data_dir)
             .with_context(|| format!("create data dir {}", data_dir.display()))?;
@@ -52,6 +68,7 @@ impl Config {
             bind,
             bootstrap_token,
             log_filter,
+            scan_interval,
         })
     }
 

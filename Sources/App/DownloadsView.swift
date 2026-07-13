@@ -1,27 +1,43 @@
 import SwiftData
 import SwiftUI
 
-/// Visible download queue. Backed by `DownloadItem`; updates live as the
-/// `SyncManager` moves items through pending → downloading → done / failed.
+/// Visible download queue. Groups MP3-folder children into one row per book,
+/// sections active vs failed work, and auto-clears rows once import succeeds.
 struct DownloadsView: View {
-    @Environment(\.modelContext) private var modelContext
+    @Environment(SyncManager.self) private var sync
     @Query(sort: \DownloadItem.remoteEntryID) private var items: [DownloadItem]
+
+    private var rows: [DownloadQueueRow] { DownloadQueueGrouper.rows(from: items) }
+    private var activeRows: [DownloadQueueRow] { DownloadQueueGrouper.active(from: rows) }
+    private var failedRows: [DownloadQueueRow] { DownloadQueueGrouper.failed(from: rows) }
 
     var body: some View {
         Group {
-            if items.isEmpty {
+            if rows.isEmpty {
                 ContentUnavailableView(
                     "No Downloads",
                     systemImage: "arrow.down.circle",
-                    description: Text("Files pulled from Dropbox appear here while they transfer.")
+                    description: Text("Active transfers appear here. Finished books move straight to your library.")
                 )
             } else {
                 List {
-                    ForEach(items) { item in
-                        DownloadRow(item: item)
+                    if !activeRows.isEmpty {
+                        Section("Downloading") {
+                            ForEach(activeRows) { row in
+                                DownloadRow(row: row)
+                            }
+                        }
                     }
-                    if items.contains(where: { $0.state == .done || $0.state == .failed }) {
-                        Button("Clear finished", role: .destructive) { clearFinished() }
+                    if !failedRows.isEmpty {
+                        Section("Failed") {
+                            ForEach(failedRows) { row in
+                                DownloadRow(row: row, showRetry: true) {
+                                    Task { await sync.retryDownload(row) }
+                                } onDismiss: {
+                                    sync.dismissDownload(row)
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -29,36 +45,33 @@ struct DownloadsView: View {
         .navigationTitle("Downloads")
         .navigationBarTitleDisplayMode(.inline)
     }
-
-    private func clearFinished() {
-        for item in items where item.state == .done || item.state == .failed {
-            modelContext.delete(item)
-        }
-        try? modelContext.save()
-    }
 }
 
 private struct DownloadRow: View {
-    let item: DownloadItem
+    let row: DownloadQueueRow
+    var showRetry = false
+    var onRetry: (() -> Void)?
+    var onDismiss: (() -> Void)?
 
     var body: some View {
         VStack(alignment: .leading, spacing: DS.Spacing.sm) {
             HStack(spacing: DS.Spacing.md) {
                 icon
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(name).lineLimit(1)
-                    Text(item.kind == .audiobooks ? "Audiobook" : "E-book")
-                        .font(.caption).foregroundStyle(.secondary)
+                    Text(row.title).lineLimit(1)
+                    Text(subtitle)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
                 Spacer()
-                if item.state == .downloading, let percent = percentText {
+                if row.isActive, let percent = percentText {
                     Text(percent)
                         .font(.subheadline.weight(.semibold).monospacedDigit())
                         .foregroundStyle(DS.Palette.accent)
                 }
             }
 
-            if item.state == .pending || item.state == .downloading {
+            if row.isActive {
                 DownloadProgressBar(fraction: fraction)
                 HStack {
                     Text(byteText)
@@ -66,9 +79,23 @@ private struct DownloadRow: View {
                         .foregroundStyle(.secondary)
                     Spacer()
                     if fraction == nil {
-                        Text(item.state == .pending ? "Waiting…" : "Starting…")
+                        Text(row.state == .pending ? "Waiting…" : "Starting…")
                             .font(.caption)
                             .foregroundStyle(.secondary)
+                    }
+                }
+            }
+
+            if showRetry {
+                Text("Couldn't finish downloading. Tap Retry — if it keeps failing, disconnect and reconnect Dropbox in Settings.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                HStack(spacing: DS.Spacing.md) {
+                    Button("Retry", action: { onRetry?() })
+                        .buttonStyle(.borderedProminent)
+                    if let onDismiss {
+                        Button("Dismiss", role: .cancel, action: onDismiss)
+                            .buttonStyle(.bordered)
                     }
                 }
             }
@@ -76,16 +103,17 @@ private struct DownloadRow: View {
         .padding(.vertical, DS.Spacing.xs)
     }
 
-    private var name: String {
-        if let title = item.title, !title.isEmpty { return title }
-        return item.remoteEntryID.split(separator: "/").last.map(String.init) ?? item.remoteEntryID
+    private var subtitle: String {
+        let kind = row.kind == .audiobooks ? "Audiobook" : "E-book"
+        if row.isGroup {
+            return "\(kind) · \(row.filesDone) of \(row.filesTotal) files"
+        }
+        return kind
     }
 
-    /// Completed fraction in 0...1, or `nil` when the total size isn't known yet
-    /// (renders as an indeterminate bar rather than a misleading 0%).
     private var fraction: Double? {
-        guard item.totalBytes > 0 else { return nil }
-        return min(1, max(0, Double(item.bytesReceived) / Double(item.totalBytes)))
+        guard row.totalBytes > 0 else { return nil }
+        return min(1, max(0, Double(row.bytesReceived) / Double(row.totalBytes)))
     }
 
     private var percentText: String? {
@@ -93,17 +121,16 @@ private struct DownloadRow: View {
         return "\(Int((fraction * 100).rounded()))%"
     }
 
-    /// "12.3 MB / 27.1 MB" while the total is known, otherwise just the received amount.
     private var byteText: String {
-        let received = ByteCountFormatter.string(fromByteCount: item.bytesReceived, countStyle: .file)
-        guard item.totalBytes > 0 else { return received }
-        let total = ByteCountFormatter.string(fromByteCount: item.totalBytes, countStyle: .file)
+        let received = ByteCountFormatter.string(fromByteCount: row.bytesReceived, countStyle: .file)
+        guard row.totalBytes > 0 else { return received }
+        let total = ByteCountFormatter.string(fromByteCount: row.totalBytes, countStyle: .file)
         return "\(received) / \(total)"
     }
 
     private var icon: some View {
         Group {
-            switch item.state {
+            switch row.state {
             case .pending: Image(systemName: "clock")
             case .downloading: Image(systemName: "arrow.down.circle")
             case .done: Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)

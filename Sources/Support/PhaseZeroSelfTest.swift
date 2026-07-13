@@ -261,6 +261,8 @@ enum PhaseZeroSelfTest {
 
         failures += await runPhase3Checks(context: context)
         failures += runPhase4aChecks()
+        failures += runCollectionChecks(context: context)
+        failures += await runCollectionSyncChecks(context: context)
         failures += await runPhase5Checks(context: context)
         // Batch SmartSpeech self-tests were removed with the batch pre-render feature; live
         // silence-trimming has its own harness (LiveSmartSpeechSelfTest, arg -livesmartspeechselftest).
@@ -329,6 +331,34 @@ enum PhaseZeroSelfTest {
             check("P3: TaskPayload round-trips title", decoded.title == original.title)
         } catch {
             check("P3: TaskPayload encode/decode threw: \(error)", false)
+        }
+
+        // P3-3b. TaskPayload with MP3-folder group fields round-trips; legacy payloads
+        //       without group fields decode with nil defaults.
+        do {
+            let grouped = TaskPayload(
+                itemID: UUID(),
+                destRelPath: "Audiobooks/MyBook/track01.mp3",
+                kind: .audiobooks,
+                title: "track01.mp3",
+                groupID: "group-abc",
+                groupFolderRelPath: "Audiobooks/MyBook",
+                groupTitle: "My Book"
+            )
+            let decoded = try JSONDecoder().decode(
+                TaskPayload.self, from: try JSONEncoder().encode(grouped))
+            check("P3b: TaskPayload round-trips groupID", decoded.groupID == grouped.groupID)
+            check("P3b: TaskPayload round-trips groupFolderRelPath",
+                  decoded.groupFolderRelPath == grouped.groupFolderRelPath)
+            check("P3b: TaskPayload round-trips groupTitle", decoded.groupTitle == grouped.groupTitle)
+
+            let legacyJSON = """
+            {"itemID":"\(UUID().uuidString)","destRelPath":"Books/a.epub","kind":"books","title":"a"}
+            """
+            let legacy = try JSONDecoder().decode(TaskPayload.self, from: Data(legacyJSON.utf8))
+            check("P3b: legacy TaskPayload decodes with nil group fields", legacy.groupID == nil)
+        } catch {
+            check("P3b: TaskPayload group encode/decode threw: \(error)", false)
         }
 
         // P3-4. downloadRequest(for:) sets Authorization + escaped Dropbox-API-Arg.
@@ -404,6 +434,36 @@ enum PhaseZeroSelfTest {
             try? context.save()
         }
 
+        // P3-6. MP3-folder group completion: import only when every child is `.done`
+        //       and none are `.failed`.
+        do {
+            let groupID = "selftest-group"
+            let done1 = DownloadItem(
+                remoteEntryID: "c1", title: "01.mp3", kind: .audiobooks, state: .done,
+                groupID: groupID, groupFolderRelPath: "Audiobooks/Book")
+            let done2 = DownloadItem(
+                remoteEntryID: "c2", title: "02.mp3", kind: .audiobooks, state: .done,
+                groupID: groupID, groupFolderRelPath: "Audiobooks/Book")
+            let pending = DownloadItem(
+                remoteEntryID: "c3", title: "03.mp3", kind: .audiobooks, state: .downloading,
+                groupID: groupID, groupFolderRelPath: "Audiobooks/Book")
+            let failed = DownloadItem(
+                remoteEntryID: "c4", title: "04.mp3", kind: .audiobooks, state: .failed,
+                groupID: groupID, groupFolderRelPath: "Audiobooks/Book")
+
+            check("P3b: shouldImportGroup false while a child is downloading",
+                  !BackgroundDownloader.shouldImportGroup(
+                      items: [done1, done2, pending], groupID: groupID))
+            check("P3b: shouldImportGroup true when every child is done",
+                  BackgroundDownloader.shouldImportGroup(
+                      items: [done1, done2], groupID: groupID))
+            check("P3b: shouldImportGroup false when any child failed",
+                  !BackgroundDownloader.shouldImportGroup(
+                      items: [done1, failed], groupID: groupID))
+
+            _ = pending
+        }
+
         return failures
     }
 
@@ -426,8 +486,195 @@ enum PhaseZeroSelfTest {
 
         // Design system: the fixed regular cover width must be larger than the compact minimum
         // so iPad/Mac get bigger covers than iPhone.
-        check("DS.Shelf: regular cover width > compact minWidth",
-              DS.Shelf.coverWidthRegular > DS.Shelf.minCoverWidth)
+        check("DS.Shelf: iPad cover width > compact minWidth",
+              DS.Shelf.coverWidthPad > DS.Shelf.minCoverWidth)
+        check("DS.Shelf: Mac cover width > iPad",
+              DS.Shelf.coverWidthMac > DS.Shelf.coverWidthPad)
+        check("DS.Shelf: compact two-column width > old adaptive minimum",
+              DS.Shelf.compactCoverWidth(forUsableWidth: 361) > DS.Shelf.minCoverWidth)
+        check("DS.Shelf: compact uses two columns on phone-width",
+              DS.Shelf.compactColumnCount(forUsableWidth: 361) == 2)
+
+        // Library shelf: Continue section + search helpers.
+        let old = Date(timeIntervalSince1970: 1_000)
+        let recent = Date(timeIntervalSince1970: 2_000)
+        let inProgress = Audiobook(
+            title: "Continue Me", sourcePath: "Audiobooks/Continue.m4b",
+            lastTrackIndex: 1, lastOffsetSeconds: 30, totalDuration: 100,
+            progressUpdatedAt: recent)
+        let finished = Audiobook(
+            title: "Done", sourcePath: "Audiobooks/Done.m4b",
+            lastTrackIndex: 0, lastOffsetSeconds: 100, totalDuration: 100,
+            progressUpdatedAt: recent)
+        let untouched = Audiobook(title: "Fresh", sourcePath: "Audiobooks/Fresh.m4b")
+        let continueAB = LibraryShelf.continueAudiobooks([finished, untouched, inProgress])
+        check("LibraryShelf: continue audiobooks in-progress only", continueAB.count == 1 && continueAB[0].title == "Continue Me")
+        check("LibraryShelf: continue audiobooks most recent first",
+              LibraryShelf.continueAudiobooks([
+                  Audiobook(title: "A", sourcePath: "a", lastTrackIndex: 0, lastOffsetSeconds: 10,
+                            totalDuration: 100, progressUpdatedAt: old),
+                  Audiobook(title: "B", sourcePath: "b", lastTrackIndex: 0, lastOffsetSeconds: 10,
+                            totalDuration: 100, progressUpdatedAt: recent),
+              ]).first?.title == "B")
+        check("LibraryShelf: audiobook search matches title",
+              LibraryShelf.matchesAudiobook(inProgress, query: "continue"))
+        check("LibraryShelf: audiobook search empty query matches all",
+              LibraryShelf.matchesAudiobook(inProgress, query: "   "))
+
+        let reading = Book(
+            title: "Reading", fileRelPath: "Books/Reading.epub",
+            readingLocator: "{}", progressUpdatedAt: recent, readingSeconds: 60)
+        let unread = Book(title: "Unread", fileRelPath: "Books/Unread.epub")
+        check("LibraryShelf: continue ebooks in-progress only",
+              LibraryShelf.continueEbooks([reading, unread]).count == 1)
+
+        return failures
+    }
+
+    // -------------------------------------------------------------------------
+    // Collections — user-defined shelf tags
+    // -------------------------------------------------------------------------
+    static func runCollectionChecks(context: ModelContext) -> Int {
+        var failures = 0
+        func check(_ name: String, _ condition: Bool) {
+            print("\(tag): \(condition ? "PASS" : "FAIL") — \(name)")
+            if !condition { failures += 1 }
+        }
+
+        do {
+            for c in try context.fetch(FetchDescriptor<LibraryCollection>()) { context.delete(c) }
+            for a in try context.fetch(FetchDescriptor<Audiobook>()) { context.delete(a) }
+            try context.save()
+
+            let store = CollectionStore(context: context)
+            let sciFi = try store.create(name: "Sci-Fi", kind: .audiobooks)
+            check("Collections: create", sciFi.name == "Sci-Fi" && sciFi.kind == .audiobooks)
+
+            var dupFailed = false
+            do { _ = try store.create(name: "sci-fi", kind: .audiobooks); dupFailed = false }
+            catch { dupFailed = true }
+            check("Collections: duplicate name rejected", dupFailed)
+
+            let book = Audiobook(title: "Dune", sourcePath: "Audiobooks/Dune.m4b")
+            context.insert(book)
+            try context.save()
+            try store.toggleMembership(collection: sciFi, audiobook: book)
+            check("Collections: assign audiobook", store.isMember(sciFi, audiobook: book))
+            check("LibraryShelf: inCollection filter passes member",
+                  LibraryShelf.inCollection(book.collections, filterID: sciFi.id))
+            check("LibraryShelf: inCollection filter rejects non-member",
+                  !LibraryShelf.inCollection(book.collections, filterID: UUID()))
+
+            try store.rename(sciFi, to: "Science Fiction")
+            check("Collections: rename", sciFi.name == "Science Fiction")
+
+            try store.delete(sciFi)
+            check("Collections: delete clears membership", book.collections.isEmpty)
+
+            for c in try context.fetch(FetchDescriptor<LibraryCollection>()) { context.delete(c) }
+            for a in try context.fetch(FetchDescriptor<Audiobook>()) { context.delete(a) }
+            try context.save()
+        } catch {
+            check("Collections: pipeline threw: \(error)", false)
+        }
+
+        return failures
+    }
+
+    // -------------------------------------------------------------------------
+    // Collections — cross-device manifest sync
+    // -------------------------------------------------------------------------
+    static func runCollectionSyncChecks(context: ModelContext) async -> Int {
+        var failures = 0
+        func check(_ name: String, _ condition: Bool) {
+            print("\(tag): \(condition ? "PASS" : "FAIL") — \(name)")
+            if !condition { failures += 1 }
+        }
+
+        let old = Date(timeIntervalSince1970: 1_000)
+        let new = Date(timeIntervalSince1970: 2_000)
+
+        let sample = CollectionsManifest(
+            kind: .audiobooks,
+            collections: [CollectionWire(id: UUID(), name: "Sci-Fi", memberKeys: ["Audiobooks/Dune.m4b"])],
+            updatedAt: new)
+        if let data = try? PlaybackProgress.encoder.encode(sample),
+           let back = try? PlaybackProgress.decoder.decode(CollectionsManifest.self, from: data) {
+            check("CollectionSync: manifest JSON round-trips", back == sample)
+        } else {
+            check("CollectionSync: manifest JSON round-trips", false)
+        }
+
+        check("CollectionSync: isNewer when local nil", sample.isNewer(than: nil))
+        check("CollectionSync: isNewer when remote newer", sample.isNewer(than: old))
+        check("CollectionSync: not newer when local newer",
+              !sample.isNewer(than: Date(timeIntervalSince1970: 3_000)))
+
+        check("CollectionSync: audiobooks path",
+              DropboxProgressSync.collectionsPath(for: .audiobooks)
+              == "\(DropboxProgressSync.folder)/collections-audiobooks.json")
+        check("CollectionSync: books path",
+              DropboxProgressSync.collectionsPath(for: .books)
+              == "\(DropboxProgressSync.folder)/collections-books.json")
+
+        do {
+            for c in try context.fetch(FetchDescriptor<LibraryCollection>()) { context.delete(c) }
+            for a in try context.fetch(FetchDescriptor<Audiobook>()) { context.delete(a) }
+            try context.save()
+
+            let collectionID = UUID()
+            let key = "Audiobooks/SyncCollection.m4b"
+            let book = Audiobook(title: "Sync Collection", sourcePath: key)
+            context.insert(book)
+            try context.save()
+
+            let remote = CollectionsManifest(
+                kind: .audiobooks,
+                collections: [CollectionWire(id: collectionID, name: "Imported", memberKeys: [key])],
+                updatedAt: new)
+            let mock = MockProgressSync()
+            try await mock.pushCollections(remote)
+
+            CollectionsSyncState.setUpdatedAt(old, for: .audiobooks)
+            let sync = SyncManager(source: MockLibrarySource(), context: context, progress: mock)
+            await sync.pullAndMergeProgress()
+
+            let imported = try context.fetch(FetchDescriptor<LibraryCollection>())
+                .first { $0.id == collectionID }
+            check("CollectionSync: newer remote collection imported", imported?.name == "Imported")
+            check("CollectionSync: membership applied by sourcePath",
+                  imported?.audiobooks.contains { $0.sourcePath == key } == true)
+
+            // Older remote must not clobber a newer local edit (rename stamps via CollectionStore).
+            if let imported {
+                try CollectionStore(context: context).rename(imported, to: "Local Edit")
+            }
+            let staleMock = MockProgressSync()
+            try await staleMock.pushCollections(remote)
+            let sync2 = SyncManager(source: MockLibrarySource(), context: context, progress: staleMock)
+            await sync2.pullAndMergeProgress()
+            let afterStale = try context.fetch(FetchDescriptor<LibraryCollection>())
+                .first { $0.id == collectionID }
+            check("CollectionSync: older remote does not overwrite newer local",
+                  afterStale?.name == "Local Edit")
+
+            // Push guard keeps a strictly newer stored manifest.
+            let guardMock = MockProgressSync()
+            try await guardMock.pushCollections(remote)
+            let older = CollectionsManifest(kind: .audiobooks, collections: [], updatedAt: old)
+            try await guardMock.pushCollections(older)
+            let stored = try await guardMock.pullCollections(kind: .audiobooks)
+            check("CollectionSync: push guard keeps newer manifest",
+                  stored?.collections.first?.name == "Imported")
+
+            for c in try context.fetch(FetchDescriptor<LibraryCollection>()) { context.delete(c) }
+            for a in try context.fetch(FetchDescriptor<Audiobook>()) { context.delete(a) }
+            try context.save()
+            CollectionsSyncState.setUpdatedAt(old, for: .audiobooks)
+            CollectionsSyncState.setUpdatedAt(old, for: .books)
+        } catch {
+            check("CollectionSync: pipeline threw: \(error)", false)
+        }
 
         return failures
     }
@@ -458,6 +705,18 @@ enum PhaseZeroSelfTest {
             check("P5: PlaybackProgress JSON round-trips", back == sample)
         } else {
             check("P5: PlaybackProgress JSON round-trips", false)
+        }
+
+        // readingSeconds is optional for back-compat; present values round-trip.
+        let ebookSample = PlaybackProgress(
+            key: "Books/ReadTest.epub", kind: .books,
+            lastTrackIndex: 0, lastOffsetSeconds: 0,
+            readingLocatorJSON: "{\"href\":\"/\"}", readingSeconds: 3600, updatedAt: new)
+        if let data = try? PlaybackProgress.encoder.encode(ebookSample),
+           let back = try? PlaybackProgress.decoder.decode(PlaybackProgress.self, from: data) {
+            check("P5: PlaybackProgress readingSeconds round-trips", back.readingSeconds == 3600)
+        } else {
+            check("P5: PlaybackProgress readingSeconds round-trips", false)
         }
 
         // Last-writer-wins decision.
@@ -519,6 +778,34 @@ enum PhaseZeroSelfTest {
             try? context.save()
         } catch {
             check("P5: merge pipeline threw: \(error)", false)
+        }
+
+        // E-book readingSeconds max-merge survives a stale position remote.
+        do {
+            for b in try context.fetch(FetchDescriptor<Book>()) { context.delete(b) }
+            try? context.save()
+
+            let key = "Books/ReadingMerge.epub"
+            let local = Book(title: "Reading Merge", fileRelPath: key,
+                             readingLocator: "{\"href\":\"/\"}", progressUpdatedAt: old,
+                             readingSeconds: 100)
+            context.insert(local)
+            try context.save()
+
+            let remote = PlaybackProgress(
+                key: key, kind: .books,
+                lastTrackIndex: 0, lastOffsetSeconds: 0,
+                readingLocatorJSON: "{\"href\":\"/ch2\"}", readingSeconds: 250, updatedAt: new)
+            let mock = MockProgressSync(seed: [remote])
+            let sync = SyncManager(source: MockLibrarySource(), context: context, progress: mock)
+            await sync.pullAndMergeProgress()
+            check("P5: ebook readingSeconds max-merged", local.readingSeconds == 250)
+            check("P5: newer ebook position applied", local.progressUpdatedAt == new)
+
+            for b in try context.fetch(FetchDescriptor<Book>()) { context.delete(b) }
+            try? context.save()
+        } catch {
+            check("P5: ebook merge threw: \(error)", false)
         }
 
         return failures

@@ -56,7 +56,7 @@ final class SyncManager {
     /// The reader currently on screen + the book it shows (registered by `ReaderView`).
     /// When a newer remote locator is merged for that book, the open reader navigates to
     /// it. Weak so it clears automatically when the reader view goes away.
-    weak var activeReader: EbookReader?
+    weak var activeReader: (any ActiveEbookReader)?
     var activeReaderBookID: UUID?
 
     init(source: LibrarySource, context: ModelContext, progress: ProgressSync = NoopProgressSync()) {
@@ -153,12 +153,7 @@ final class SyncManager {
             lastTrackIndex: trackIndex, lastOffsetSeconds: offsetSeconds,
             readingLocatorJSON: nil, listenedSeconds: book.listenedSeconds,
             savedSeconds: book.smartSpeechSavedSeconds, updatedAt: updatedAt)
-        do { try await progress.push(p) }
-        catch {
-            Self.log("pushAudiobookProgress failed: \(error)")
-            guard !Self.isBenignProgressSyncError(error) else { return }
-            lastError = Self.progressSyncErrorMessage(error)
-        }
+        await pushProgressWithRetry(p, label: "pushAudiobookProgress")
     }
 
     /// Push the current local reading position for one book to the cloud.
@@ -185,11 +180,27 @@ final class SyncManager {
             lastTrackIndex: 0, lastOffsetSeconds: 0,
             readingLocatorJSON: b.readingLocator, readingSeconds: b.readingSeconds,
             updatedAt: updatedAt)
-        do { try await progress.push(p) }
-        catch {
-            Self.log("pushBookProgress failed: \(error)")
-            guard !Self.isBenignProgressSyncError(error) else { return }
-            lastError = Self.progressSyncErrorMessage(error)
+        await pushProgressWithRetry(p, label: "pushBookProgress")
+    }
+
+    /// Retry transient SMB/network failures quietly; only surface a user alert after
+    /// all attempts fail (avoids one-shot collision / flaky Wi‑Fi looking “broken”).
+    private func pushProgressWithRetry(_ p: PlaybackProgress, label: String) async {
+        var lastErr: Error?
+        for attempt in 0..<3 {
+            do {
+                try await progress.push(p)
+                Self.log("\(label) ok key=\(p.key) updatedAt=\(p.updatedAt)")
+                return
+            } catch {
+                lastErr = error
+                if Self.isBenignProgressSyncError(error) { return }
+                Self.log("\(label) attempt \(attempt) failed: \(error.localizedDescription)")
+                try? await Task.sleep(for: .milliseconds(200 + attempt * 300))
+            }
+        }
+        if let lastErr {
+            lastError = Self.progressSyncErrorMessage(lastErr)
         }
     }
 
@@ -214,8 +225,10 @@ final class SyncManager {
     private static func progressSyncErrorMessage(_ error: Error) -> String {
         Self.log("progress sync user alert: \(error)")
         if SmbConfig.shouldUseSmb {
+            let detail = error.localizedDescription
             return "Couldn't sync progress to the NAS (SMB). Check that your user can write "
                 + "to the sync folder (\(SmbConfig.syncPath)) on the share."
+                + (detail.isEmpty ? "" : "\n\n\(detail)")
         }
         if RhapsodeServerConfig.shouldUseServer {
             return "Couldn't sync progress to Rhapsode Server. Check the server URL, "
@@ -229,10 +242,17 @@ final class SyncManager {
     /// model iff the remote is newer (last-writer-wins). Safe to call on launch /
     /// foreground; a missing sync folder or no write scope simply yields nothing.
     func pullAndMergeProgress() async {
-        if let remotes = try? await progress.pullAll(), !remotes.isEmpty {
-            for p in remotes { applyRemoteProgress(p) }
+        do {
+            let remotes = try await progress.pullAll()
+            var applied = 0
+            for p in remotes {
+                let before = applyRemoteProgressReturningApplied(p)
+                if before { applied += 1 }
+            }
             try? context.save()
-            Self.log("pulled \(remotes.count) progress record(s)")
+            Self.log("pulled \(remotes.count) progress record(s), applied \(applied)")
+        } catch {
+            Self.log("pullAndMergeProgress failed: \(error.localizedDescription)")
         }
         await pullSmartSpeechStats()
         await pullAndMergeCollections()
@@ -352,10 +372,19 @@ final class SyncManager {
     /// Match is by the stable container-relative key (`sourcePath` / `fileRelPath`),
     /// or by rhapsode-server item id embedded as the second path component.
     private func applyRemoteProgress(_ p: PlaybackProgress) {
+        _ = applyRemoteProgressReturningApplied(p)
+    }
+
+    /// - Returns: `true` if a position/locator was applied (LWW won).
+    @discardableResult
+    private func applyRemoteProgressReturningApplied(_ p: PlaybackProgress) -> Bool {
         switch p.kind {
         case .audiobooks:
             guard let book = (try? context.fetch(FetchDescriptor<Audiobook>()))?
-                .first(where: { Self.progressKeysMatch($0.sourcePath, p.key) }) else { return }
+                .first(where: { Self.progressKeysMatch($0.sourcePath, p.key) }) else {
+                Self.log("pull skip audio — no local match for key=\(p.key)")
+                return false
+            }
             // WP8: listenedSeconds is a monotonic cumulative counter — merge with max regardless of the
             // position LWW guard, so a stale-position remote can't clobber a higher local listened total.
             if let remoteListened = p.listenedSeconds {
@@ -366,7 +395,10 @@ final class SyncManager {
             if let remoteSaved = p.savedSeconds {
                 book.smartSpeechSavedSeconds = max(book.smartSpeechSavedSeconds ?? 0, remoteSaved)
             }
-            guard p.isNewer(than: book.progressUpdatedAt) else { return }
+            guard p.isNewer(than: book.progressUpdatedAt) else {
+                Self.log("pull LWW skip audio key=\(p.key) remote=\(p.updatedAt) local=\(String(describing: book.progressUpdatedAt))")
+                return false
+            }
             // Server synthetic keys (`…/_server`) or live server pushes use absolute
             // source seconds with track index 0. Dropbox keeps chapter index + offset.
             let track: Int
@@ -387,20 +419,30 @@ final class SyncManager {
             // inside the player: it does NOT re-stamp or re-push the applied position.
             audioPlayer?.applyRemotePosition(
                 bookID: book.id, trackIndex: track, offsetSeconds: offset)
+            Self.log("pull applied audio key=\(p.key)")
+            return true
         case .books:
             guard let b = (try? context.fetch(FetchDescriptor<Book>()))?
-                .first(where: { Self.progressKeysMatch($0.fileRelPath, p.key) }) else { return }
+                .first(where: { Self.progressKeysMatch($0.fileRelPath, p.key) }) else {
+                Self.log("pull skip book — no local match for key=\(p.key)")
+                return false
+            }
             if let remoteReading = p.readingSeconds {
                 b.readingSeconds = max(b.readingSeconds ?? 0, remoteReading)
             }
-            guard p.isNewer(than: b.progressUpdatedAt) else { return }
+            guard p.isNewer(than: b.progressUpdatedAt) else {
+                Self.log("pull LWW skip book key=\(p.key) remote=\(p.updatedAt) local=\(String(describing: b.progressUpdatedAt))")
+                return false
+            }
             b.readingLocator = p.readingLocatorJSON
             b.progressUpdatedAt = p.updatedAt
             // WP-C: if this book is open in the reader, auto-jump it to the merged locator.
-            // EbookReader decodes the JSON itself (keeps Readium out of SyncManager).
+            // FoliateWebReader decodes the JSON itself (keeps WebKit out of SyncManager).
             if activeReaderBookID == b.id, let json = p.readingLocatorJSON {
                 activeReader?.applyRemoteLocator(json: json)
             }
+            Self.log("pull applied book key=\(p.key)")
+            return true
         }
     }
 

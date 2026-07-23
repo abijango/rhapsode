@@ -16,9 +16,8 @@ settings:
     DEVELOPMENT_TEAM: U92LTX7P84
 
 packages:
-  # Readium EPUB toolkit (SPM). Declared in Phase 0; integration is Phase 1 (Agent C).
-  # Products needed for an offline reflowable reader: Shared + Streamer + Navigator
-  # + the GCDWebServer adapter the navigator uses to serve EPUB resources locally.
+  # Readium Streamer only — EPUB metadata + cover import. Rendering is Foliate-js
+  # (WKWebView). Navigator / GCDWebServer were removed in reader Path 1c.
   Readium:
     url: https://github.com/readium/swift-toolkit
     exactVersion: 3.9.0
@@ -45,18 +44,22 @@ targets:
       # Bundled IBM Plex Mono (OFL) — the Nerd Stats / per-book receipt typeface.
       - path: SupportingFiles/Fonts
         buildPhase: resources
-      # Bundled Literata + Atkinson Hyperlegible (OFL) — served into the EPUB webview by Readium.
+      # Bundled Literata + Atkinson Hyperlegible (OFL) — served to Foliate via rhapsode://reader/fonts/.
       - path: SupportingFiles/ReaderFonts
+        buildPhase: resources
+      # Foliate-js EPUB shell (custom scheme rhapsode://reader/…).
+      - path: SupportingFiles/ReaderWeb
+        type: folder
+        buildPhase: resources
+      # Upstream foliate-js modules (served as rhapsode://reader/foliate-js/…).
+      - path: Vendor/foliate-js
+        type: folder
         buildPhase: resources
     dependencies:
       - package: Readium
         product: ReadiumShared
       - package: Readium
         product: ReadiumStreamer
-      - package: Readium
-        product: ReadiumNavigator
-      - package: Readium
-        product: ReadiumAdapterGCDWebServer
       - package: SmartSpeechKit
         product: SmartSpeechKit
       - package: AMSMB2

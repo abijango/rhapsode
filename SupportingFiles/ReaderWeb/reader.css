@@ -1,0 +1,65 @@
+html, body {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: #faf8f5;
+  -webkit-text-size-adjust: 100%;
+  touch-action: manipulation;
+  /* Avoid overscroll flash of wrong color */
+  overscroll-behavior: none;
+}
+
+#root {
+  position: absolute;
+  inset: 0;
+  background: inherit;
+}
+
+#status {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font: 15px/1.4 -apple-system, system-ui, sans-serif;
+  color: #666;
+  pointer-events: none;
+  z-index: 2;
+}
+
+#status.hidden {
+  display: none;
+}
+
+/* foliate-view fills the host */
+foliate-view {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+/* Theme classes on <html> for host shell (margins / letterbox) */
+html.theme-dark,
+html.theme-dark body,
+html.theme-dark #root {
+  background: #000 !important;
+  color: #e8e8e8;
+}
+html.theme-dark #status { color: #aaa; }
+
+html.theme-sepia,
+html.theme-sepia body,
+html.theme-sepia #root {
+  background: #f4ecd8 !important;
+  color: #5b4636;
+}
+html.theme-sepia #status { color: #8a7355; }
+
+html.theme-light,
+html.theme-light body,
+html.theme-light #root {
+  background: #faf8f5 !important;
+  color: #222;
+}

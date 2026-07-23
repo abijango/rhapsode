@@ -168,7 +168,9 @@ final class Book {
     var coverPath: String?
     /// Relative path to the EPUB within the container.
     var fileRelPath: String
-    /// Readium `Locator` serialized as JSON; nil until first opened.
+    /// Reading position JSON; nil until first opened.
+    /// Foliate: `{ "engine":"foliate", "cfi":"…", "locations":{ "totalProgression": 0.42 } }`.
+    /// Legacy Readium: full Locator JSON (resume uses totalProgression only under Foliate).
     var readingLocator: String?
     /// When the reading position was last changed locally (or applied from a remote
     /// sync). Drives last-writer-wins for cross-device progress sync (Phase 5).
@@ -178,6 +180,8 @@ final class Book {
     var readingSeconds: Double?
     /// Set when `fractionComplete` crosses ~98%. Additive optional → lightweight migration.
     var finishedAt: Date?
+    /// KOReader partial-MD5 document id (cached). Additive optional → lightweight migration.
+    var koreaderDocumentHash: String?
     /// User-defined collections (tags) for filtering the shelf. Per-shelf scope via `LibraryCollection.kind`.
     @Relationship(deleteRule: .nullify)
     var collections: [LibraryCollection]
@@ -192,6 +196,7 @@ final class Book {
         progressUpdatedAt: Date? = nil,
         readingSeconds: Double? = nil,
         finishedAt: Date? = nil,
+        koreaderDocumentHash: String? = nil,
         collections: [LibraryCollection] = []
     ) {
         self.id = id
@@ -203,13 +208,13 @@ final class Book {
         self.progressUpdatedAt = progressUpdatedAt
         self.readingSeconds = readingSeconds
         self.finishedAt = finishedAt
+        self.koreaderDocumentHash = koreaderDocumentHash
         self.collections = collections
     }
 
-    /// Overall reading progress (0...1) for the shelf, parsed from the persisted
-    /// Readium locator's `locations.totalProgression` (the fraction through the
-    /// whole publication). 0 when never opened or the locator lacks the field.
-    /// Parsed with `JSONSerialization` so the model layer needn't import Readium.
+    /// Overall reading progress (0...1) for the shelf, from
+    /// `locations.totalProgression` in the Foliate (or legacy) progress JSON.
+    /// 0 when never opened or the field is missing.
     var fractionComplete: Double {
         guard let json = readingLocator,
               let data = json.data(using: .utf8),

@@ -26,7 +26,8 @@ struct SmbStorageProfile: Identifiable, Codable, Equatable, Sendable, Hashable {
         domain: String = "",
         audiobooksPath: String = "Audiobooks",
         booksPath: String = "Books",
-        syncPath: String = ".rhapsode-sync"
+        /// Visible share-relative folder (no leading dot — Finder hides `.name` folders).
+        syncPath: String = SmbConfig.defaultSyncPath
     ) {
         self.id = id
         self.name = name
@@ -36,7 +37,8 @@ struct SmbStorageProfile: Identifiable, Codable, Equatable, Sendable, Hashable {
         self.domain = domain.trimmingCharacters(in: .whitespacesAndNewlines)
         self.audiobooksPath = SmbConfig.normalizeRelPath(audiobooksPath.isEmpty ? "Audiobooks" : audiobooksPath)
         self.booksPath = SmbConfig.normalizeRelPath(booksPath.isEmpty ? "Books" : booksPath)
-        self.syncPath = SmbConfig.normalizeRelPath(syncPath.isEmpty ? ".rhapsode-sync" : syncPath)
+        self.syncPath = SmbConfig.normalizeRelPath(
+            syncPath.isEmpty ? SmbConfig.defaultSyncPath : syncPath)
     }
 
     var isConfigured: Bool {
@@ -79,6 +81,11 @@ enum SmbConfig {
     private static let booksPathKey = "rhapsode.smb.booksPath"
     private static let syncPathKey = "rhapsode.smb.syncPath"
 
+    /// Progress/stats folder on the share (visible — no leading `.`).
+    static let defaultSyncPath = "rhapsode-sync"
+    /// Previous default; Finder/Files hide it as a dot-folder.
+    private static let legacyHiddenSyncPath = ".rhapsode-sync"
+
     // MARK: Preferences
 
     static var preferSmb: Bool {
@@ -89,6 +96,7 @@ enum SmbConfig {
     static var profiles: [SmbStorageProfile] {
         get {
             migrateLegacyIfNeeded()
+            migrateHiddenSyncPathIfNeeded()
             guard let data = UserDefaults.standard.data(forKey: profilesKey),
                   let list = try? JSONDecoder().decode([SmbStorageProfile].self, from: data) else {
                 return []
@@ -139,7 +147,7 @@ enum SmbConfig {
     static var domain: String { activeProfile?.domain ?? "" }
     static var audiobooksPath: String { activeProfile?.audiobooksPath ?? "Audiobooks" }
     static var booksPath: String { activeProfile?.booksPath ?? "Books" }
-    static var syncPath: String { activeProfile?.syncPath ?? ".rhapsode-sync" }
+    static var syncPath: String { activeProfile?.syncPath ?? defaultSyncPath }
     static var serverURL: URL? { activeProfile?.serverURL }
     static var credentialUser: String { activeProfile?.credentialUser ?? "" }
     static var displayName: String { activeProfile?.name ?? "SMB" }
@@ -198,6 +206,31 @@ enum SmbConfig {
     // MARK: Migration
 
     private static let migratedKey = "rhapsode.smb.migrated.v2"
+    private static let syncPathVisibleMigratedKey = "rhapsode.smb.syncPathVisible.v1"
+
+    /// Rename profile `syncPath` from `.rhapsode-sync` → `rhapsode-sync` so the
+    /// folder is visible in Finder / Files on every device. (Does not move NAS
+    /// files; next push recreates under the new path. Old folder can be deleted.)
+    private static func migrateHiddenSyncPathIfNeeded() {
+        guard !UserDefaults.standard.bool(forKey: syncPathVisibleMigratedKey) else { return }
+        defer { UserDefaults.standard.set(true, forKey: syncPathVisibleMigratedKey) }
+
+        guard let data = UserDefaults.standard.data(forKey: profilesKey),
+              var list = try? JSONDecoder().decode([SmbStorageProfile].self, from: data) else {
+            return
+        }
+        var changed = false
+        for i in list.indices {
+            let p = list[i].syncPath
+            if p == legacyHiddenSyncPath || p == "/\(legacyHiddenSyncPath)" {
+                list[i].syncPath = defaultSyncPath
+                changed = true
+            }
+        }
+        if changed, let encoded = try? JSONEncoder().encode(list) {
+            UserDefaults.standard.set(encoded, forKey: profilesKey)
+        }
+    }
 
     private static func migrateLegacyIfNeeded() {
         guard !UserDefaults.standard.bool(forKey: migratedKey) else { return }
@@ -210,6 +243,8 @@ enum SmbConfig {
         guard !host.isEmpty || !share.isEmpty else { return }
 
         let id = UUID()
+        let legacySync = UserDefaults.standard.string(forKey: syncPathKey) ?? defaultSyncPath
+        let sync = (legacySync == legacyHiddenSyncPath) ? defaultSyncPath : legacySync
         let profile = SmbStorageProfile(
             id: id,
             name: share.isEmpty ? "NAS" : share,
@@ -219,7 +254,7 @@ enum SmbConfig {
             domain: UserDefaults.standard.string(forKey: domainKey) ?? "",
             audiobooksPath: UserDefaults.standard.string(forKey: audioPathKey) ?? "Audiobooks",
             booksPath: UserDefaults.standard.string(forKey: booksPathKey) ?? "Books",
-            syncPath: UserDefaults.standard.string(forKey: syncPathKey) ?? ".rhapsode-sync"
+            syncPath: sync
         )
         // Move legacy password into profile keychain slot
         if let pass = try? SmbKeychain(profileId: nil).loadPassword(), !pass.isEmpty {

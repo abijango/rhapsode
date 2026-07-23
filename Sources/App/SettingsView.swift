@@ -81,6 +81,22 @@ struct SettingsView: View {
                     Text("Playback")
                 }
 
+                Section {
+                    NavigationLink {
+                        KOSyncSettingsView()
+                    } label: {
+                        settingsRow(
+                            title: "KOReader Sync",
+                            systemImage: "arrow.triangle.2.circlepath",
+                            status: KOSyncSettings.isConfigured ? "On" : "Off"
+                        )
+                    }
+                } header: {
+                    Text("Reading")
+                } footer: {
+                    Text("Sync ebook position with KOReader and CrossInk via the Progress Sync protocol.")
+                }
+
                 #if DEBUG
                 Section("Developer") {
                     NavigationLink("Live SmartSpeech (spike)") {

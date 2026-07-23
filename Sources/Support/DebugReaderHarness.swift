@@ -3,7 +3,7 @@ import SwiftData
 import SwiftUI
 
 /// Launch-arg-gated harness that imports the sample EPUB and shows the reader
-/// directly, so the Readium rendering can be screenshotted in isolation.
+/// directly (Foliate/WKWebView), for isolated screenshots.
 ///   xcrun simctl launch <device> com.naufalmir.rhapsode -readerscreenshot 1
 struct DebugReaderHarness: View {
     @Environment(\.modelContext) private var modelContext

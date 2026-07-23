@@ -3,12 +3,11 @@ import Foundation
 @preconcurrency import ReadiumStreamer
 import UIKit
 
-/// Opens a downloaded local EPUB with Readium and builds a `Book` (title, author,
-/// cover). Stores only container-relative paths. The reader (`ReaderView`) re-opens
-/// the same file for rendering.
+/// Opens a downloaded local EPUB with **Readium Streamer** (metadata + cover only)
+/// and builds a `Book`. Stores container-relative paths. Rendering is Foliate-js
+/// (`FoliateWebReader` / `ReaderView`), not the Readium navigator.
 ///
-/// `@MainActor`: Readium's `Publication`/parser types are not `Sendable`, and the
-/// navigator must be built on the main actor, so opening stays main-isolated.
+/// `@MainActor`: Readium's `Publication`/parser types are not `Sendable`.
 @MainActor
 enum EbookImporter {
     /// Shared Readium components for opening publications.

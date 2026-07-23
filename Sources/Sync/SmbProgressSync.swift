@@ -2,8 +2,8 @@ import CryptoKit
 import Foundation
 
 /// `ProgressSync` over an SMB share: one small JSON file per item under the
-/// configured sync folder (default `.rhapsode-sync/`), same wire format as
-/// `DropboxProgressSync` so keys/LWW match Dropbox/server mental model.
+/// configured sync folder (default `rhapsode-sync/`, visible on the share), same
+/// wire format as `DropboxProgressSync` so keys/LWW match Dropbox/server mental model.
 ///
 /// Paths are relative to the **share root** (not under Audiobooks/Books), so
 /// progress files are never ingested as library content.
@@ -12,7 +12,7 @@ actor SmbProgressSync: ProgressSync {
     /// path under the share root (not remapped into Audiobooks/Books).
     static var folder: String {
         let p = SmbConfig.syncPath
-        if p.isEmpty { return "/.rhapsode-sync" }
+        if p.isEmpty { return "/\(SmbConfig.defaultSyncPath)" }
         return p.hasPrefix("/") ? p : "/\(p)"
     }
 

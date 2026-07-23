@@ -8,9 +8,15 @@ enum ReaderPreferences {
 
     static var fontChoice: ReaderFontChoice {
         get {
-            guard let raw = UserDefaults.standard.string(forKey: fontKey),
-                  let choice = ReaderFontChoice(rawValue: raw) else { return .literata }
-            return choice
+            let raw = UserDefaults.standard.string(forKey: fontKey)
+            if let raw {
+                // Built-in or still-registered custom import.
+                if ReaderFontCatalog.presets.contains(where: { $0.id == raw })
+                    || CustomReaderFontStore.font(preferenceID: raw) != nil {
+                    return ReaderFontChoice(rawValue: raw)
+                }
+            }
+            return ReaderFontChoice(rawValue: ReaderFontCatalog.defaultID)
         }
         set { UserDefaults.standard.set(newValue.rawValue, forKey: fontKey) }
     }

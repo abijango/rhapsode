@@ -1,74 +1,144 @@
-import ReadiumNavigator
-import ReadiumShared
 import SwiftData
 import SwiftUI
 import UIKit
 
-/// EPUB reader screen.
+/// EPUB reader hosted on **foliate-js** (single WKWebView).
 ///
-/// Page turns follow the Readium TestApp model:
-/// - **Edge click / tap** and **arrow / space keys** → `DirectionalNavigationAdapter`
-/// - **Toolbar chevrons** → `EbookReader.goForward/goBackward`
-///
-/// Do not stack SwiftUI edge overlays on top of the adapter — that double-fires
-/// turns and leaves the navigator stuck.
+/// Immersive iPhone UX (Apple Books–style):
+/// - Tab bar + nav chrome hidden while reading
+/// - Center tap toggles chrome (title, TOC, fonts)
+/// - Edge taps turn pages (inset so system edge-swipe can pop back to the shelf)
+/// - Safe margins so text doesn’t kiss the screen edges
 struct ReaderView: View {
     let book: Book
     @Environment(\.modelContext) private var modelContext
     @Environment(\.scenePhase) private var scenePhase
     @Environment(SyncManager.self) private var sync
-    @State private var reader = EbookReader()
+    @State private var reader = FoliateWebReader()
     @State private var showSettings = false
     @State private var showTOC = false
     @State private var pushDebounce = PushDebounce()
+    @State private var kosyncDebounce = PushDebounce()
+    @State private var kosyncConflict: KOSyncConflict?
+    /// Top chrome (nav bar + tools). Hidden for immersion; center-tap reveals.
+    @State private var chromeVisible = false
+    @State private var chromeHideTask: Task<Void, Never>?
 
     var body: some View {
         Group {
-            if let navigator = reader.navigator {
-                NavigatorHost(navigator: navigator)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .ignoresSafeArea(edges: .bottom)
-            } else if let error = reader.loadError {
+            if let error = reader.loadError, !reader.isOpen {
                 ContentUnavailableView(
                     "Couldn’t Open Book",
                     systemImage: "exclamationmark.triangle",
                     description: Text(error)
                 )
             } else {
-                ProgressView("Opening…")
+                ZStack {
+                    // Stay below Dynamic Island / status bar; bottom can sit above home indicator.
+                    // Tab bar is hidden separately. Do NOT ignore top safe area (text was clipped).
+                    FoliateWebViewHost(reader: reader)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .ignoresSafeArea(edges: .bottom)
+
+                    if !reader.isOpen {
+                        ProgressView(reader.openingStatus ?? "Opening…")
+                    }
+
+                    if reader.isOpen, let error = reader.loadError {
+                        VStack {
+                            Text(error)
+                                .font(.caption)
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 8)
+                                .background(.red.opacity(0.85), in: Capsule())
+                                .padding(.top, 8)
+                            Spacer()
+                        }
+                        .allowsHitTesting(false)
+                    }
+
+                    // Tap zones: edges = page turn, center = toggle chrome.
+                    // Leading inset leaves room for the interactive-pop edge swipe.
+                    if reader.isOpen {
+                        GeometryReader { geo in
+                            let w = geo.size.width
+                            let edge = max(64, w * 0.22)
+                            let popGutter: CGFloat = 18
+                            HStack(spacing: 0) {
+                                Color.clear
+                                    .frame(width: popGutter)
+                                    .allowsHitTesting(false)
+
+                                Button {
+                                    turnPage(forward: false)
+                                } label: {
+                                    Color.clear
+                                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                                        .contentShape(Rectangle())
+                                }
+                                .buttonStyle(.plain)
+                                .frame(width: edge)
+                                .accessibilityLabel("Previous page")
+
+                                Button {
+                                    toggleChrome()
+                                } label: {
+                                    Color.clear
+                                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                                        .contentShape(Rectangle())
+                                }
+                                .buttonStyle(.plain)
+                                .accessibilityLabel(chromeVisible ? "Hide controls" : "Show controls")
+
+                                Button {
+                                    turnPage(forward: true)
+                                } label: {
+                                    Color.clear
+                                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                                        .contentShape(Rectangle())
+                                }
+                                .buttonStyle(.plain)
+                                .frame(width: edge)
+                                .accessibilityLabel("Next page")
+                            }
+                        }
+                    }
+                }
             }
         }
         .navigationTitle(book.title)
         .navigationBarTitleDisplayMode(.inline)
+        // Full-screen reading: hide bottom tabs (same pattern as PlayerView).
+        .toolbar(.hidden, for: .tabBar)
+        .toolbar(chromeVisible ? .visible : .hidden, for: .navigationBar)
         .toolbar {
-            ToolbarItemGroup(placement: .topBarLeading) {
-                Button {
-                    EbookReader.log("toolbar ←")
-                    reader.goBackward()
-                } label: {
-                    Image(systemName: "chevron.left")
-                }
-                .disabled(reader.navigator == nil)
-                .accessibilityLabel("Previous page")
-
-                Button {
-                    EbookReader.log("toolbar →")
-                    reader.goForward()
-                } label: {
-                    Image(systemName: "chevron.right")
-                }
-                .disabled(reader.navigator == nil)
-                .accessibilityLabel("Next page")
-            }
             ToolbarItemGroup(placement: .topBarTrailing) {
-                Button { showTOC = true } label: { Image(systemName: "list.bullet") }
-                    .disabled(reader.navigator == nil)
-                Button { showSettings = true } label: { Image(systemName: "textformat.size") }
-                    .disabled(reader.navigator == nil)
+                Button("Contents", systemImage: "list.bullet") {
+                    showTOC = true
+                    scheduleChromeAutoHide()
+                }
+                .disabled(!reader.isOpen)
+
+                Button("Reading settings", systemImage: "textformat.size") {
+                    showSettings = true
+                    scheduleChromeAutoHide()
+                }
+                .disabled(!reader.isOpen)
             }
         }
+        .statusBarHidden(!chromeVisible && reader.isOpen)
+        .animation(.easeInOut(duration: 0.2), value: chromeVisible)
         .task {
+            reader.prepareWebViewIfNeeded()
             await reader.open(book, context: modelContext)
+            // KOReader Progress Sync: pull before local reading stamps over a newer remote.
+            let pull = await KOSyncService.pullAndApply(
+                book: book, reader: reader, context: modelContext
+            )
+            if case .conflict(let localF, let remote) = pull {
+                kosyncConflict = KOSyncConflict(localFraction: localF, remote: remote)
+            }
             reader.startReadingSession()
             sync.activeReader = reader
             sync.activeReaderBookID = book.id
@@ -76,9 +146,15 @@ struct ReaderView: View {
             reader.onProgressChanged = {
                 pushDebounce.task?.cancel()
                 pushDebounce.task = Task {
-                    try? await Task.sleep(for: .seconds(6))
+                    try? await Task.sleep(for: .seconds(4))
                     guard !Task.isCancelled else { return }
                     await sync.pushBookProgress(relPath: key)
+                }
+                kosyncDebounce.task?.cancel()
+                kosyncDebounce.task = Task {
+                    try? await Task.sleep(for: .seconds(6))
+                    guard !Task.isCancelled else { return }
+                    await KOSyncService.push(book: book, context: modelContext)
                 }
             }
             while !Task.isCancelled {
@@ -91,33 +167,109 @@ struct ReaderView: View {
             switch phase {
             case .active:
                 reader.startReadingSession()
+                Task { await sync.pullAndMergeProgress() }
             case .inactive, .background:
+                reader.flushPendingSave()
                 reader.endReadingSession()
                 let key = book.fileRelPath
-                Task { await sync.pushBookProgress(relPath: key) }
+                Task {
+                    await sync.pushBookProgress(relPath: key)
+                    await KOSyncService.push(book: book, context: modelContext)
+                }
             @unknown default:
                 break
             }
         }
         .onDisappear {
+            chromeHideTask?.cancel()
+            reader.cancelOpen()
             if sync.activeReaderBookID == book.id {
                 sync.activeReader = nil
                 sync.activeReaderBookID = nil
             }
             pushDebounce.task?.cancel()
+            kosyncDebounce.task?.cancel()
+            reader.flushPendingSave()
             reader.endReadingSession()
             let key = book.fileRelPath
-            Task { await sync.pushBookProgress(relPath: key) }
+            Task {
+                await sync.pushBookProgress(relPath: key)
+                await KOSyncService.push(book: book, context: modelContext)
+            }
         }
-        .sheet(isPresented: $showSettings) {
+        .alert("Reading Position Conflict", isPresented: Binding(
+            get: { kosyncConflict != nil },
+            set: { if !$0 { kosyncConflict = nil } }
+        )) {
+            Button("Keep this device") {
+                kosyncConflict = nil
+                Task { await KOSyncService.push(book: book, context: modelContext) }
+            }
+            Button("Use other device") {
+                if let remote = kosyncConflict?.remote {
+                    KOSyncService.apply(
+                        remote: remote, to: book, reader: reader, context: modelContext
+                    )
+                }
+                kosyncConflict = nil
+            }
+        } message: {
+            if let c = kosyncConflict {
+                let localPct = Int((c.localFraction * 100).rounded())
+                let remotePct = Int(((c.remote.fraction ?? 0) * 100).rounded())
+                Text("This device is at \(localPct)%; another device is at \(remotePct)%. Which position do you want?")
+            }
+        }
+        .sheet(isPresented: $showSettings, onDismiss: { scheduleChromeAutoHide() }) {
             ReaderSettingsSheet(settings: $reader.settings)
                 .presentationDetents([.medium])
         }
-        .sheet(isPresented: $showTOC) {
-            TOCSheet(toc: reader.toc) { link in
-                reader.go(to: link)
+        .sheet(isPresented: $showTOC, onDismiss: { scheduleChromeAutoHide() }) {
+            FoliateTOCSheet(toc: reader.toc) { item in
+                reader.go(to: item)
                 showTOC = false
             }
+        }
+    }
+
+    // MARK: - Chrome + page turns
+
+    private func turnPage(forward: Bool) {
+        hideChrome()
+        if forward {
+            reader.goForward()
+        } else {
+            reader.goBackward()
+        }
+    }
+
+    private func toggleChrome() {
+        if chromeVisible {
+            hideChrome()
+        } else {
+            showChrome()
+        }
+    }
+
+    private func showChrome() {
+        chromeVisible = true
+        scheduleChromeAutoHide()
+    }
+
+    private func hideChrome() {
+        chromeHideTask?.cancel()
+        chromeHideTask = nil
+        chromeVisible = false
+    }
+
+    private func scheduleChromeAutoHide() {
+        chromeHideTask?.cancel()
+        chromeHideTask = Task { @MainActor in
+            try? await Task.sleep(for: .seconds(3.5))
+            guard !Task.isCancelled else { return }
+            // Keep chrome if a sheet is open.
+            guard !showSettings, !showTOC else { return }
+            chromeVisible = false
         }
     }
 }
@@ -126,74 +278,94 @@ struct ReaderView: View {
     var task: Task<Void, Never>?
 }
 
-// MARK: - Host
+private struct KOSyncConflict {
+    var localFraction: Double
+    var remote: KOSyncProgress
+}
 
-/// Embeds Readium as a **child** VC so it gets a non-zero frame (required for
-/// CSS column pagination). Does **not** steal first responder from the navigator
-/// — keyboard page turns need the navigator as first responder.
-private struct NavigatorHost: UIViewControllerRepresentable {
-    let navigator: EPUBNavigatorViewController
+// MARK: - WKWebView host + keyboard
 
-    func makeUIViewController(context: Context) -> NavigatorContainerController {
-        NavigatorContainerController(navigator: navigator)
+private struct FoliateWebViewHost: UIViewRepresentable {
+    let reader: FoliateWebReader
+
+    func makeUIView(context: Context) -> FoliateContainerView {
+        let container = FoliateContainerView()
+        container.reader = reader
+        reader.prepareWebViewIfNeeded()
+        container.attachWebViewIfNeeded()
+        return container
     }
 
-    func updateUIViewController(_ uiViewController: NavigatorContainerController, context: Context) {
-        uiViewController.ensureEmbedded(navigator)
+    func updateUIView(_ uiView: FoliateContainerView, context: Context) {
+        uiView.reader = reader
+        uiView.attachWebViewIfNeeded()
     }
 }
 
-final class NavigatorContainerController: UIViewController {
-    private var navigator: EPUBNavigatorViewController?
+/// Hosts the WKWebView and owns arrow/space page-turn key commands.
+final class FoliateContainerView: UIView {
+    var reader: FoliateWebReader?
+    private weak var hostedWebView: UIView?
 
-    init(navigator: EPUBNavigatorViewController) {
-        self.navigator = navigator
-        super.init(nibName: nil, bundle: nil)
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        backgroundColor = .clear
+        isUserInteractionEnabled = true
     }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-    override func viewDidLoad() {
-        super.viewDidLoad()
-        view.backgroundColor = .clear
-        if let navigator { embed(navigator) }
+    func attachWebViewIfNeeded() {
+        guard let wv = reader?.webView else { return }
+        if hostedWebView === wv { return }
+        hostedWebView?.removeFromSuperview()
+        wv.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(wv)
+        NSLayoutConstraint.activate([
+            wv.topAnchor.constraint(equalTo: topAnchor),
+            wv.bottomAnchor.constraint(equalTo: bottomAnchor),
+            wv.leadingAnchor.constraint(equalTo: leadingAnchor),
+            wv.trailingAnchor.constraint(equalTo: trailingAnchor),
+        ])
+        hostedWebView = wv
     }
 
-    override func viewDidAppear(_ animated: Bool) {
-        super.viewDidAppear(animated)
-        // Let the navigator take first responder (InputObservableViewController does
-        // this too). Do NOT becomeFirstResponder() here — that steals keys from Readium.
-        navigator?.view.endEditing(true)
-        _ = navigator?.becomeFirstResponder()
-        EbookReader.log("container appear bounds=\(view.bounds) navBounds=\(navigator?.view.bounds ?? .zero)")
+    override var canBecomeFirstResponder: Bool { true }
+
+    override var keyCommands: [UIKeyCommand]? {
+        [
+            key(UIKeyCommand.inputRightArrow, #selector(fwd), "Next page"),
+            key(UIKeyCommand.inputLeftArrow, #selector(back), "Previous page"),
+            key(UIKeyCommand.inputDownArrow, #selector(fwd), "Next page"),
+            key(UIKeyCommand.inputUpArrow, #selector(back), "Previous page"),
+            key(" ", #selector(fwd), "Next page"),
+        ]
     }
 
-    override func viewDidLayoutSubviews() {
-        super.viewDidLayoutSubviews()
-        navigator?.view.frame = view.bounds
+    private func key(_ input: String, _ sel: Selector, _ title: String) -> UIKeyCommand {
+        let c = UIKeyCommand(input: input, modifierFlags: [], action: sel)
+        c.wantsPriorityOverSystemBehavior = true
+        c.discoverabilityTitle = title
+        return c
     }
 
-    func ensureEmbedded(_ nav: EPUBNavigatorViewController) {
-        guard navigator !== nav else {
-            navigator?.view.frame = view.bounds
-            return
+    @objc private func fwd() {
+        _ = becomeFirstResponder()
+        // Keyboard page-turns mirror edge taps (chrome stays hidden).
+        reader?.goForward()
+    }
+
+    @objc private func back() {
+        _ = becomeFirstResponder()
+        reader?.goBackward()
+    }
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        if window != nil {
+            _ = becomeFirstResponder()
         }
-        if let old = navigator {
-            old.willMove(toParent: nil)
-            old.view.removeFromSuperview()
-            old.removeFromParent()
-        }
-        navigator = nav
-        if isViewLoaded { embed(nav) }
-    }
-
-    private func embed(_ nav: EPUBNavigatorViewController) {
-        addChild(nav)
-        nav.view.frame = view.bounds
-        nav.view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-        view.addSubview(nav.view)
-        nav.didMove(toParent: self)
     }
 }
 
@@ -203,8 +375,16 @@ private struct ReaderSettingsSheet: View {
     @Binding var settings: ReaderSettings
     @Environment(\.dismiss) private var dismiss
 
+    @State private var customFonts: [CustomReaderFont] = CustomReaderFontStore.all()
+    @State private var showImporter = false
+    @State private var importError: String?
+
     private static let sampleParagraph =
         "It was the best of times, it was the worst of times — the age of wisdom and the age of foolishness."
+
+    private var selectablePresets: [ReaderFontPreset] {
+        ReaderFontCatalog.presets + customFonts.map { $0.asPreset() }
+    }
 
     var body: some View {
         NavigationStack {
@@ -219,8 +399,8 @@ private struct ReaderSettingsSheet: View {
                 }
                 Section {
                     Picker("Typeface", selection: $settings.fontChoice) {
-                        ForEach(ReaderFontChoice.allCases) { choice in
-                            Text(choice.label).tag(choice)
+                        ForEach(selectablePresets) { preset in
+                            Text(preset.label).tag(ReaderFontChoice(rawValue: preset.id))
                         }
                     }
                     Text(settings.fontChoice.subtitle)
@@ -234,6 +414,42 @@ private struct ReaderSettingsSheet: View {
                     Text("Typeface")
                 } footer: {
                     Text("Changes apply immediately. Your choice is remembered for every book.")
+                }
+                Section {
+                    ForEach(customFonts) { font in
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(font.displayName)
+                                Text(font.familyName)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            if settings.fontChoice.rawValue == font.preferenceID {
+                                Image(systemName: "checkmark.circle.fill")
+                                    .foregroundStyle(.tint)
+                                    .accessibilityLabel("Selected")
+                            }
+                        }
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            settings.fontChoice = ReaderFontChoice(rawValue: font.preferenceID)
+                        }
+                        .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                            Button("Delete", role: .destructive) {
+                                deleteCustom(font)
+                            }
+                        }
+                    }
+                    Button {
+                        showImporter = true
+                    } label: {
+                        Label("Add Font…", systemImage: "plus.circle")
+                    }
+                } header: {
+                    Text("Custom Fonts")
+                } footer: {
+                    Text("Import .ttf or .otf files stored on this device. Fonts stay offline in Application Support.")
                 }
                 Section("Font Size") {
                     Slider(value: $settings.fontSize, in: 0.5...2.0, step: 0.1) {
@@ -251,13 +467,57 @@ private struct ReaderSettingsSheet: View {
                     Button("Done") { dismiss() }
                 }
             }
+            .fileImporter(
+                isPresented: $showImporter,
+                allowedContentTypes: CustomReaderFontStore.contentTypes,
+                allowsMultipleSelection: false
+            ) { result in
+                handleImport(result)
+            }
+            .alert("Couldn’t Import Font", isPresented: Binding(
+                get: { importError != nil },
+                set: { if !$0 { importError = nil } }
+            )) {
+                Button("OK", role: .cancel) { importError = nil }
+            } message: {
+                Text(importError ?? "")
+            }
+            .onAppear { refreshCustomFonts() }
+        }
+    }
+
+    private func refreshCustomFonts() {
+        customFonts = CustomReaderFontStore.all()
+    }
+
+    private func handleImport(_ result: Result<[URL], Error>) {
+        switch result {
+        case .failure(let error):
+            importError = error.localizedDescription
+        case .success(let urls):
+            guard let url = urls.first else { return }
+            do {
+                let font = try CustomReaderFontStore.importFont(from: url)
+                refreshCustomFonts()
+                settings.fontChoice = ReaderFontChoice(rawValue: font.preferenceID)
+            } catch {
+                importError = error.localizedDescription
+            }
+        }
+    }
+
+    private func deleteCustom(_ font: CustomReaderFont) {
+        let wasSelected = CustomReaderFontStore.delete(font)
+        refreshCustomFonts()
+        if wasSelected {
+            settings.fontChoice = ReaderFontChoice(rawValue: ReaderFontCatalog.defaultID)
         }
     }
 }
 
-private struct TOCSheet: View {
-    let toc: [ReadiumShared.Link]
-    let onSelect: (ReadiumShared.Link) -> Void
+private struct FoliateTOCSheet: View {
+    let toc: [FoliateTOCItem]
+    let onSelect: (FoliateTOCItem) -> Void
 
     var body: some View {
         NavigationStack {
@@ -265,9 +525,14 @@ private struct TOCSheet: View {
                 if toc.isEmpty {
                     ContentUnavailableView("No Contents", systemImage: "list.bullet")
                 } else {
-                    List(toc, id: \.href) { link in
-                        Button(link.title ?? link.href) { onSelect(link) }
-                            .tint(.primary)
+                    List(toc) { item in
+                        Button {
+                            onSelect(item)
+                        } label: {
+                            Text(item.label)
+                                .foregroundStyle(.primary)
+                                .padding(.leading, CGFloat(item.depth) * 12)
+                        }
                     }
                 }
             }

@@ -88,6 +88,10 @@ struct BooksShelfView: View {
             }
             .navigationTitle("E-books")
             .navigationBarTitleDisplayMode(.inline)
+            .task {
+                // Path 1d: warm shared WebKit process pool before first open.
+                FoliateWebReader.warmProcessPool()
+            }
             .searchable(
                 text: $searchText,
                 placement: .navigationBarDrawer(displayMode: .always),

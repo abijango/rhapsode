@@ -21,7 +21,7 @@ Native SwiftUI for iPhone, iPad, and Mac (Catalyst). Every file is downloaded in
 - Chapter/track list with tap-to-jump
 
 ### E-books
-- **Readium** reflowable EPUB reader — font size, light / dark / sepia, table of contents
+- **Foliate-js** reflowable EPUB reader — font size, light / dark / sepia, table of contents
 - Resume to the last reading `Locator`
 
 ### Source & sync (Dropbox app folder)
@@ -58,7 +58,7 @@ Four layers, backend-agnostic above the source boundary:
 | Layer | What it does |
 |---|---|
 | **Presentation** (SwiftUI) | Tab shell, library shelves, player + SmartSpeech sheet, reader, Nerd Stats & settings, downloads |
-| **Domain & playback** | `AudiobookPlayer` driving the live-trim engine (`LiveAudioBackend`/`LiveTrimProducer`, AVAudioEngine + SmartSpeechKit DSP), `EbookReader` (Readium) |
+| **Domain & playback** | `AudiobookPlayer` driving the live-trim engine (`LiveAudioBackend`/`LiveTrimProducer`, AVAudioEngine + SmartSpeechKit DSP), `FoliateWebReader` (foliate-js) |
 | **Library / sync / source** | `SyncManager`, `BackgroundDownloader`, `ProgressSync`, and `DropboxSource` behind the `LibrarySource` protocol |
 | **Persistence & storage** | SwiftData (`AppSchema`), `ContainerPaths` (media in Application Support — no on-disk trims), Keychain |
 
@@ -71,7 +71,7 @@ All remote access goes through one `LibrarySource` protocol, so Dropbox is swapp
 | `Sources/App/` | Tab shell, shelves, settings, lifecycle | `RhapsodeApp`, `RootTabView`, `SettingsView` |
 | `Sources/Audiobook/` | Import & playback (both formats) + SmartSpeech UI | `AudiobookPlayer`, `PlayerView`, `SmartSpeechSheet` |
 | `Sources/SmartSpeechLive/` | Live on-the-fly trim engine (AVAudioEngine) | `LiveAudioBackend`, `LiveTrimProducer`, `LiveSilencePrescan` |
-| `Sources/Ebook/` | EPUB reading via Readium | `EbookReader`, `ReaderView` |
+| `Sources/Ebook/` | EPUB reading via foliate-js | `FoliateWebReader`, `ReaderView`, `EbookImporter` |
 | `Sources/SmartSpeech/` | Trim gating, timeline map, stats, Nerd Stats UI | `Audiobook+SmartSpeech`, `SmartSpeechTimelineMap`, `SmartSpeechStats`, `NerdStatsView` |
 | `Sources/Source/` | Remote library behind one protocol | `LibrarySource`, `DropboxSource`, `KeychainTokenStore` |
 | `Sources/Sync/` | Scan, watch, download queue, progress sync | `SyncManager`, `BackgroundDownloader`, `ProgressSync` |
@@ -86,7 +86,7 @@ All remote access goes through one `LibrarySource` protocol, so Dropbox is swapp
 - **SwiftUI** + Swift Concurrency, Swift 6 strict concurrency
 - **SwiftData** persistence — stable `UUID`s, relative paths only, no `@Attribute(.unique)` (CloudKit-friendly)
 - **AVAudioEngine** live-trim graph + `MPNowPlayingInfoCenter` / `MPRemoteCommandCenter`
-- **Readium Swift toolkit** for EPUB
+- **foliate-js** for EPUB rendering; **Readium Streamer** for import/metadata only
 - **SmartSpeechKit** — Accelerate (vDSP) + AVFoundation
 - Background `URLSession`, `BGTaskScheduler`, `UNUserNotificationCenter` (no paid entitlements in the MVP)
 - **XcodeGen** project generation + a headless self-test harness

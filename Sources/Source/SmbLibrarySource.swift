@@ -157,12 +157,22 @@ actor SmbLibrarySource: LibrarySource {
         try data.write(to: destination, options: .atomic)
     }
 
-    /// Small-file write for progress / stats JSON under the share (e.g. `.rhapsode-sync/…`).
+    /// Small-file write for progress / stats JSON under the share (e.g. `rhapsode-sync/…`).
+    ///
+    /// AMSMB2’s plain `write` uses `O_CREAT|O_EXCL` (create only if missing) →
+    /// collision on update. Strategy:
+    /// 1. Ensure parent dir exists.
+    /// 2. Write a **unique non-dot temp** (O_EXCL always OK).
+    /// 3. Remove dest + move temp → dest.
+    /// 4. If move fails after dest was removed: recreate dest with `write` from
+    ///    in-memory bytes (do **not** use `append(offset:0)` — that truncates first
+    ///    and throws ENOENT when the file is gone, which was wiping progress JSON).
     func writeFile(_ data: Data, to path: String) async throws {
         let client = try await connectedManager()
         let smbPath = Self.mapLibraryPath(path)
-        // Ensure parent directory exists (createDirectory is idempotent for existing).
         let parent = (smbPath as NSString).deletingLastPathComponent
+        let leaf = (smbPath as NSString).lastPathComponent
+
         if !parent.isEmpty, parent != "." {
             var built = ""
             for part in parent.split(separator: "/") {
@@ -170,10 +180,54 @@ actor SmbLibrarySource: LibrarySource {
                 try? await client.createDirectory(atPath: built)
             }
         }
+
+        // Non-hidden temp: some NAS setups treat leading-dot names specially.
+        let tempPath: String = {
+            let name = "\(leaf).\(UUID().uuidString).part"
+            if parent.isEmpty || parent == "." { return name }
+            return "\(parent)/\(name)"
+        }()
+
+        func cleanupTemp() async {
+            try? await client.removeItem(atPath: tempPath)
+        }
+
+        // 1) Stage full payload under a unique name.
         do {
-            try await client.write(data: data, toPath: smbPath, progress: nil)
+            try await client.write(data: data, toPath: tempPath, progress: nil)
         } catch {
-            throw Self.mapError(error, context: "Write “\(smbPath)”")
+            await cleanupTemp()
+            throw Self.mapError(error, context: "Write temp “\(tempPath)”")
+        }
+
+        // 2) Swap into place (remove dest only after temp is known-good).
+        try? await client.removeItem(atPath: smbPath)
+        do {
+            try await client.moveItem(atPath: tempPath, toPath: smbPath)
+            return
+        } catch {
+            try? await client.removeItem(atPath: smbPath)
+            do {
+                try await client.moveItem(atPath: tempPath, toPath: smbPath)
+                return
+            } catch {
+                // 3) Recreate dest from memory with O_EXCL create (dest is missing).
+                //    Never append(offset:0) here — truncate-before-open → ENOENT wipe.
+                await cleanupTemp()
+                try? await client.removeItem(atPath: smbPath)
+                do {
+                    try await client.write(data: data, toPath: smbPath, progress: nil)
+                    return
+                } catch {
+                    try? await client.removeItem(atPath: smbPath)
+                    do {
+                        try await client.write(data: data, toPath: smbPath, progress: nil)
+                        return
+                    } catch {
+                        throw Self.mapError(error, context: "Write “\(smbPath)”")
+                    }
+                }
+            }
         }
     }
 

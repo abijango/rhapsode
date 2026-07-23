@@ -51,7 +51,7 @@ struct RhapsodeApp: App {
         if SmbConfig.shouldUseSmb {
             let smb = SmbLibrarySource()
             // Cross-device resume: same PlaybackProgress JSON as Dropbox, under
-            // the share’s `.rhapsode-sync/` (or profile syncPath).
+            // the share’s `rhapsode-sync/` (or profile syncPath).
             syncManager = SyncManager(
                 source: smb,
                 context: container.mainContext,
@@ -153,7 +153,7 @@ struct RhapsodeApp: App {
             // Library menu: manual Scan Now accessible from the menu bar.
             // scanNow() is @MainActor and guards against double-runs internally.
             // NOTE: Player/reader commands (play-pause, page-turn) are intentionally
-            // omitted — driving AudiobookPlayer/EbookReader from menu items requires
+            // omitted — driving AudiobookPlayer/FoliateWebReader from menu items requires
             // @FocusedValue bindings injected in PlayerView/ReaderView, which are
             // not owned by this file. Left as future work.
             CommandMenu("Library") {

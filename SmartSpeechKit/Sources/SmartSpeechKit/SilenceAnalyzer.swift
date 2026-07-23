@@ -136,17 +136,28 @@ public struct SilenceAnalyzer {
     // MARK: - Pure stages (internal for direct unit testing)
 
     /// Per-window RMS in dBFS (reference 1.0). 20 ms window, 10 ms hop by default.
+    /// Uses a sliding sum-of-squares (O(n) prefix) instead of per-window `vDSP_rmsqv`.
     static func windowedRMSdB(_ samples: [Float], windowSize: Int, hop: Int) -> [Double] {
         guard windowSize > 0, hop > 0, samples.count >= windowSize else { return [] }
         let count = (samples.count - windowSize) / hop + 1
-        var out = [Double]()
-        out.reserveCapacity(count)
+        let n = samples.count
+        var squares = [Float](repeating: 0, count: n)
         samples.withUnsafeBufferPointer { buf in
             guard let base = buf.baseAddress else { return }
-            for w in 0..<count {
-                var rms: Float = 0
-                vDSP_rmsqv(base + w * hop, 1, &rms, vDSP_Length(windowSize))
-                out.append(rms > 0 ? 20.0 * log10(Double(rms)) : silenceFloorDb)
+            vDSP_vsq(base, 1, &squares, 1, vDSP_Length(n))
+        }
+        var prefix = [Double](repeating: 0, count: n + 1)
+        for i in 0..<n { prefix[i + 1] = prefix[i] + Double(squares[i]) }
+        let invWindow = 1.0 / Double(windowSize)
+        var out = [Double]()
+        out.reserveCapacity(count)
+        for w in 0..<count {
+            let start = w * hop
+            let sumSq = prefix[start + windowSize] - prefix[start]
+            if sumSq <= 0 {
+                out.append(silenceFloorDb)
+            } else {
+                out.append(20.0 * log10(sqrt(sumSq * invWindow)))
             }
         }
         return out

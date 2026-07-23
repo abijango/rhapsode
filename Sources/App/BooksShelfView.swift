@@ -88,10 +88,6 @@ struct BooksShelfView: View {
             }
             .navigationTitle("E-books")
             .navigationBarTitleDisplayMode(.inline)
-            .task {
-                // Path 1d: warm shared WebKit process pool before first open.
-                FoliateWebReader.warmProcessPool()
-            }
             .searchable(
                 text: $searchText,
                 placement: .navigationBarDrawer(displayMode: .always),
@@ -268,6 +264,7 @@ struct BooksShelfView: View {
     private func ebookLink(_ book: Book) -> some View {
         NavigationLink {
             ReaderView(book: book)
+                .onAppear { Self.warmWebKitIfNeeded() }
         } label: {
             CoverTile(
                 title: book.title,
@@ -284,7 +281,17 @@ struct BooksShelfView: View {
             }
             Button("Delete", systemImage: "trash", role: .destructive) {
                 LibraryStore(context: modelContext).deleteBook(book)
+                sync.invalidateOnDeviceCatalogCache()
             }
         }
+    }
+
+    /// Defer WebKit pool warm until the user actually opens a reader (not shelf appear).
+    private static var webKitWarmed = false
+
+    private static func warmWebKitIfNeeded() {
+        guard !webKitWarmed else { return }
+        webKitWarmed = true
+        FoliateWebReader.warmProcessPool()
     }
 }

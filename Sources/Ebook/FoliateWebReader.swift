@@ -93,6 +93,7 @@ final class FoliateWebReader: NSObject, ActiveEbookReader {
     }
 
     var onProgressChanged: (() -> Void)?
+    var onChromeToggle: (() -> Void)?
 
     private let scheme = FoliateSchemeHandler()
     private var book: Book?
@@ -102,6 +103,7 @@ final class FoliateWebReader: NSObject, ActiveEbookReader {
     private var remoteApplyGeneration = 0
     private var openGeneration = 0
     private var saveTask: Task<Void, Never>?
+    private var turnTask: Task<Void, Never>?
     private var readyContinuation: CheckedContinuation<Void, Never>?
 
     // MARK: Lifecycle
@@ -180,6 +182,12 @@ final class FoliateWebReader: NSObject, ActiveEbookReader {
 
             scheme.bookFileURL = fileURL
 
+            let attrs = try? FileManager.default.attributesOfItem(atPath: fileURL.path)
+            let fileSize = (attrs?[.size] as? NSNumber)?.int64Value ?? 0
+            if fileSize > 30 * 1024 * 1024 {
+                openingStatus = "Large book — this may take a moment…"
+            }
+
             let shellOK = await waitForShellReady(timeout: .seconds(8))
             guard generation == openGeneration else { return }
             guard shellOK else {
@@ -255,6 +263,25 @@ final class FoliateWebReader: NSObject, ActiveEbookReader {
         openingStatus = nil
     }
 
+    /// Tear down the open book, release JS heap memory, and drop the EPUB scheme binding.
+    func destroy() {
+        openGeneration += 1
+        openingStatus = nil
+        turnTask?.cancel()
+        turnTask = nil
+        isOpen = false
+        toc = []
+        book = nil
+        scheme.bookFileURL = nil
+        let wv = webView
+        Task {
+            _ = try? await wv?.callAsyncJavaScript(
+                "window.__rhapsode.destroy()",
+                contentWorld: .page
+            )
+        }
+    }
+
     /// Wait until the shell posts `ready`, or until timeout. Returns whether `isReady`.
     private func waitForShellReady(timeout: Duration) async -> Bool {
         if isReady { return true }
@@ -293,7 +320,8 @@ final class FoliateWebReader: NSObject, ActiveEbookReader {
 
     func goForward() {
         guard isOpen else { return }
-        Task {
+        turnTask?.cancel()
+        turnTask = Task {
             _ = try? await webView?.callAsyncJavaScript(
                 "return window.__rhapsode.next()",
                 contentWorld: .page
@@ -303,7 +331,8 @@ final class FoliateWebReader: NSObject, ActiveEbookReader {
 
     func goBackward() {
         guard isOpen else { return }
-        Task {
+        turnTask?.cancel()
+        turnTask = Task {
             _ = try? await webView?.callAsyncJavaScript(
                 "return window.__rhapsode.prev()",
                 contentWorld: .page
@@ -533,6 +562,9 @@ extension FoliateWebReader: WKScriptMessageHandler {
             if let msg = body["message"] as? String {
                 Self.log(msg)
             }
+
+        case "chromeToggle":
+            onChromeToggle?()
 
         default:
             break

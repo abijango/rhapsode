@@ -103,6 +103,7 @@ final class LiveSmartSpeechEngine {
         engine.attach(playerNode)
         engine.attach(timePitch)
         timePitch.rate = rate
+        timePitch.bypass = (rate == 1.0)
         // playerNode → timePitch → mixer. TimePitch pulls rate× frames upstream, so the player
         // node's own sampleTime keeps measuring CONTENT consumed (rate-independent) — see `tick`.
         engine.connect(playerNode, to: timePitch, format: format)
@@ -115,6 +116,7 @@ final class LiveSmartSpeechEngine {
                                         settings: LiveSmartSpeechTuning.settings(preset: src.preset),
                                         trimEnabled: trimEnabled)
         self.producer = producer
+        producer.setPlaybackRate(rate)
         self.isLoaded = true
         self.status = "Ready"
 
@@ -130,7 +132,9 @@ final class LiveSmartSpeechEngine {
                 self.projectedByTier = result.projectedSavedByTier
                 self.prescanRegionCount = result.regionCount
                 self.detectionFloorDb = result.globalFloorDb
-                self.producer?.setGlobalFloor(result.globalFloorDb)   // Fix A: stable global floor
+                self.producer?.setRegions(result.regions,
+                                          floor: result.globalFloorDb,
+                                          speech: result.globalSpeechDb)
                 self.refreshProjectedTotal()
             }
         }
@@ -190,6 +194,8 @@ final class LiveSmartSpeechEngine {
     func setRate(_ newRate: Float) {
         rate = max(0.5, min(newRate, 3.0))
         timePitch.rate = rate
+        timePitch.bypass = (rate == 1.0)
+        producer?.setPlaybackRate(rate)
     }
 
     /// Toggle trim or change tier; re-seeks to the current position so the change applies cleanly.

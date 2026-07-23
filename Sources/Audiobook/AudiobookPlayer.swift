@@ -40,9 +40,11 @@ final class AudiobookPlayer {
     /// The file URL currently loaded into `backend` (nil = nothing loaded). A single-file M4B loads
     /// once; chapter changes within it are seeks. A multi-file book reloads on each track change.
     private var loadedURL: URL?
-    /// Per-file cache of the analyze-ahead global noise floor (Fix A). Seeded by a detached prescan on
-    /// first load of a file; passed straight into `backend.load` on any later load of the same file.
-    private var floorByURL: [URL: Double] = [:]
+    /// Per-file cache of analyze-ahead prescan results (Fix A). Seeded by a detached prescan on
+    /// first load of a file; the global floor is passed into `backend.load` on any later load.
+    private var prescanByURL: [URL: LiveSilencePrescanResult] = [:]
+    /// In-flight prescan for the current load; cancelled when the file/book changes.
+    private var prescanTask: Task<Void, Never>?
 
     // AVAudioSession event handling. AVPlayer handled these implicitly; the AVAudioEngine-based
     // backend does not, so the player owns interruption + route-change reactions.
@@ -88,6 +90,10 @@ final class AudiobookPlayer {
     private var lastPlayerTime: Double?
     /// Last source-domain time corresponding to `lastPlayerTime`. `nil` = no baseline yet.
     private var lastSourceTime: Double?
+
+    /// Per-book listened/saved seconds accrued since the last model flush (see `flushPendingStats`).
+    private var pendingListenedSeconds: Double = 0
+    private var pendingSavedSeconds: Double = 0
 
     #if DEBUG
     /// Debug-only: the timeline map fed to the stat-accumulation self-test seam.
@@ -143,15 +149,39 @@ final class AudiobookPlayer {
         // WP7 — played: trimmed/output CONTENT seconds actually listened through, accrued on EVERY
         // valid playing tick regardless of trimming (rate-independent; this is the per-tick output delta).
         SmartSpeechStats.addPlayed(trimmedDelta)                                          // lifetime/global
-        if let book { book.listenedSeconds = (book.listenedSeconds ?? 0) + trimmedDelta }  // per-book
+        pendingListenedSeconds += trimmedDelta                                            // per-book (flushed in persist)
 
         // WP7 — saved: only meaningful while trimming (the source outran the output across a gap).
         guard trimActive else { return }
         let saved = max(0, sourceDelta - trimmedDelta)
         guard saved > 0 else { return }
         SmartSpeechStats.addSaved(saved)                                  // lifetime/global total
-        if let book { book.smartSpeechSavedSeconds = (book.smartSpeechSavedSeconds ?? 0) + saved }  // per-book
+        pendingSavedSeconds += saved                                      // per-book (flushed in persist)
         // All persist via the throttled persist() in tick() (or force-save on pause).
+    }
+
+    /// Write accrued per-book stats onto the model. Called from `persist()` and other force-save paths.
+    private func flushPendingStats() {
+        guard let book else {
+            pendingListenedSeconds = 0
+            pendingSavedSeconds = 0
+            return
+        }
+        if pendingListenedSeconds > 0 {
+            book.listenedSeconds = (book.listenedSeconds ?? 0) + pendingListenedSeconds
+            pendingListenedSeconds = 0
+        }
+        if pendingSavedSeconds > 0 {
+            book.smartSpeechSavedSeconds = (book.smartSpeechSavedSeconds ?? 0) + pendingSavedSeconds
+            pendingSavedSeconds = 0
+        }
+    }
+
+    /// Apply a completed prescan to the live backend when still relevant to the current load.
+    private func applyPrescanResult(_ result: LiveSilencePrescanResult, for url: URL) {
+        guard loadedURL == url else { return }
+        prescanByURL[url] = result
+        backend.applyPrescan(result)
     }
 
     /// WP8 — smart resume flag. Set `true` on `pause()` and on initial `load()`, cleared by any
@@ -216,6 +246,10 @@ final class AudiobookPlayer {
         // does not pollute the first tick.
         lastPlayerTime = nil
         lastSourceTime = nil
+        pendingListenedSeconds = 0
+        pendingSavedSeconds = 0
+        prescanTask?.cancel()
+        prescanTask = nil
 
         configureAudioSession()   // before any backend use (engine needs an active session)
         configureRemoteCommands()
@@ -232,6 +266,8 @@ final class AudiobookPlayer {
     /// not on every view disappearance.
     func teardown() {
         persist(force: true)
+        prescanTask?.cancel()
+        prescanTask = nil
         isPlaying = false
         backend.stop()
         loadedURL = nil
@@ -348,19 +384,23 @@ final class AudiobookPlayer {
 
         if loadedURL != url {
             loadedURL = url
+            let cached = prescanByURL[url]
             backend.load(url: url, sourceDuration: srcDuration, cutPoints: cuts,
                          startSource: startSource, trimEnabled: trimEnabled,
-                         preset: preset, globalFloorDb: floorByURL[url])
-            // Analyze-ahead the global noise floor (Fix A) once per file, off the main actor, and
-            // hand it to the live producer for stable cross-chunk detection.
-            if trimEnabled, floorByURL[url] == nil {
-                Task.detached { [weak self] in
+                         preset: preset, globalFloorDb: cached?.globalFloorDb)
+            // Re-apply full cached regions (not just floor) so playback skips live RMS.
+            if let cached { backend.applyPrescan(cached) }
+            // Analyze-ahead once per file when no cache yet (regions + global floor/speech).
+            if trimEnabled, cached == nil {
+                prescanTask?.cancel()
+                let bookID = book.id
+                prescanTask = Task.detached { [weak self] in
                     guard let r = try? LiveSilencePrescan.analyze(url: url, cutPoints: cuts, preset: preset)
                     else { return }
+                    guard !Task.isCancelled else { return }
                     await MainActor.run {
-                        guard let self else { return }
-                        self.floorByURL[url] = r.globalFloorDb
-                        self.backend.setGlobalFloor(r.globalFloorDb)
+                        guard let self, self.loadedURL == url, self.book?.id == bookID else { return }
+                        self.applyPrescanResult(r, for: url)
                     }
                 }
             }
@@ -392,6 +432,8 @@ final class AudiobookPlayer {
         trimActive = trimEnabled
 
         // Force a reload with the new trim setting at the preserved position.
+        prescanTask?.cancel()
+        prescanTask = nil
         loadedURL = nil
         if isSingleFile {
             loadCurrentItem(seekTo: max(0, sourceNow - prefixSums[currentIndex]))
@@ -557,6 +599,7 @@ final class AudiobookPlayer {
         guard let book, let context else { return }
         if !force && Date().timeIntervalSince(lastPersist) < 5 { return }
         lastPersist = Date()
+        flushPendingStats()
         // WP-A: stamp progressUpdatedAt ONLY when the position genuinely changed AND the change
         // is user-driven (not a remote auto-jump). The timestamp marks WHEN the user last moved,
         // so an idle device that pushes later can't clobber a newer remote with a stale position.
@@ -619,8 +662,8 @@ final class AudiobookPlayer {
         info[MPMediaItemPropertyTitle] = currentTrack?.title ?? book?.title ?? ""
         info[MPMediaItemPropertyAlbumTitle] = book?.title ?? ""
         info[MPMediaItemPropertyArtist] = book?.author ?? ""
-        info[MPMediaItemPropertyPlaybackDuration] = trackDuration
-        info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = offsetInTrack
+        info[MPMediaItemPropertyPlaybackDuration] = totalDuration
+        info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = bookPosition
         info[MPNowPlayingInfoPropertyPlaybackRate] = isPlaying ? rate : 0
         if let coverRel = book?.coverPath,
            let url = try? ContainerPaths.url(forRelativePath: coverRel),
@@ -638,7 +681,7 @@ final class AudiobookPlayer {
     }
 
     private func updateNowPlayingElapsed() {
-        MPNowPlayingInfoCenter.default().nowPlayingInfo?[MPNowPlayingInfoPropertyElapsedPlaybackTime] = offsetInTrack
+        MPNowPlayingInfoCenter.default().nowPlayingInfo?[MPNowPlayingInfoPropertyElapsedPlaybackTime] = bookPosition
         MPNowPlayingInfoCenter.default().nowPlayingInfo?[MPNowPlayingInfoPropertyPlaybackRate] = isPlaying ? rate : 0
     }
 
@@ -694,7 +737,10 @@ extension AudiobookPlayer {
     }
 
     /// Per-book accrued savings for the session's book (S2), for the self-test to assert.
-    var debugBookSavedSeconds: Double? { book?.smartSpeechSavedSeconds }
+    var debugBookSavedSeconds: Double? {
+        guard let book else { return nil }
+        return (book.smartSpeechSavedSeconds ?? 0) + pendingSavedSeconds
+    }
 
     /// Feed a single simulated tick at `playerTime` (trimmed-domain seconds), exactly as `tick()`
     /// does. The source time is derived via the debug stat map's `toSource(playerTime)`.
@@ -704,6 +750,7 @@ extension AudiobookPlayer {
 
     /// Tear down the stat session started by `debugBeginSmartSpeechStatSession`.
     func debugEndSmartSpeechStatSession() {
+        flushPendingStats()
         isPlaying = false
         trimActive = false
         lastPlayerTime = nil

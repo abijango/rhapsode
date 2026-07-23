@@ -92,6 +92,16 @@ public struct TrimRenderer {
         return (out: cos(theta), incoming: sin(theta))
     }
 
+    /// Precomputed equal-power gains for a crossfade of `length` frames (index 0…length−1).
+    static func equalPowerLUT(length: Int) -> [(out: Float, incoming: Float)] {
+        guard length > 0 else { return [] }
+        return (0..<length).map { k in
+            let progress = length == 1 ? 1.0 : Double(k) / Double(length - 1)
+            let g = equalPowerGains(progress: progress)
+            return (Float(g.out), Float(g.incoming))
+        }
+    }
+
     /// Render the trimmed buffer: snap each joint to nearby zero-crossings and equal-power
     /// crossfade across it. Channels stay aligned (one snapped index applied to all).
     public func render(buffer: AVAudioPCMBuffer, regions: [SilenceRegion]) throws -> AVAudioPCMBuffer {
@@ -117,9 +127,13 @@ public struct TrimRenderer {
         // No joints → nothing to splice; hand back the input untouched.
         guard plan.keptIntervals.count > 1 else { return identity() }
 
-        let reference = AudioIO.downmixToMono(buffer)   // zero-crossing reference; all channels share the index
+        var reference = [Float]()
+        AudioIO.downmixToMono(into: &reference, from: buffer)
         let crossfadeFrames = max(1, Int((settings.crossfadeMs / 1000.0 * sampleRate).rounded()))
         let snapWindow = max(1, Int((Self.snapWindowMs / 1000.0 * sampleRate).rounded()))
+        let gainLUTs: [[(out: Float, incoming: Float)]] = (1...crossfadeFrames).map {
+            Self.equalPowerLUT(length: $0)
+        }
 
         // Snap interior boundaries to zero crossings (within their own interval interiors).
         var starts = plan.keptIntervals.map(\.lowerBound)
@@ -133,51 +147,16 @@ public struct TrimRenderer {
                                                   window: snapWindow, total: totalFrames)
         }
 
-        // Concatenate intervals with equal-power crossfades, per channel.
-        var out = [[Float]](repeating: [], count: channelCount)
-        let capacity = zip(starts, ends).reduce(0) { $0 + max(0, $1.1 - $1.0) }
-        for ch in 0..<channelCount { out[ch].reserveCapacity(capacity) }
-
-        func append(_ range: Range<Int>) {
-            for ch in 0..<channelCount {
-                out[ch].append(contentsOf: UnsafeBufferPointer(start: source[ch] + range.lowerBound,
-                                                               count: range.count))
-            }
-        }
-
-        var segments: [RenderSegment] = []
-        append(starts[0]..<ends[0])
-        segments.append(RenderSegment(sourceStart: starts[0], sourceEnd: ends[0],
-                                      trimmedStart: 0, trimmedEnd: ends[0] - starts[0]))
-        var prevIntervalLen = ends[0] - starts[0]
-
+        // Output length: first interval verbatim, then each join overlaps by `cf` frames.
+        var outFrames = ends[0] - starts[0]
+        var prevIntervalLen = outFrames
         for i in 1..<starts.count {
             let inLen = ends[i] - starts[i]
-            let written = out[0].count   // cumulative trimmed output BEFORE interval i's new frames
-            let cf = min(crossfadeFrames, inLen, prevIntervalLen, written)
-            if cf > 0 {
-                for k in 0..<cf {
-                    let progress = cf == 1 ? 1.0 : Double(k) / Double(cf - 1)
-                    let (gOut, gIn) = Self.equalPowerGains(progress: progress)
-                    let outIdx = written - cf + k
-                    for ch in 0..<channelCount {
-                        let blended = out[ch][outIdx] * Float(gOut) + source[ch][starts[i] + k] * Float(gIn)
-                        out[ch][outIdx] = blended
-                    }
-                }
-            }
-            if starts[i] + cf < ends[i] { append((starts[i] + cf)..<ends[i]) }
-            // Interval i's NEW frames occupy trimmed [written, written + newFrames); their source
-            // is [starts[i]+cf, ends[i]). The cf head is the blend, attributed to the seam.
-            let newFrames = max(0, inLen - cf)
-            if newFrames > 0 {
-                segments.append(RenderSegment(sourceStart: starts[i] + cf, sourceEnd: ends[i],
-                                              trimmedStart: written, trimmedEnd: written + newFrames))
-            }
+            let cf = min(crossfadeFrames, inLen, prevIntervalLen, outFrames)
+            outFrames += max(0, inLen - cf)
             prevIntervalLen = inLen
         }
 
-        let outFrames = out[0].count
         guard outFrames > 0,
               let result = AVAudioPCMBuffer(pcmFormat: buffer.format,
                                             frameCapacity: AVAudioFrameCount(outFrames)),
@@ -185,11 +164,44 @@ public struct TrimRenderer {
             throw AudioIOError.allocationFailed
         }
         result.frameLength = AVAudioFrameCount(outFrames)
+
+        var segments: [RenderSegment] = []
+        let firstLen = ends[0] - starts[0]
         for ch in 0..<channelCount {
-            out[ch].withUnsafeBufferPointer { src in
-                dest[ch].update(from: src.baseAddress!, count: outFrames)
-            }
+            dest[ch].update(from: source[ch].advanced(by: starts[0]), count: firstLen)
         }
+        segments.append(RenderSegment(sourceStart: starts[0], sourceEnd: ends[0],
+                                      trimmedStart: 0, trimmedEnd: firstLen))
+        var writePos = firstLen
+        prevIntervalLen = firstLen
+
+        for i in 1..<starts.count {
+            let inLen = ends[i] - starts[i]
+            let cf = min(crossfadeFrames, inLen, prevIntervalLen, writePos)
+            if cf > 0 {
+                let lut = gainLUTs[cf - 1]
+                for k in 0..<cf {
+                    let (gOut, gIn) = lut[k]
+                    let outIdx = writePos - cf + k
+                    for ch in 0..<channelCount {
+                        dest[ch][outIdx] = dest[ch][outIdx] * gOut + source[ch][starts[i] + k] * gIn
+                    }
+                }
+            }
+            let remainderStart = starts[i] + cf
+            let remainderLen = ends[i] - remainderStart
+            if remainderLen > 0 {
+                for ch in 0..<channelCount {
+                    dest[ch].advanced(by: writePos).update(from: source[ch].advanced(by: remainderStart),
+                                                           count: remainderLen)
+                }
+                segments.append(RenderSegment(sourceStart: remainderStart, sourceEnd: ends[i],
+                                              trimmedStart: writePos, trimmedEnd: writePos + remainderLen))
+                writePos += remainderLen
+            }
+            prevIntervalLen = inLen
+        }
+
         return RenderOutput(buffer: result, segments: segments)
     }
 

@@ -142,19 +142,7 @@ actor SmbLibrarySource: LibrarySource {
             try await downloadFolder(client: client, smbPath: smbPath, to: destination)
             return
         }
-        let data: Data
-        do {
-            data = try await client.contents(atPath: smbPath)
-        } catch {
-            throw Self.mapError(error, context: "Download “\(smbPath)”")
-        }
-        try FileManager.default.createDirectory(
-            at: destination.deletingLastPathComponent(),
-            withIntermediateDirectories: true)
-        if FileManager.default.fileExists(atPath: destination.path) {
-            try FileManager.default.removeItem(at: destination)
-        }
-        try data.write(to: destination, options: .atomic)
+        try await streamDownload(client: client, smbPath: smbPath, to: destination)
     }
 
     /// Small-file write for progress / stats JSON under the share (e.g. `rhapsode-sync/…`).
@@ -566,9 +554,29 @@ actor SmbLibrarySource: LibrarySource {
             if isDirectory {
                 try await downloadFolder(client: client, smbPath: childSmb, to: dest)
             } else {
-                let data = try await client.contents(atPath: childSmb)
-                try data.write(to: dest, options: .atomic)
+                try await streamDownload(client: client, smbPath: childSmb, to: dest)
             }
+        }
+    }
+
+    /// Stream a remote SMB file to a local URL (AMSMB2 writes incrementally; no full-file `Data`).
+    private func streamDownload(
+        client: SMB2Manager,
+        smbPath: String,
+        to destination: URL,
+        progress: SMB2Manager.ReadProgressHandler = nil
+    ) async throws {
+        try FileManager.default.createDirectory(
+            at: destination.deletingLastPathComponent(),
+            withIntermediateDirectories: true)
+        if FileManager.default.fileExists(atPath: destination.path) {
+            try FileManager.default.removeItem(at: destination)
+        }
+        do {
+            try await client.downloadItem(atPath: smbPath, to: destination, progress: progress)
+        } catch {
+            try? FileManager.default.removeItem(at: destination)
+            throw Self.mapError(error, context: "Download “\(smbPath)”")
         }
     }
 

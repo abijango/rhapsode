@@ -3,6 +3,7 @@ import SwiftUI
 
 @main
 struct RhapsodeApp: App {
+    private static let didResetStoreKey = "didResetStore"
     /// Wires up the minimal `UIApplicationDelegate` needed for background URLSession
     /// completion events (`handleEventsForBackgroundURLSession`).
     @UIApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
@@ -34,7 +35,14 @@ struct RhapsodeApp: App {
             // and stats re-pull from /.rhapsode-sync + UserDefaults). If it can't open — e.g. an
             // incompatible schema — delete and recreate rather than crashing on launch. This IS a
             // local data reset, so make it loud: a clean rename migration should never reach here.
-            NSLog("⚠️ Rhapsode: ModelContainer failed to open — RECREATING STORE (local library/progress reset). Error: %@", String(describing: error))
+            // Only attempt one automatic wipe per install; back up the store files first.
+            let defaults = UserDefaults.standard
+            if defaults.bool(forKey: Self.didResetStoreKey) {
+                fatalError("ModelContainer failed to open after a prior store reset: \(error)")
+            }
+            NSLog("⚠️ Rhapsode: ModelContainer failed to open — backing up store and RECREATING (local library/progress reset). Error: %@", String(describing: error))
+            Self.backupStoreFiles(at: config.url)
+            defaults.set(true, forKey: Self.didResetStoreKey)
             for suffix in ["", "-wal", "-shm"] {
                 try? FileManager.default.removeItem(at: URL(fileURLWithPath: config.url.path + suffix))
             }
@@ -45,42 +53,17 @@ struct RhapsodeApp: App {
             }
         }
         modelContainer = container
-        // Backend preference is read at launch (change in Settings, then relaunch):
-        // SMB NAS > rhapsode-server (parked) > Dropbox.
-        let syncManager: SyncManager
-        if SmbConfig.shouldUseSmb {
-            let smb = SmbLibrarySource()
-            // Cross-device resume: same PlaybackProgress JSON as Dropbox, under
-            // the share’s `rhapsode-sync/` (or profile syncPath).
-            syncManager = SyncManager(
-                source: smb,
-                context: container.mainContext,
-                progress: SmbProgressSync(source: smb))
-        } else if RhapsodeServerConfig.shouldUseServer {
-            let client = RhapsodeServerClient()
-            let server = RhapsodeServerSource(client: client)
-            syncManager = SyncManager(
-                source: server,
-                context: container.mainContext,
-                progress: RhapsodeServerProgressSync(client: client))
-        } else {
-            // Share one DropboxSource between library + progress so token refresh
-            // stays serialized through a single actor.
-            let dropbox = DropboxSource()
-            syncManager = SyncManager(
-                source: dropbox,
-                context: container.mainContext,
-                progress: DropboxProgressSync(source: dropbox))
-        }
+        let syncManager = Self.makeSyncManager(container: container)
         _sync = State(initialValue: syncManager)
         // Register the background-refresh handler before launch completes.
-        BackgroundRefresh.register(container: container)
+        BackgroundRefresh.register(container: container, makeSyncManager: Self.makeSyncManager)
         // Wire the container into BackgroundDownloader so its delegate callbacks
         // can reach SwiftData. Must happen before any background tasks fire.
         BackgroundDownloader.shared.container = container
         // When a freshly downloaded book finishes importing, re-pull cross-device
         // progress so a position pushed by another device applies right away.
         BackgroundDownloader.shared.onImportFinished = { [syncManager] in
+            syncManager.invalidateOnDeviceCatalogCache()
             Task { await syncManager.pullAndMergeProgress() }
         }
         // WP-B: continuous push — when the app-lifetime player reports a position change
@@ -164,6 +147,51 @@ struct RhapsodeApp: App {
             }
         }
 #endif
+    }
+
+    /// Copy the SwiftData store (and WAL/SHM sidecars) to Application Support before a recovery wipe.
+    private static func backupStoreFiles(at storeURL: URL) {
+        let stamp = ISO8601DateFormatter().string(from: Date())
+            .replacingOccurrences(of: ":", with: "-")
+        guard let appSupport = try? FileManager.default.url(
+            for: .applicationSupportDirectory, in: .userDomainMask,
+            appropriateFor: nil, create: true) else { return }
+        let backupDir = appSupport.appendingPathComponent("StoreBackup-\(stamp)", isDirectory: true)
+        try? FileManager.default.createDirectory(at: backupDir, withIntermediateDirectories: true)
+        for suffix in ["", "-wal", "-shm"] {
+            let src = URL(fileURLWithPath: storeURL.path + suffix)
+            guard FileManager.default.fileExists(atPath: src.path) else { continue }
+            let dst = backupDir.appendingPathComponent(storeURL.lastPathComponent + suffix + ".bak")
+            try? FileManager.default.copyItem(at: src, to: dst)
+        }
+        NSLog("⚠️ Rhapsode: SwiftData store backed up to %@", backupDir.path)
+    }
+
+    /// Shared backend wiring for foreground `SyncManager` and `BackgroundRefresh`.
+    @MainActor
+    static func makeSyncManager(container: ModelContainer) -> SyncManager {
+        // Backend preference is read at launch (change in Settings, then relaunch):
+        // SMB NAS > rhapsode-server (parked) > Dropbox.
+        if SmbConfig.shouldUseSmb {
+            let smb = SmbLibrarySource()
+            return SyncManager(
+                source: smb,
+                context: container.mainContext,
+                progress: SmbProgressSync(source: smb))
+        }
+        if RhapsodeServerConfig.shouldUseServer {
+            let client = RhapsodeServerClient()
+            let server = RhapsodeServerSource(client: client)
+            return SyncManager(
+                source: server,
+                context: container.mainContext,
+                progress: RhapsodeServerProgressSync(client: client))
+        }
+        let dropbox = DropboxSource()
+        return SyncManager(
+            source: dropbox,
+            context: container.mainContext,
+            progress: DropboxProgressSync(source: dropbox))
     }
 
     #if DEBUG

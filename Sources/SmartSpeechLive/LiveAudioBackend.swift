@@ -22,7 +22,14 @@ final class LiveAudioBackend {
     var onReachedEnd: (@MainActor () -> Void)?
 
     private(set) var isPlaying = false
-    var rate: Float = 1.0 { didSet { timePitch.rate = max(0.5, min(rate, 3.0)) } }
+    var rate: Float = 1.0 {
+        didSet {
+            let r = max(0.5, min(rate, 3.0))
+            timePitch.rate = r
+            timePitch.bypass = (r == 1.0)
+            producer?.setPlaybackRate(r)
+        }
+    }
 
     private let engine = AVAudioEngine()
     private let playerNode = AVAudioPlayerNode()
@@ -35,8 +42,11 @@ final class LiveAudioBackend {
     private var sessionSourceStart: TimeInterval = 0
     private var sourceDuration: TimeInterval = 0
     private var globalFloorDb: Double?
+    private var prescanRegions: [SilenceRegion]?
+    private var globalSpeechDb: Double?
     private var reachedEndFired = false
     private var displayTask: Task<Void, Never>?
+    private var configObserver: NSObjectProtocol?
 
     // MARK: Load
 
@@ -45,22 +55,31 @@ final class LiveAudioBackend {
     func load(url: URL, sourceDuration: TimeInterval, cutPoints: [TimeInterval],
               startSource: TimeInterval, trimEnabled: Bool, preset: SmartSpeechSettings.Preset,
               globalFloorDb: Double?) {
+        installConfigObserverIfNeeded()
         producer?.shutdown()
         producer = nil
         guard let file = try? AVAudioFile(forReading: url) else { onReachedEnd?(); return }
         let format = file.processingFormat
 
-        // (Re)wire the graph for this file's format. Stop the engine first so connect() can't race
-        // buffer scheduling (see LiveTrimProducer header — all node mutation is otherwise serialized).
-        if engine.isRunning { engine.stop() }
-        if !attached { engine.attach(playerNode); engine.attach(timePitch); attached = true }
-        if connectedFormat == nil || connectedFormat?.sampleRate != format.sampleRate
-            || connectedFormat?.channelCount != format.channelCount {
+        let needsReconnect = connectedFormat == nil
+            || connectedFormat?.sampleRate != format.sampleRate
+            || connectedFormat?.channelCount != format.channelCount
+
+        if !attached {
+            engine.attach(playerNode)
+            engine.attach(timePitch)
+            attached = true
+        }
+        if needsReconnect {
+            if engine.isRunning { engine.stop() }
             engine.connect(playerNode, to: timePitch, format: format)
             engine.connect(timePitch, to: engine.mainMixerNode, format: format)
             connectedFormat = format
         }
-        timePitch.rate = max(0.5, min(rate, 3.0))
+
+        let r = max(0.5, min(rate, 3.0))
+        timePitch.rate = r
+        timePitch.bypass = (r == 1.0)
         engine.prepare()
 
         self.trimEnabled = trimEnabled
@@ -72,10 +91,32 @@ final class LiveAudioBackend {
         let p = LiveTrimProducer(url: url, cutPoints: cutPoints, sourceDuration: sourceDuration,
                                  sampleRate: format.sampleRate, playerNode: playerNode,
                                  settings: LiveSmartSpeechTuning.settings(preset: preset),
-                                 trimEnabled: trimEnabled)
+                                 trimEnabled: trimEnabled,
+                                 precomputedRegions: prescanRegions,
+                                 globalSpeechDb: globalSpeechDb)
         if let gf = globalFloorDb { p.setGlobalFloor(gf) }
+        if let regions = prescanRegions {
+            p.setRegions(regions, floor: globalFloorDb, speech: globalSpeechDb)
+        }
+        p.setPlaybackRate(r)
         producer = p
         p.beginSession(fromSource: sessionSourceStart, resumePlaying: false)
+    }
+
+    /// Apply a completed pre-scan: floor, speech level, and silence regions for the active tier.
+    func applyPrescan(_ result: LiveSilencePrescanResult) {
+        globalFloorDb = result.globalFloorDb
+        globalSpeechDb = result.globalSpeechDb
+        prescanRegions = result.regions
+        producer?.setRegions(result.regions, floor: result.globalFloorDb, speech: result.globalSpeechDb)
+    }
+
+    /// Supply pre-scanned regions without a full prescan result (e.g. when only floor was known first).
+    func setRegions(_ regions: [SilenceRegion], floor: Double?, speech: Double?) {
+        if let f = floor { globalFloorDb = f }
+        if let s = speech { globalSpeechDb = s }
+        prescanRegions = regions
+        producer?.setRegions(regions, floor: floor, speech: speech)
     }
 
     // MARK: Transport
@@ -128,13 +169,10 @@ final class LiveAudioBackend {
     /// Absolute source-domain position within the current file.
     var currentSource: TimeInterval {
         let out = currentOutput
-        // Live map is only valid once at least one chunk has rendered; before that (e.g. just
-        // loaded/seeked and still paused) it has no points and `toSource` would return 0, hiding the
-        // resume position. Fall back to the session start + output until the map is populated.
         if trimEnabled, let snap = producer?.snapshot(), !snap.map.points.isEmpty {
-            return min(max(0, snap.map.toSource(out)), sourceDuration)   // live map: absolute source
+            return min(max(0, snap.map.toSource(out)), sourceDuration)
         }
-        return min(sessionSourceStart + out, sourceDuration)             // source == file (or map empty)
+        return min(sessionSourceStart + out, sourceDuration)
     }
 
     /// Seconds of output audio buffered ahead of the playhead (diagnostics).
@@ -144,6 +182,39 @@ final class LiveAudioBackend {
     }
 
     // MARK: Internals
+
+    private func installConfigObserverIfNeeded() {
+        guard configObserver == nil else { return }
+        configObserver = NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange,
+            object: engine,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.handleEngineConfigurationChange() }
+        }
+    }
+
+    private func handleEngineConfigurationChange() {
+        guard producer != nil, let format = connectedFormat, attached else { return }
+        let wasPlaying = isPlaying
+        let src = currentSource
+
+        if engine.isRunning { engine.stop() }
+        engine.disconnectNodeOutput(playerNode)
+        engine.disconnectNodeOutput(timePitch)
+        engine.connect(playerNode, to: timePitch, format: format)
+        engine.connect(timePitch, to: engine.mainMixerNode, format: format)
+        engine.prepare()
+
+        if wasPlaying {
+            try? engine.start()
+            producer?.beginSession(fromSource: src, resumePlaying: true)
+            isPlaying = true
+            startDisplayLoop()
+        } else {
+            producer?.beginSession(fromSource: src, resumePlaying: false)
+        }
+    }
 
     private func startDisplayLoop() {
         displayTask?.cancel()

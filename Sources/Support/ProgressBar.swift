@@ -11,6 +11,8 @@ struct LinearProgressBar: View {
     var height: CGFloat = 6
     var fill: Color = DS.Palette.accent
     var track: Color = Color(.tertiarySystemFill)
+    /// When `false`, the fill width updates without animation (library shelves).
+    var animated: Bool = true
 
     private var clamped: CGFloat {
         guard fraction.isFinite else { return 0 }
@@ -21,10 +23,18 @@ struct LinearProgressBar: View {
         GeometryReader { geo in
             ZStack(alignment: .leading) {
                 Capsule().fill(track)
-                Capsule()
-                    .fill(fill)
-                    .frame(width: clamped * geo.size.width)
-                    .animation(.easeInOut(duration: 0.25), value: clamped)
+                Group {
+                    if animated {
+                        Capsule()
+                            .fill(fill)
+                            .frame(width: clamped * geo.size.width)
+                            .animation(.easeInOut(duration: 0.25), value: clamped)
+                    } else {
+                        Capsule()
+                            .fill(fill)
+                            .frame(width: clamped * geo.size.width)
+                    }
+                }
             }
         }
         .frame(height: height)

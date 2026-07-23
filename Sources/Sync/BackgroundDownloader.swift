@@ -43,6 +43,14 @@ final class BackgroundDownloader: NSObject {
     /// than only on the next foreground). Optional — unset in tests.
     var onImportFinished: (@MainActor () -> Void)?
 
+    /// Fast lookup from `DownloadItem.id` → SwiftData persistent ID. Populated on
+    /// enqueue and rebuilt on launch for in-flight rows; avoids a full-table fetch on
+    /// every `URLSession` progress callback.
+    private var downloadItemIDs: [UUID: PersistentIdentifier] = [:]
+    /// Throttle UI progress updates (bytesReceived) to ~350ms per item.
+    private var lastProgressUpdate: [UUID: Date] = [:]
+    private static let progressUpdateInterval: TimeInterval = 0.35
+
     // MARK: Session (created lazily, once)
 
     private lazy var session: URLSession = {
@@ -53,6 +61,27 @@ final class BackgroundDownloader: NSObject {
         config.httpMaximumConnectionsPerHost = 4
         return URLSession(configuration: config, delegate: self, delegateQueue: nil)
     }()
+
+    // MARK: Item lookup
+
+    /// Register a newly enqueued item so delegate callbacks can resolve it without scanning the store.
+    func registerDownloadItem(_ item: DownloadItem) {
+        downloadItemIDs[item.id] = item.persistentModelID
+    }
+
+    private func unregisterDownloadItem(id: UUID) {
+        downloadItemIDs.removeValue(forKey: id)
+        lastProgressUpdate.removeValue(forKey: id)
+    }
+
+    /// Reattach in-flight rows after relaunch (map is empty until enqueue / reconcile).
+    private func rebuildDownloadItemMap(ctx: ModelContext) {
+        let active = (try? ctx.fetch(FetchDescriptor<DownloadItem>()))?
+            .filter { $0.state == .pending || $0.state == .downloading } ?? []
+        for item in active {
+            downloadItemIDs[item.id] = item.persistentModelID
+        }
+    }
 
     // MARK: Enqueue
 
@@ -94,6 +123,7 @@ final class BackgroundDownloader: NSObject {
             )
             Task { @MainActor in
                 let ctx = container.mainContext
+                self.rebuildDownloadItemMap(ctx: ctx)
                 // Fetch all items and filter in-memory; #Predicate cannot compare enum cases.
                 let all = (try? ctx.fetch(FetchDescriptor<DownloadItem>())) ?? []
                 let downloading = all.filter { $0.state == .downloading }
@@ -177,6 +207,7 @@ final class BackgroundDownloader: NSObject {
             ctx.delete(item)
             try? ctx.save()
         }
+        unregisterDownloadItem(id: id)
     }
 
     @MainActor
@@ -317,6 +348,12 @@ extension BackgroundDownloader: URLSessionDownloadDelegate {
 
         Task { @MainActor in
             guard let ctx = self.container?.mainContext else { return }
+            let now = Date()
+            if let last = self.lastProgressUpdate[payload.itemID],
+               now.timeIntervalSince(last) < Self.progressUpdateInterval {
+                return
+            }
+            self.lastProgressUpdate[payload.itemID] = now
             if let item = self.findItem(id: payload.itemID, ctx: ctx) {
                 item.bytesReceived = totalBytesWritten
                 if totalBytesExpectedToWrite > 0 {
@@ -355,7 +392,22 @@ extension BackgroundDownloader: URLSessionDownloadDelegate {
 
     @MainActor
     private func findItem(id: UUID, ctx: ModelContext) -> DownloadItem? {
-        (try? ctx.fetch(FetchDescriptor<DownloadItem>()))?.first { $0.id == id }
+        if let pid = downloadItemIDs[id] {
+            if let item = ctx.model(for: pid) as? DownloadItem {
+                return item
+            }
+            downloadItemIDs.removeValue(forKey: id)
+        }
+        let targetID = id
+        var descriptor = FetchDescriptor<DownloadItem>(
+            predicate: #Predicate<DownloadItem> { $0.id == targetID }
+        )
+        descriptor.fetchLimit = 1
+        if let item = try? ctx.fetch(descriptor).first {
+            downloadItemIDs[id] = item.persistentModelID
+            return item
+        }
+        return nil
     }
 }
 

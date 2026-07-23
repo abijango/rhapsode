@@ -42,6 +42,8 @@ let lastSettings = {
   faces: [],
 }
 let turnBusy = false
+let injectedFacesCSS = ''
+let injectedFacesKey = ''
 
 const flattenTOC = (items, depth = 0, out = []) => {
   if (!items) return out
@@ -130,19 +132,17 @@ const paintHost = (theme) => {
   if (root) root.style.background = t.bg
 }
 
-const themeCSS = (settings) => {
+const themeBodyCSS = (settings) => {
   const theme = settings.theme || 'light'
   const fontSize = settings.fontSize ?? 1
   const t = themeColors(theme)
   const sizePct = Math.round(fontSize * 100)
   const family = resolveCssStack(settings)
   const familyRule = family ? `font-family: ${family} !important;` : ''
-  const faces = settings.faces || []
 
   // Force both html and body so getBackground() and publisher CSS can't leave
   // a white page on a dark shell (the "half dark / half light" bug).
   return `
-    ${fontFaceCSSFromFaces(faces)}
     @namespace epub "http://www.idpf.org/2007/ops";
     html {
       color-scheme: ${theme === 'dark' ? 'dark' : 'light'};
@@ -202,8 +202,10 @@ const onRelocate = (event) => {
   relocateRaf = requestAnimationFrame(commitRelocate)
 }
 
-const onSectionLoad = () => {
+const onSectionLoad = (event) => {
   applyStyles(lastSettings)
+  const doc = event?.detail?.doc
+  if (doc) wireTapZones(doc)
 }
 
 const ensureView = () => {
@@ -214,6 +216,38 @@ const ensureView = () => {
   root.append(view)
   view.addEventListener('relocate', onRelocate)
   return view
+}
+
+const wireTapZones = (doc) => {
+  if (!doc?.documentElement || doc.documentElement.dataset.rhapsodeTaps) return
+  doc.documentElement.dataset.rhapsodeTaps = '1'
+
+  doc.addEventListener(
+    'click',
+    (e) => {
+      if (e.defaultPrevented) return
+      if (e.target.closest('a[href]')) return
+
+      const x = e.clientX
+      const w = doc.documentElement.clientWidth || window.innerWidth
+      const edge = Math.max(64, w * 0.22)
+      const gutter = 18
+
+      if (x < gutter) return
+      if (x < gutter + edge) {
+        e.preventDefault()
+        safeTurn(() => view.prev())
+        return
+      }
+      if (x > w - edge) {
+        e.preventDefault()
+        safeTurn(() => view.next())
+        return
+      }
+      post('chromeToggle')
+    },
+    false,
+  )
 }
 
 const wireRenderer = (v) => {
@@ -232,9 +266,17 @@ const applyStyles = (settings = {}) => {
   }
   const theme = lastSettings.theme
   paintHost(theme)
+  const faces = lastSettings.faces || []
+  const facesKey = JSON.stringify(faces)
+  if (facesKey !== injectedFacesKey) {
+    injectedFacesCSS = fontFaceCSSFromFaces(faces)
+    injectedFacesKey = facesKey
+  }
+
   const v = view
   if (!v?.renderer?.setStyles) return
-  v.renderer.setStyles(themeCSS(lastSettings))
+  // beforeStyle = @font-face (stable); style = theme (per section).
+  v.renderer.setStyles([injectedFacesCSS, themeBodyCSS(lastSettings)])
   // Re-sync paginator backdrop after styles land (also done inside setStyles rAF).
   requestAnimationFrame(() => {
     try {
@@ -261,6 +303,7 @@ const applyLayout = (v) => {
   v.renderer.setAttribute('margin', '11px')
   // Sides: another ~10% tighter (7% → 6.3%).
   v.renderer.setAttribute('gap', '6.3%')
+  v.renderer.setAttribute('data-rhapsode-fast-turn', '')
 }
 
 const safeTurn = (fn) => {
@@ -330,6 +373,9 @@ window.__rhapsode = {
 
       applyStyles(options.settings || lastSettings)
 
+      const contents = v.renderer.getContents?.()
+      if (contents?.[0]?.doc) wireTapZones(contents[0].doc)
+
       const toc = flattenTOC(v.book?.toc || v.book?.nav?.toc || [])
       setStatus(null)
       post('opened', {
@@ -388,6 +434,8 @@ window.__rhapsode = {
       /* ignore */
     }
     view = null
+    injectedFacesCSS = ''
+    injectedFacesKey = ''
     const root = document.getElementById('root')
     if (root) root.replaceChildren()
     setStatus('Loading…')

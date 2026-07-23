@@ -14,6 +14,7 @@ struct NerdStatsView: View {
     @Query(sort: \Book.title) private var ebooks: [Book]
     @Environment(\.modelContext) private var modelContext
     @Environment(SyncManager.self) private var sync
+    @Environment(\.scenePhase) private var scenePhase
 
     @State private var totalPlayed: TimeInterval = 0
     @State private var totalSaved: TimeInterval = 0
@@ -85,7 +86,8 @@ struct NerdStatsView: View {
             .alert("Stats", isPresented: Binding(get: { noticeText != nil }, set: { if !$0 { noticeText = nil } })) {
                 Button("OK", role: .cancel) {}
             } message: { Text(noticeText ?? "") }
-            .task {
+            .task(id: scenePhase) {
+                guard scenePhase == .active else { return }
                 while !Task.isCancelled {
                     totalPlayed = SmartSpeechStats.totalPlayedSeconds
                     totalSaved = SmartSpeechStats.totalSavedSeconds
@@ -124,7 +126,7 @@ struct NerdStatsView: View {
     // MARK: Content
 
     private var content: some View {
-        VStack(alignment: .leading, spacing: 0) {
+        LazyVStack(alignment: .leading, spacing: 0) {
             if hasAudiobookStats {
                 audiobookHero
                 Text("AUDIOBOOKS · SMARTSPEECH")
@@ -216,7 +218,7 @@ struct NerdStatsView: View {
         let saved = book.smartSpeechSavedSeconds ?? 0
         let pct = played > 0 ? Int((saved / played * 100).rounded()) : 0
         return HStack(alignment: .center, spacing: 13) {
-            audiobookCoverThumb(book)
+            NerdStatsCoverThumb(coverPath: book.coverPath, placeholderIcon: "headphones")
             VStack(alignment: .leading, spacing: 8) {
                 Text(shortTitle(book.title))
                     .font(BrandFont.display(16, .bold))
@@ -247,7 +249,7 @@ struct NerdStatsView: View {
         let progress = book.fractionComplete
         let pct = Int((progress * 100).rounded())
         return HStack(alignment: .center, spacing: 13) {
-            ebookCoverThumb(book)
+            NerdStatsCoverThumb(coverPath: book.coverPath, placeholderIcon: "book.closed")
             VStack(alignment: .leading, spacing: 8) {
                 Text(shortTitle(book.title))
                     .font(BrandFont.display(16, .bold))
@@ -274,39 +276,7 @@ struct NerdStatsView: View {
     }
 
     private func miniBar(fraction: Double, fill: Color) -> some View {
-        LinearProgressBar(fraction: fraction, height: 6, fill: fill, track: DS.Palette.Reclaim.track)
-    }
-
-    @ViewBuilder
-    private func audiobookCoverThumb(_ book: Audiobook) -> some View {
-        let shape = RoundedRectangle(cornerRadius: 9, style: .continuous)
-        if let rel = book.coverPath,
-           let url = try? ContainerPaths.url(forRelativePath: rel),
-           let image = UIImage(contentsOfFile: url.path) {
-            Image(uiImage: image).resizable().scaledToFill()
-                .frame(width: 44, height: 44).clipShape(shape)
-        } else {
-            shape.fill(DS.Palette.Reclaim.surface)
-                .frame(width: 44, height: 44)
-                .overlay(Image(systemName: "headphones")
-                    .font(.system(size: 16)).foregroundStyle(DS.Palette.Reclaim.muted))
-        }
-    }
-
-    @ViewBuilder
-    private func ebookCoverThumb(_ book: Book) -> some View {
-        let shape = RoundedRectangle(cornerRadius: 9, style: .continuous)
-        if let rel = book.coverPath,
-           let url = try? ContainerPaths.url(forRelativePath: rel),
-           let image = UIImage(contentsOfFile: url.path) {
-            Image(uiImage: image).resizable().scaledToFill()
-                .frame(width: 44, height: 44).clipShape(shape)
-        } else {
-            shape.fill(DS.Palette.Reclaim.surface)
-                .frame(width: 44, height: 44)
-                .overlay(Image(systemName: "book.closed")
-                    .font(.system(size: 16)).foregroundStyle(DS.Palette.Reclaim.muted))
-        }
+        LinearProgressBar(fraction: fraction, height: 6, fill: fill, track: DS.Palette.Reclaim.track, animated: false)
     }
 
     private var empty: some View {
@@ -362,5 +332,37 @@ struct NerdStatsView: View {
     private func shortTitle(_ title: String) -> String {
         if let range = title.range(of: " (") { return String(title[..<range.lowerBound]) }
         return title
+    }
+}
+
+private struct NerdStatsCoverThumb: View {
+    let coverPath: String?
+    let placeholderIcon: String
+    @State private var image: UIImage?
+
+    private var shape: RoundedRectangle {
+        RoundedRectangle(cornerRadius: 9, style: .continuous)
+    }
+
+    var body: some View {
+        Group {
+            if let image {
+                Image(uiImage: image).resizable().scaledToFill()
+            } else {
+                shape.fill(DS.Palette.Reclaim.surface)
+                    .overlay(Image(systemName: placeholderIcon)
+                        .font(.system(size: 16)).foregroundStyle(DS.Palette.Reclaim.muted))
+            }
+        }
+        .frame(width: 44, height: 44)
+        .clipShape(shape)
+        .task(id: coverPath) {
+            image = nil
+            guard let coverPath else { return }
+            image = await CoverImageLoader.Cache.shared.load(
+                relativePath: coverPath,
+                maxPixelSize: 44 * 3
+            )?.image
+        }
     }
 }

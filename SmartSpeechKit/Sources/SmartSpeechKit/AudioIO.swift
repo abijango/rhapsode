@@ -1,3 +1,4 @@
+import Accelerate
 import AVFoundation
 import Foundation
 
@@ -66,19 +67,40 @@ public enum AudioIO {
 
     /// Average all channels into a single `[Float]` for analysis.
     public static func downmixToMono(_ buffer: AVAudioPCMBuffer) -> [Float] {
-        let frames = Int(buffer.frameLength)
-        guard frames > 0, let channels = buffer.floatChannelData else { return [] }
-        let channelCount = Int(buffer.format.channelCount)
-        if channelCount == 1 {
-            return Array(UnsafeBufferPointer(start: channels[0], count: frames))
-        }
-        var mono = [Float](repeating: 0, count: frames)
-        let scale = 1.0 / Float(channelCount)
-        for ch in 0..<channelCount {
-            let p = channels[ch]
-            for i in 0..<frames { mono[i] += p[i] * scale }
-        }
+        var mono: [Float] = []
+        downmixToMono(into: &mono, from: buffer)
         return mono
+    }
+
+    /// Downmix into `mono`, reusing its storage when `mono.count == frameLength`. When the
+    /// source is already mono, copies channel 0 directly (no extra `[Float]` allocation).
+    public static func downmixToMono(into mono: inout [Float], from buffer: AVAudioPCMBuffer) {
+        let frames = Int(buffer.frameLength)
+        guard frames > 0, let channels = buffer.floatChannelData else {
+            mono.removeAll(keepingCapacity: false)
+            return
+        }
+        let channelCount = Int(buffer.format.channelCount)
+        if mono.count != frames {
+            mono = [Float](repeating: 0, count: frames)
+        } else {
+            vDSP_vclr(&mono, 1, vDSP_Length(frames))
+        }
+        if channelCount == 1 {
+            mono.withUnsafeMutableBufferPointer { dst in
+                guard let dstBase = dst.baseAddress else { return }
+                memcpy(dstBase, channels[0], frames * MemoryLayout<Float>.size)
+            }
+            return
+        }
+        var scale = 1.0 / Float(channelCount)
+        mono.withUnsafeMutableBufferPointer { dst in
+            guard let dstBase = dst.baseAddress else { return }
+            vDSP_vsmul(channels[0], 1, &scale, dstBase, 1, vDSP_Length(frames))
+            for ch in 1..<channelCount {
+                vDSP_vsma(channels[ch], 1, &scale, dstBase, 1, dstBase, 1, vDSP_Length(frames))
+            }
+        }
     }
 
     /// Write a buffer to a 16-bit PCM WAV (broadly playable; AVAudioFile converts

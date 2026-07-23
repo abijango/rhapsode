@@ -8,6 +8,11 @@ import Foundation
 ///   • The media root is excluded from iCloud/iTunes backup so downloaded books
 ///     don't bloat the user's backup (they can always be re-downloaded).
 ///   • Models persist **relative** paths only; nothing else resolves rel→abs.
+enum ContainerPathsError: Error {
+    case invalidRelativePath
+    case pathEscapesMediaRoot
+}
+
 enum ContainerPaths {
     /// Subdirectory under Application Support that holds all downloaded media.
     private static let mediaDirName = "Media"
@@ -35,7 +40,17 @@ enum ContainerPaths {
 
     /// Resolve a stored relative path to an absolute URL within the media root.
     static func url(forRelativePath relativePath: String) throws -> URL {
-        try mediaRoot().appendingPathComponent(relativePath)
+        guard !relativePath.isEmpty,
+              !relativePath.hasPrefix("/"),
+              !relativePath.contains("..") else {
+            throw ContainerPathsError.invalidRelativePath
+        }
+        let root = try mediaRoot()
+        let resolved = root.appendingPathComponent(relativePath).standardizedFileURL
+        guard try Self.relativePath(for: resolved) != nil else {
+            throw ContainerPathsError.pathEscapesMediaRoot
+        }
+        return resolved
     }
 
     /// Convert an absolute URL back to a media-root-relative path for storage.

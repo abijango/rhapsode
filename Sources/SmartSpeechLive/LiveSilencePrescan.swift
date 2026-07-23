@@ -45,6 +45,9 @@ struct LiveSilencePrescanResult: Sendable {
     /// into per-chunk detection so the threshold is stable across chunk boundaries (Fix A).
     let globalFloorDb: Double
     let globalSpeechDb: Double
+    /// Silence regions for the active preset in absolute source time. Merged across decode-window seams
+    /// so the live producer can skip per-chunk RMS when this list is supplied.
+    let regions: [SilenceRegion]
 
     var projectedSavedPercent: Double {
         sourceDuration > 0 ? projectedSavedSeconds / sourceDuration : 0
@@ -70,16 +73,18 @@ enum LiveSilencePrescan {
         let sourceDuration = Double(probe.length) / sampleRate
         guard probe.length > 0 else {
             return .init(sourceDuration: 0, projectedSavedSeconds: 0, regionCount: 0,
-                         projectedSavedByTier: [:], globalFloorDb: -160, globalSpeechDb: -160)
+                         projectedSavedByTier: [:], globalFloorDb: -160, globalSpeechDb: -160,
+                         regions: [])
         }
 
         let windows = SmartSpeechRenderUtil.chunkWindows(cutPoints: cutPoints, totalDuration: sourceDuration,
                                                    maxChunkSeconds: maxChunkSeconds)
 
-        // Pass 1: accumulate a whole-file loudness histogram → global adaptive floor/speech (Fix A).
-        // A single global floor keeps the live producer's per-chunk detection stable, unlike the
-        // jittery per-12s-chunk percentiles.
+        // Single decode pass: accumulate a whole-file loudness histogram and retain each window's
+        // tier-independent profile so tier projections and region lists reuse the same RMS work.
         var hist = LoudnessHistogram()
+        var windowProfiles: [(start: TimeInterval, profile: LoudnessProfile)] = []
+        windowProfiles.reserveCapacity(windows.count)
         for w in windows {
             try autoreleasepool {
                 let buffer = try AudioIO.decode(url, startSeconds: w.start, durationSeconds: w.end - w.start,
@@ -87,38 +92,56 @@ enum LiveSilencePrescan {
                 let mono = AudioIO.downmixToMono(buffer)
                 let profile = SilenceAnalyzer.profile(monoSamples: mono, sampleRate: sampleRate)
                 for db in profile.dbs { hist.add(db) }
+                windowProfiles.append((w.start, profile))
             }
         }
         let globalFloorDb = hist.percentile(0.10)
         let globalSpeechDb = hist.percentile(0.90)
 
-        // Pass 2: per-tier projection using the GLOBAL floor, so the projected number matches what
-        // playback actually trims (the producer detects with the same global floor).
-        var regionCount = 0
         var projectedSavedByTier: [String: TimeInterval] = [:]
-        for w in windows {
-            try autoreleasepool {
-                let buffer = try AudioIO.decode(url, startSeconds: w.start, durationSeconds: w.end - w.start,
-                                                maxSeconds: maxChunkSeconds + 5)
-                let mono = AudioIO.downmixToMono(buffer)
-                let profile = SilenceAnalyzer.profile(monoSamples: mono, sampleRate: sampleRate)
-                for tierPreset in SmartSpeechSettings.Preset.allCases {
-                    let tierSettings = LiveSmartSpeechTuning.settings(preset: tierPreset)
-                    let regions = SilenceAnalyzer(settings: tierSettings)
-                        .regions(from: profile, floorOverrideDb: globalFloorDb, speechOverrideDb: nil)
-                    projectedSavedByTier[tierPreset.rawValue, default: 0] += projectedSaved(regions: regions, settings: tierSettings)
-                    if tierPreset == preset { regionCount += regions.count }
+        var presetRegions: [SilenceRegion] = []
+        for (windowStart, profile) in windowProfiles {
+            for tierPreset in SmartSpeechSettings.Preset.allCases {
+                let tierSettings = LiveSmartSpeechTuning.settings(preset: tierPreset)
+                let regions = SilenceAnalyzer(settings: tierSettings)
+                    .regions(from: profile, floorOverrideDb: globalFloorDb, speechOverrideDb: nil)
+                projectedSavedByTier[tierPreset.rawValue, default: 0] += projectedSaved(regions: regions, settings: tierSettings)
+                if tierPreset == preset {
+                    presetRegions += regions.map {
+                        SilenceRegion(start: windowStart + $0.start, end: windowStart + $0.end)
+                    }
                 }
             }
         }
+        let mergedRegions = mergeRegionsAcrossSeams(presetRegions)
 
         return LiveSilencePrescanResult(
             sourceDuration: sourceDuration,
             projectedSavedSeconds: projectedSavedByTier[preset.rawValue] ?? 0,
-            regionCount: regionCount,
+            regionCount: mergedRegions.count,
             projectedSavedByTier: projectedSavedByTier,
             globalFloorDb: globalFloorDb,
-            globalSpeechDb: globalSpeechDb)
+            globalSpeechDb: globalSpeechDb,
+            regions: mergedRegions)
+    }
+
+    /// Merge regions that overlap or are separated by less than the analyzer's bridge gap so silences
+    /// spanning decode-window seams are not fragmented.
+    private static func mergeRegionsAcrossSeams(_ regions: [SilenceRegion]) -> [SilenceRegion] {
+        guard !regions.isEmpty else { return [] }
+        let bridgeSeconds = 40.0 / 1000.0   // matches `SilenceAnalyzer.bridgeMs`
+        let sorted = regions.sorted { $0.start < $1.start }
+        var merged: [SilenceRegion] = [sorted[0]]
+        for r in sorted.dropFirst() {
+            var last = merged[merged.count - 1]
+            if r.start <= last.end + bridgeSeconds {
+                last = SilenceRegion(start: last.start, end: max(last.end, r.end))
+                merged[merged.count - 1] = last
+            } else {
+                merged.append(r)
+            }
+        }
+        return merged
     }
 
     /// Fixed-bin dB histogram (−160…0 dBFS, 0.5 dB bins) for computing whole-file percentiles in O(1)

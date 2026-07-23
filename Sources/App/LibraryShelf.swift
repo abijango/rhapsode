@@ -77,7 +77,7 @@ struct ContinueShelfRow<Book: Identifiable, Tile: View>: View {
 
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
-            HStack(alignment: .top, spacing: DS.Shelf.spacing) {
+            LazyHStack(alignment: .top, spacing: DS.Shelf.spacing) {
                 ForEach(items) { item in
                     if hSize == .regular {
                         // iPad / Mac: match the fixed regular grid tile width.

@@ -38,6 +38,16 @@ final class SyncManager {
     var usesSelectiveCatalog: Bool { usesServerBackend || usesSmbBackend }
 
     private var watcher: Task<Void, Never>?
+    /// Cached on-device keys for `availableRemoteEntries` (rebuilt on import / scan).
+    private var onDeviceCacheDirty = true
+    private var onDeviceRelPaths: Set<String> = []
+    private var onDeviceServerItemIds: Set<String> = []
+    /// SMB longpoll is a 60s timer — debounce expensive catalogue / progress pulls.
+    private var lastSmbCatalogRefresh: Date?
+    private var lastSmbCatalogFingerprint: (count: Int, totalBytes: Int64)?
+    private var lastSmbProgressPull: Date?
+    private static let smbCatalogMinInterval: TimeInterval = 5 * 60
+    private static let smbProgressMinInterval: TimeInterval = 5 * 60
     /// Whether the full-library scan has run yet this launch. The longpoll watcher
     /// only reports changes *after* each folder's seeded cursor, so it can never
     /// surface files that were already in Dropbox when this device connected. A
@@ -101,14 +111,14 @@ final class SyncManager {
         if !didInitialScan {
             didInitialScan = true
             if usesSelectiveCatalog {
-                await refreshCatalog()
+                await refreshCatalog(force: true)
             } else {
                 await scanNow()
             }
         }
         // Then pull any progress other devices wrote while we were away — the books
         // just imported above are now present to match against.
-        await pullAndMergeProgress()
+        await pullAndMergeProgressIfNeeded(force: true)
         // Back up our own lifetime SmartSpeech stats too (LWW skips if the remote is newer).
         await pushSmartSpeechStats()
         await pushCollections()
@@ -242,6 +252,19 @@ final class SyncManager {
     /// model iff the remote is newer (last-writer-wins). Safe to call on launch /
     /// foreground; a missing sync folder or no write scope simply yields nothing.
     func pullAndMergeProgress() async {
+        await pullAndMergeProgressIfNeeded(force: true)
+    }
+
+    /// SMB longpoll fires every ~60s — skip redundant pulls unless forced (launch / BG refresh).
+    private func pullAndMergeProgressIfNeeded(force: Bool = false) async {
+        if usesSmbBackend && !force {
+            if let last = lastSmbProgressPull,
+               Date().timeIntervalSince(last) < Self.smbProgressMinInterval {
+                Self.log("pullAndMergeProgress skipped (SMB debounce)")
+                return
+            }
+        }
+        lastSmbProgressPull = Date()
         do {
             let remotes = try await progress.pullAll()
             var applied = 0
@@ -486,7 +509,7 @@ final class SyncManager {
                     // SMB longpoll is a timer; always pull. Dropbox uses real deltas.
                     if usesSmbBackend {
                         cursor = try? await source.latestCursor(progressFolder)
-                        await pullAndMergeProgress()
+                        await pullAndMergeProgressIfNeeded()
                     } else {
                         let (_, newCursor) = try await source.changes(since: c)
                         cursor = newCursor
@@ -518,7 +541,7 @@ final class SyncManager {
                     if usesSelectiveCatalog {
                         // SMB longpoll is a timer that always reports "maybe changes";
                         // never call process() — only refresh grey-tile catalogue.
-                        await refreshCatalog()
+                        await refreshCatalogIfNeeded()
                         // Advance cursor so we don't thrash the same list forever.
                         if let folder = self[folderID] {
                             let (_, newCursor) = (try? await source.changes(since: cursor))
@@ -598,7 +621,7 @@ final class SyncManager {
     /// remote catalogue without downloading (rhapsode-server / SMB selective).
     func scanNow() async {
         if usesSelectiveCatalog {
-            await refreshCatalog()
+            await refreshCatalog(force: true)
             return
         }
         guard !isScanning else { return }
@@ -625,7 +648,18 @@ final class SyncManager {
     /// Load remote catalogue without downloading (server SQLite or SMB list).
     /// Does **not** enqueue downloads — user picks tiles on the shelf.
     /// Server disk re-index: `reindexLibrary(full:)`.
-    func refreshCatalog() async {
+    func refreshCatalog(force: Bool = false) async {
+        await refreshCatalogIfNeeded(force: force)
+    }
+
+    private func refreshCatalogIfNeeded(force: Bool = false) async {
+        if usesSmbBackend && !force {
+            if let last = lastSmbCatalogRefresh,
+               Date().timeIntervalSince(last) < Self.smbCatalogMinInterval {
+                Self.log("refreshCatalog skipped (SMB debounce)")
+                return
+            }
+        }
         guard !isScanning else { return }
         isScanning = true
         defer { isScanning = false }
@@ -640,19 +674,64 @@ final class SyncManager {
             return
         }
         do {
+            let catalog: [RemoteCatalogEntry]
             if let server = source as? RhapsodeServerSource {
-                remoteCatalog = try await server.listCatalog()
+                catalog = try await server.listCatalog()
             } else if let smb = source as? SmbLibrarySource {
-                remoteCatalog = try await smb.listCatalog()
+                catalog = try await smb.listCatalog()
             } else {
                 lastError = "Catalogue refresh is only for SMB or Rhapsode Server."
                 return
             }
+            let fingerprint = Self.catalogFingerprint(catalog)
+            if usesSmbBackend && !force,
+               let last = lastSmbCatalogFingerprint,
+               last == fingerprint {
+                lastSmbCatalogRefresh = Date()
+                Self.log("refreshCatalog skipped (SMB fingerprint unchanged)")
+                return
+            }
+            remoteCatalog = catalog
+            lastSmbCatalogFingerprint = fingerprint
+            if usesSmbBackend {
+                lastSmbCatalogRefresh = Date()
+            }
+            invalidateOnDeviceCatalogCache()
             Self.log("catalog refreshed: \(remoteCatalog.count) item(s)")
         } catch {
             lastError = "Couldn't refresh library: \(error.localizedDescription)"
             Self.log("refreshCatalog failed: \(error)")
         }
+    }
+
+    private static func catalogFingerprint(_ catalog: [RemoteCatalogEntry]) -> (Int, Int64) {
+        (catalog.count, catalog.reduce(Int64(0)) { $0 + $1.sizeBytes })
+    }
+
+    /// Call after a local import or shelf delete so grey-tile availability stays accurate.
+    func invalidateOnDeviceCatalogCache() {
+        onDeviceCacheDirty = true
+    }
+
+    private func rebuildOnDeviceCatalogCacheIfNeeded() {
+        guard onDeviceCacheDirty else { return }
+        var rels = Set<String>()
+        var serverIds = Set<String>()
+        for a in (try? context.fetch(FetchDescriptor<Audiobook>())) ?? [] {
+            rels.insert(a.sourcePath)
+            if let id = RhapsodeServerSource.itemId(fromLocalRelPath: a.sourcePath) {
+                serverIds.insert(id)
+            }
+        }
+        for b in (try? context.fetch(FetchDescriptor<Book>())) ?? [] {
+            rels.insert(b.fileRelPath)
+            if let id = RhapsodeServerSource.itemId(fromLocalRelPath: b.fileRelPath) {
+                serverIds.insert(id)
+            }
+        }
+        onDeviceRelPaths = rels
+        onDeviceServerItemIds = serverIds
+        onDeviceCacheDirty = false
     }
 
     /// Server-only: ask the NAS to re-index the library folders, then reload the catalogue.
@@ -666,6 +745,7 @@ final class SyncManager {
             try await source.authenticate()
             try await server.sharedClient.scanLibrary(mode: full ? "full" : "incremental")
             remoteCatalog = try await server.listCatalog()
+            invalidateOnDeviceCatalogCache()
             Self.log("reindex (\(full ? "full" : "incremental")) done: \(remoteCatalog.count) item(s)")
         } catch {
             lastError = "Couldn't reindex library: \(error.localizedDescription)"
@@ -729,26 +809,16 @@ final class SyncManager {
 
     /// Catalogue entries for one shelf that are not already imported on device.
     func availableRemoteEntries(kind: FolderKind) -> [RemoteCatalogEntry] {
-        remoteCatalog.filter { entry in
+        rebuildOnDeviceCatalogCacheIfNeeded()
+        return remoteCatalog.filter { entry in
             entry.kind == kind && !isCatalogEntryOnDevice(entry)
         }
     }
 
     private func isCatalogEntryOnDevice(_ entry: RemoteCatalogEntry) -> Bool {
-        if isAlreadyImported(rel: entry.localRelPath, kind: entry.kind) { return true }
-        guard let itemId = entry.serverItemId else { return false }
-        switch entry.kind {
-        case .audiobooks:
-            let books = (try? context.fetch(FetchDescriptor<Audiobook>())) ?? []
-            return books.contains {
-                RhapsodeServerSource.itemId(fromLocalRelPath: $0.sourcePath) == itemId
-            }
-        case .books:
-            let books = (try? context.fetch(FetchDescriptor<Book>())) ?? []
-            return books.contains {
-                RhapsodeServerSource.itemId(fromLocalRelPath: $0.fileRelPath) == itemId
-            }
-        }
+        if onDeviceRelPaths.contains(entry.localRelPath) { return true }
+        if let itemId = entry.serverItemId, onDeviceServerItemIds.contains(itemId) { return true }
+        return false
     }
 
     /// Feed jobs discovered by the watcher / background refresh into the queue.
@@ -766,8 +836,8 @@ final class SyncManager {
     /// Dropbox: enqueue new files. Server/SMB: refresh catalogue only (no auto-download).
     func backgroundDeltaCheck() async {
         if usesSelectiveCatalog {
-            await refreshCatalog()
-            await pullAndMergeProgress()
+            await refreshCatalog(force: true)
+            await pullAndMergeProgressIfNeeded(force: true)
             return
         }
         do { try await source.authenticate() } catch { return }
@@ -786,7 +856,7 @@ final class SyncManager {
         }
         // WP-C: also pull cross-device progress so the shelf % / resume position refresh
         // opportunistically while the app is suspended (OS-gated best-effort).
-        await pullAndMergeProgress()
+        await pullAndMergeProgressIfNeeded(force: true)
     }
 
     /// Ask for notification permission (call once, e.g. after connecting).
@@ -831,6 +901,7 @@ final class SyncManager {
         if let dbx = source as? DropboxSource {
             do {
                 let req = try await dbx.downloadRequest(for: entry.path)
+                BackgroundDownloader.shared.registerDownloadItem(item)
                 BackgroundDownloader.shared.enqueue(request: req, item: item, destRelPath: rel)
             } catch {
                 item.state = .failed
@@ -840,6 +911,7 @@ final class SyncManager {
         } else if let server = source as? RhapsodeServerSource {
             do {
                 let req = try await server.downloadRequest(for: entry.path)
+                BackgroundDownloader.shared.registerDownloadItem(item)
                 BackgroundDownloader.shared.enqueue(request: req, item: item, destRelPath: rel)
             } catch {
                 item.state = .failed
@@ -853,6 +925,7 @@ final class SyncManager {
                 try await importItem(at: dest, kind: kind)
                 context.delete(item)
                 try context.save()
+                invalidateOnDeviceCatalogCache()
                 await notifier.notifyDownloadFinished(title: title)
             } catch {
                 item.state = .failed
@@ -926,6 +999,7 @@ final class SyncManager {
 
             do {
                 let req = try await dbx.downloadRequest(for: child.path)
+                BackgroundDownloader.shared.registerDownloadItem(item)
                 BackgroundDownloader.shared.enqueue(
                     request: req,
                     item: item,
@@ -955,6 +1029,7 @@ final class SyncManager {
             try await importItem(at: dest, kind: kind)
             context.delete(item)
             try context.save()
+            invalidateOnDeviceCatalogCache()
             await notifier.notifyDownloadFinished(title: entry.name)
         } catch {
             item.state = .failed
@@ -995,6 +1070,7 @@ final class SyncManager {
                     try? context.save()
                     continue
                 }
+                BackgroundDownloader.shared.registerDownloadItem(item)
                 BackgroundDownloader.shared.enqueue(
                     request: req,
                     item: item,
@@ -1027,6 +1103,10 @@ final class SyncManager {
 
     /// Foreground transfer — used by MockLibrarySource (tests) and folder entries.
     private func transfer(_ entry: RemoteEntry, to destination: URL) async throws {
+        // Brief yield while audiobook playback is active so SMB I/O doesn't starve buffers.
+        if usesSmbBackend, audioPlayer?.isPlaying == true {
+            try? await Task.sleep(for: .milliseconds(500))
+        }
         try await source.download(entry, to: destination)
     }
 
@@ -1036,11 +1116,13 @@ final class SyncManager {
             let audiobook = try await AudiobookImporter.makeAudiobook(fromLocal: dest)
             context.insert(audiobook)
             try context.save()
+            invalidateOnDeviceCatalogCache()
             // Playback is LIVE silence-trimming now; no auto batch-render on import (it would
             // produce a .m4a nothing plays). Batch rendering is on-demand from Settings (WP5).
         case .books:
             context.insert(try await EbookImporter.makeBook(fromLocal: dest))
             try context.save()
+            invalidateOnDeviceCatalogCache()
         }
     }
 

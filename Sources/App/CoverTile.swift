@@ -28,14 +28,22 @@ struct CoverTile: View {
     /// especially the progress bar + % up to stay readable on a big, high-resolution screen.
     /// iPhone (compact) keeps the denser layout.
     @Environment(\.horizontalSizeClass) private var hSize
+    @Environment(\.displayScale) private var displayScale
+    @State private var image: UIImage?
+    @State private var loadedAspect: CGFloat?
+
     private var isRegular: Bool { hSize == .regular }
     private var isRemote: Bool { appearance == .remote }
 
-    private var image: UIImage? { coverImage }
-
-    /// Width ÷ height of the cover box: real art when present, kind default otherwise.
+    /// Width ÷ height of the cover box: cached from the loader, kind default before art arrives.
     private var boxAspect: CGFloat {
-        DS.Shelf.coverAspect(for: image, kind: kind)
+        loadedAspect ?? DS.Shelf.placeholderCoverAspect(for: kind)
+    }
+
+    /// Downsample target — large enough for retina shelf tiles without decoding full art.
+    private var maxCoverPixels: CGFloat {
+        let width = isRegular ? DS.Shelf.coverWidthRegular : 180
+        return width * displayScale * 2
     }
 
     var body: some View {
@@ -91,7 +99,7 @@ struct CoverTile: View {
 
             if let progress, !isRemote {
                 HStack(spacing: isRegular ? DS.Spacing.sm : DS.Spacing.xs) {
-                    LinearProgressBar(fraction: progress, height: isRegular ? 20 : 4)
+                    LinearProgressBar(fraction: progress, height: isRegular ? 20 : 4, animated: false)
                     Text(Self.progressLabel(progress))
                         .font((isRegular ? Font.headline : Font.caption2).monospacedDigit())
                         .foregroundStyle(progress >= 0.995 ? DS.Palette.accent : .secondary)
@@ -101,6 +109,18 @@ struct CoverTile: View {
         }
         // Tooltip shown on pointer hover (iPad pointer + Mac Catalyst); ignored on touch.
         .help(tooltipText)
+        .task(id: coverPath) {
+            image = nil
+            loadedAspect = nil
+            guard let coverPath else { return }
+            if let loaded = await CoverImageLoader.Cache.shared.load(
+                relativePath: coverPath,
+                maxPixelSize: maxCoverPixels
+            ) {
+                image = loaded.image
+                loadedAspect = loaded.aspectRatio
+            }
+        }
     }
 
     private var placeholderIcon: String {
@@ -116,7 +136,8 @@ struct CoverTile: View {
             LinearProgressBar(
                 fraction: progress,
                 height: isRegular ? 8 : 5,
-                track: Color.black.opacity(0.35)
+                track: Color.black.opacity(0.35),
+                animated: false
             )
             .padding(.horizontal, 6)
             .padding(.bottom, 6)
@@ -139,9 +160,4 @@ struct CoverTile: View {
         return title
     }
 
-    private var coverImage: UIImage? {
-        guard let coverPath,
-              let url = try? ContainerPaths.url(forRelativePath: coverPath) else { return nil }
-        return UIImage(contentsOfFile: url.path)
-    }
 }

@@ -1068,7 +1068,7 @@ export class Paginator extends HTMLElement {
             index: this.#adjacentIndex(dir),
             anchor: prev ? () => 1 : () => 0,
         })
-        if (shouldGo || !this.hasAttribute('animated')) await wait(100)
+        if ((shouldGo || !this.hasAttribute('animated')) && !this.hasAttribute('data-rhapsode-fast-turn')) await wait(100)
         this.#locked = false
     }
     prev(distance) {

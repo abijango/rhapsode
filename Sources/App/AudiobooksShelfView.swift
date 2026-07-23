@@ -281,6 +281,7 @@ struct AudiobooksShelfView: View {
             }
             Button("Delete", systemImage: "trash", role: .destructive) {
                 LibraryStore(context: modelContext).deleteAudiobook(book)
+                sync.invalidateOnDeviceCatalogCache()
             }
         }
     }

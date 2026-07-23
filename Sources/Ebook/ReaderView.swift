@@ -57,53 +57,6 @@ struct ReaderView: View {
                         }
                         .allowsHitTesting(false)
                     }
-
-                    // Tap zones: edges = page turn, center = toggle chrome.
-                    // Leading inset leaves room for the interactive-pop edge swipe.
-                    if reader.isOpen {
-                        GeometryReader { geo in
-                            let w = geo.size.width
-                            let edge = max(64, w * 0.22)
-                            let popGutter: CGFloat = 18
-                            HStack(spacing: 0) {
-                                Color.clear
-                                    .frame(width: popGutter)
-                                    .allowsHitTesting(false)
-
-                                Button {
-                                    turnPage(forward: false)
-                                } label: {
-                                    Color.clear
-                                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                                        .contentShape(Rectangle())
-                                }
-                                .buttonStyle(.plain)
-                                .frame(width: edge)
-                                .accessibilityLabel("Previous page")
-
-                                Button {
-                                    toggleChrome()
-                                } label: {
-                                    Color.clear
-                                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                                        .contentShape(Rectangle())
-                                }
-                                .buttonStyle(.plain)
-                                .accessibilityLabel(chromeVisible ? "Hide controls" : "Show controls")
-
-                                Button {
-                                    turnPage(forward: true)
-                                } label: {
-                                    Color.clear
-                                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                                        .contentShape(Rectangle())
-                                }
-                                .buttonStyle(.plain)
-                                .frame(width: edge)
-                                .accessibilityLabel("Next page")
-                            }
-                        }
-                    }
                 }
             }
         }
@@ -131,14 +84,15 @@ struct ReaderView: View {
         .animation(.easeInOut(duration: 0.2), value: chromeVisible)
         .task {
             reader.prepareWebViewIfNeeded()
-            await reader.open(book, context: modelContext)
-            // KOReader Progress Sync: pull before local reading stamps over a newer remote.
+            reader.onChromeToggle = { toggleChrome() }
+            // KOReader Progress Sync: merge remote position before open so we don't jump after paint.
             let pull = await KOSyncService.pullAndApply(
-                book: book, reader: reader, context: modelContext
+                book: book, reader: nil, context: modelContext
             )
             if case .conflict(let localF, let remote) = pull {
                 kosyncConflict = KOSyncConflict(localFraction: localF, remote: remote)
             }
+            await reader.open(book, context: modelContext)
             reader.startReadingSession()
             sync.activeReader = reader
             sync.activeReaderBookID = book.id
@@ -183,10 +137,6 @@ struct ReaderView: View {
         .onDisappear {
             chromeHideTask?.cancel()
             reader.cancelOpen()
-            if sync.activeReaderBookID == book.id {
-                sync.activeReader = nil
-                sync.activeReaderBookID = nil
-            }
             pushDebounce.task?.cancel()
             kosyncDebounce.task?.cancel()
             reader.flushPendingSave()
@@ -196,6 +146,11 @@ struct ReaderView: View {
                 await sync.pushBookProgress(relPath: key)
                 await KOSyncService.push(book: book, context: modelContext)
             }
+            if sync.activeReaderBookID == book.id {
+                sync.activeReader = nil
+                sync.activeReaderBookID = nil
+            }
+            reader.destroy()
         }
         .alert("Reading Position Conflict", isPresented: Binding(
             get: { kosyncConflict != nil },
@@ -232,16 +187,7 @@ struct ReaderView: View {
         }
     }
 
-    // MARK: - Chrome + page turns
-
-    private func turnPage(forward: Bool) {
-        hideChrome()
-        if forward {
-            reader.goForward()
-        } else {
-            reader.goBackward()
-        }
-    }
+    // MARK: - Chrome
 
     private func toggleChrome() {
         if chromeVisible {

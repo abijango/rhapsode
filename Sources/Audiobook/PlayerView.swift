@@ -25,8 +25,6 @@ struct PlayerView: View {
 
     @State private var coverPage = 0
     @State private var showSmartSpeech = false
-    @State private var scrubbing = false
-    @State private var scrubFraction: Double = 0
 
     private var C: DS.Palette.Reclaim.Type { DS.Palette.Reclaim.self }
 
@@ -37,9 +35,10 @@ struct PlayerView: View {
             VStack(spacing: 0) {
                 coverPager(side: side)
                 dots.padding(.top, 14)
-                metaBlock.padding(.top, 14)
+                PlayerMetaBlock(audiobook: audiobook, savedSeconds: savedSeconds)
+                    .padding(.top, 14)
                 Spacer(minLength: 16)
-                transport
+                PlayerTransport()
                 dock.padding(.top, 22)
             }
             .frame(maxWidth: 560)
@@ -73,96 +72,12 @@ struct PlayerView: View {
 
     private func coverPager(side: CGFloat) -> some View {
         TabView(selection: $coverPage) {
-            coverArt(side: side).tag(0)
-            chaptersPanel(side: side).tag(1)
-            thisBookPanel(side: side).tag(2)
+            PlayerCoverArt(audiobook: audiobook, side: side).tag(0)
+            PlayerChaptersPanel(side: side).tag(1)
+            PlayerThisBookPanel(audiobook: audiobook, side: side).tag(2)
         }
         .tabViewStyle(.page(indexDisplayMode: .never))
         .frame(height: side)
-    }
-
-    private func coverArt(side: CGFloat) -> some View {
-        let shape = RoundedRectangle(cornerRadius: 18, style: .continuous)
-        return Group {
-            if let rel = audiobook.coverPath,
-               let url = try? ContainerPaths.url(forRelativePath: rel),
-               let image = UIImage(contentsOfFile: url.path) {
-                Image(uiImage: image).resizable().scaledToFill()
-            } else {
-                LinearGradient(colors: [Color(hex: 0x3A2360), Color(hex: 0x180F2B)],
-                               startPoint: .topLeading, endPoint: .bottomTrailing)
-                    .overlay(Image(systemName: "headphones").font(.system(size: 54)).foregroundStyle(.white.opacity(0.5)))
-            }
-        }
-        .frame(width: side, height: side)
-        .clipShape(shape)
-        .shadow(color: .black.opacity(0.5), radius: 22, y: 14)
-        .padding(.horizontal, 2)
-    }
-
-    private func chaptersPanel(side: CGFloat) -> some View {
-        panelSurface(side: side) {
-            Text("Chapters").font(BrandFont.display(18, .bold)).foregroundStyle(C.text)
-            ScrollView {
-                LazyVStack(spacing: 0) {
-                    ForEach(Array(player.tracks.enumerated()), id: \.element.id) { i, track in
-                        Button { withAnimation { player.jump(toTrack: i) } } label: {
-                            HStack(spacing: 10) {
-                                Text(String(format: "%02d", i + 1))
-                                    .font(ReceiptFont.mono(11, .medium))
-                                    .foregroundStyle(i == player.currentIndex ? C.mint : C.muted)
-                                Text(track.title).font(BrandFont.display(14, .medium)).lineLimit(1)
-                                    .foregroundStyle(i == player.currentIndex ? C.mint : C.text)
-                                Spacer(minLength: 8)
-                                Text(Self.fmt(track.duration)).font(ReceiptFont.mono(11))
-                                    .foregroundStyle(C.muted)
-                            }
-                            .padding(.vertical, 10)
-                            .overlay(alignment: .bottom) { Rectangle().fill(C.hairline).frame(height: 1) }
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-            }
-        }
-    }
-
-    private func thisBookPanel(side: CGFloat) -> some View {
-        let played = audiobook.listenedSeconds ?? 0
-        let saved = audiobook.smartSpeechSavedSeconds ?? 0
-        let pct = played > 0 ? Int((saved / played * 100).rounded()) : 0
-        return panelSurface(side: side) {
-            Text("This book").font(BrandFont.display(18, .bold)).foregroundStyle(C.text)
-            Text(NerdStatsView.hms(saved)).font(BrandFont.display(30, .heavy))
-                .foregroundStyle(C.mintBright).padding(.top, 8)
-            Text("RECLAIMED · \(pct)%").font(ReceiptFont.mono(10)).kerning(1.5)
-                .foregroundStyle(C.muted).padding(.top, 6)
-            VStack(spacing: 0) {
-                kv("Listened", NerdStatsView.hms(played))
-                kv("Silence saved", "−\(NerdStatsView.hms(saved))", color: C.mint)
-                kv("% saved", "\(pct)%")
-                kv("Speed", String(format: "%g×", player.rate))
-            }
-            .padding(.top, 16)
-            Spacer(minLength: 0)
-        }
-    }
-
-    private func kv(_ label: String, _ value: String, color: Color? = nil) -> some View {
-        HStack {
-            Text(label).font(ReceiptFont.mono(13)).foregroundStyle(C.muted)
-            Spacer(minLength: 8)
-            Text(value).font(ReceiptFont.mono(14, .medium)).foregroundStyle(color ?? C.text)
-        }
-        .padding(.vertical, 5)
-    }
-
-    private func panelSurface<Content: View>(side: CGFloat, @ViewBuilder _ content: () -> Content) -> some View {
-        VStack(alignment: .leading, spacing: 0, content: content)
-            .padding(18)
-            .frame(width: side, height: side, alignment: .topLeading)
-            .background(C.surface, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-            .padding(.horizontal, 2)
     }
 
     // MARK: Page dots (tappable — the Mac Catalyst swipe fallback)
@@ -178,81 +93,7 @@ struct PlayerView: View {
         }
     }
 
-    // MARK: Meta (title, chapter, reclaimed, scrubber, times)
-
-    private var metaBlock: some View {
-        VStack(spacing: 0) {
-            Text(player.currentTrack?.title ?? audiobook.title)
-                .font(BrandFont.display(22, .bold)).foregroundStyle(C.text)
-                .lineLimit(1).frame(maxWidth: .infinity, alignment: .leading)
-            Text(chapterLine)
-                .font(ReceiptFont.mono(11)).kerning(1).foregroundStyle(C.muted)
-                .lineLimit(1).frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.top, 7)
-
-            if savedSeconds >= 1 {
-                Text("◆ \(NerdStatsView.hms(savedSeconds)) reclaimed")
-                    .font(ReceiptFont.mono(11, .semibold)).foregroundStyle(C.mint)
-                    .frame(maxWidth: .infinity, alignment: .trailing)
-                    .padding(.top, 12)
-            } else {
-                Color.clear.frame(height: 1).padding(.top, 12)
-            }
-
-            ThickScrubber(
-                fraction: scrubbing ? scrubFraction : player.bookProgress,
-                onChanged: { scrubbing = true; scrubFraction = $0 },
-                onEnded: { f in scrubbing = false; player.seekInBook(to: f * player.totalDuration) }
-            )
-            .padding(.top, 8)
-
-            HStack {
-                Text(Self.fmtClock(displayedElapsed))
-                Spacer()
-                Text("−\(Self.fmtClock(max(0, player.totalDuration - displayedElapsed)))")
-            }
-            .font(ReceiptFont.mono(12)).foregroundStyle(C.muted)
-            .padding(.top, 10)
-        }
-    }
-
-    private var displayedElapsed: Double {
-        scrubbing ? scrubFraction * player.totalDuration : player.bookPosition
-    }
-
     private var savedSeconds: Double { audiobook.smartSpeechSavedSeconds ?? 0 }
-
-    private var chapterLine: String {
-        let name = (player.currentTrack?.title ?? audiobook.author ?? "").uppercased()
-        if player.segmentCount > 1 {
-            return "\(player.segmentNoun.uppercased()) \(player.currentSegmentNumber) · \(name)"
-        }
-        return name
-    }
-
-    // MARK: Transport
-
-    private var transport: some View {
-        HStack(spacing: 40) {
-            Button { player.skip(-15) } label: {
-                Image(systemName: "gobackward.15").font(.system(size: 33))
-                    .foregroundStyle(C.text)
-            }
-            Button { player.togglePlayPause() } label: {
-                ZStack {
-                    Circle().fill(C.mint).frame(width: 84, height: 84)
-                        .shadow(color: C.mint.opacity(0.4), radius: 12, y: 6)
-                    Image(systemName: player.isPlaying ? "pause.fill" : "play.fill")
-                        .font(.system(size: 32, weight: .bold)).foregroundStyle(C.onMint)
-                }
-            }
-            .keyboardShortcut(.space, modifiers: [])
-            Button { player.skip(30) } label: {
-                Image(systemName: "goforward.30").font(.system(size: 33))
-                    .foregroundStyle(C.text)
-            }
-        }
-    }
 
     // MARK: Dock (SmartSpeech · AirPlay · More)
 
@@ -299,6 +140,243 @@ struct PlayerView: View {
         guard seconds.isFinite, seconds >= 0 else { return "0:00" }
         let t = Int(seconds), h = t / 3600, m = (t % 3600) / 60, s = t % 60
         return h > 0 ? String(format: "%d:%02d:%02d", h, m, s) : String(format: "%d:%02d", m, s)
+    }
+}
+
+// MARK: - Player subviews (narrow @Observable tracking)
+
+private struct PlayerCoverArt: View {
+    let audiobook: Audiobook
+    let side: CGFloat
+    @Environment(\.displayScale) private var displayScale
+    @State private var coverImage: UIImage?
+
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: 18, style: .continuous)
+        Group {
+            if let coverImage {
+                Image(uiImage: coverImage).resizable().scaledToFill()
+            } else {
+                LinearGradient(colors: [Color(hex: 0x3A2360), Color(hex: 0x180F2B)],
+                               startPoint: .topLeading, endPoint: .bottomTrailing)
+                    .overlay(Image(systemName: "headphones").font(.system(size: 54)).foregroundStyle(.white.opacity(0.5)))
+            }
+        }
+        .frame(width: side, height: side)
+        .clipShape(shape)
+        .shadow(color: .black.opacity(0.5), radius: 22, y: 14)
+        .padding(.horizontal, 2)
+        .task(id: audiobook.coverPath) {
+            coverImage = nil
+            guard let path = audiobook.coverPath else { return }
+            let pixels = side * displayScale * 2
+            coverImage = await CoverImageLoader.Cache.shared.load(
+                relativePath: path,
+                maxPixelSize: pixels
+            )?.image
+        }
+    }
+}
+
+private struct PlayerChaptersPanel: View {
+    let side: CGFloat
+    @Environment(AudiobookPlayer.self) private var player
+
+    private var C: DS.Palette.Reclaim.Type { DS.Palette.Reclaim.self }
+
+    var body: some View {
+        PlayerPanelSurface(side: side) {
+            Text("Chapters").font(BrandFont.display(18, .bold)).foregroundStyle(C.text)
+            ScrollView {
+                LazyVStack(spacing: 0) {
+                    ForEach(Array(player.tracks.enumerated()), id: \.element.id) { i, track in
+                        Button { withAnimation { player.jump(toTrack: i) } } label: {
+                            HStack(spacing: 10) {
+                                Text(String(format: "%02d", i + 1))
+                                    .font(ReceiptFont.mono(11, .medium))
+                                    .foregroundStyle(i == player.currentIndex ? C.mint : C.muted)
+                                Text(track.title).font(BrandFont.display(14, .medium)).lineLimit(1)
+                                    .foregroundStyle(i == player.currentIndex ? C.mint : C.text)
+                                Spacer(minLength: 8)
+                                Text(PlayerView.fmt(track.duration)).font(ReceiptFont.mono(11))
+                                    .foregroundStyle(C.muted)
+                            }
+                            .padding(.vertical, 10)
+                            .overlay(alignment: .bottom) { Rectangle().fill(C.hairline).frame(height: 1) }
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+        }
+    }
+}
+
+private struct PlayerThisBookPanel: View {
+    let audiobook: Audiobook
+    let side: CGFloat
+    @Environment(AudiobookPlayer.self) private var player
+
+    private var C: DS.Palette.Reclaim.Type { DS.Palette.Reclaim.self }
+
+    var body: some View {
+        let played = audiobook.listenedSeconds ?? 0
+        let saved = audiobook.smartSpeechSavedSeconds ?? 0
+        let pct = played > 0 ? Int((saved / played * 100).rounded()) : 0
+        PlayerPanelSurface(side: side) {
+            Text("This book").font(BrandFont.display(18, .bold)).foregroundStyle(C.text)
+            Text(NerdStatsView.hms(saved)).font(BrandFont.display(30, .heavy))
+                .foregroundStyle(C.mintBright).padding(.top, 8)
+            Text("RECLAIMED · \(pct)%").font(ReceiptFont.mono(10)).kerning(1.5)
+                .foregroundStyle(C.muted).padding(.top, 6)
+            VStack(spacing: 0) {
+                PlayerKVRow(label: "Listened", value: NerdStatsView.hms(played))
+                PlayerKVRow(label: "Silence saved", value: "−\(NerdStatsView.hms(saved))", color: C.mint)
+                PlayerKVRow(label: "% saved", value: "\(pct)%")
+                PlayerKVRow(label: "Speed", value: String(format: "%g×", player.rate))
+            }
+            .padding(.top, 16)
+            Spacer(minLength: 0)
+        }
+    }
+}
+
+private struct PlayerPanelSurface<Content: View>: View {
+    let side: CGFloat
+    @ViewBuilder var content: Content
+
+    private var C: DS.Palette.Reclaim.Type { DS.Palette.Reclaim.self }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0, content: { content })
+            .padding(18)
+            .frame(width: side, height: side, alignment: .topLeading)
+            .background(C.surface, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .padding(.horizontal, 2)
+    }
+}
+
+private struct PlayerKVRow: View {
+    let label: String
+    let value: String
+    var color: Color?
+
+    private var C: DS.Palette.Reclaim.Type { DS.Palette.Reclaim.self }
+
+    var body: some View {
+        HStack {
+            Text(label).font(ReceiptFont.mono(13)).foregroundStyle(C.muted)
+            Spacer(minLength: 8)
+            Text(value).font(ReceiptFont.mono(14, .medium)).foregroundStyle(color ?? C.text)
+        }
+        .padding(.vertical, 5)
+    }
+}
+
+/// Title + chapter line + scrubber + elapsed times — isolated so playback ticks don't
+/// re-render the cover pager, transport, or dock.
+private struct PlayerMetaBlock: View {
+    let audiobook: Audiobook
+    let savedSeconds: Double
+    @Environment(AudiobookPlayer.self) private var player
+    @State private var scrubbing = false
+    @State private var scrubFraction: Double = 0
+
+    private var C: DS.Palette.Reclaim.Type { DS.Palette.Reclaim.self }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Text(player.currentTrack?.title ?? audiobook.title)
+                .font(BrandFont.display(22, .bold)).foregroundStyle(C.text)
+                .lineLimit(1).frame(maxWidth: .infinity, alignment: .leading)
+            Text(chapterLine)
+                .font(ReceiptFont.mono(11)).kerning(1).foregroundStyle(C.muted)
+                .lineLimit(1).frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.top, 7)
+
+            if savedSeconds >= 1 {
+                Text("◆ \(NerdStatsView.hms(savedSeconds)) reclaimed")
+                    .font(ReceiptFont.mono(11, .semibold)).foregroundStyle(C.mint)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+                    .padding(.top, 12)
+            } else {
+                Color.clear.frame(height: 1).padding(.top, 12)
+            }
+
+            ThickScrubber(
+                fraction: scrubbing ? scrubFraction : player.bookProgress,
+                onChanged: { scrubbing = true; scrubFraction = $0 },
+                onEnded: { f in
+                    scrubbing = false
+                    player.seekInBook(to: f * player.totalDuration)
+                }
+            )
+            .padding(.top, 8)
+
+            PlayerElapsedTimes(
+                scrubbing: scrubbing,
+                scrubFraction: scrubFraction
+            )
+            .padding(.top, 10)
+        }
+    }
+
+    private var chapterLine: String {
+        let name = (player.currentTrack?.title ?? audiobook.author ?? "").uppercased()
+        if player.segmentCount > 1 {
+            return "\(player.segmentNoun.uppercased()) \(player.currentSegmentNumber) · \(name)"
+        }
+        return name
+    }
+}
+
+/// Clock labels only — further narrows observation to position/duration fields.
+private struct PlayerElapsedTimes: View {
+    let scrubbing: Bool
+    let scrubFraction: Double
+    @Environment(AudiobookPlayer.self) private var player
+
+    private var C: DS.Palette.Reclaim.Type { DS.Palette.Reclaim.self }
+
+    private var displayedElapsed: Double {
+        scrubbing ? scrubFraction * player.totalDuration : player.bookPosition
+    }
+
+    var body: some View {
+        HStack {
+            Text(PlayerView.fmtClock(displayedElapsed))
+            Spacer()
+            Text("−\(PlayerView.fmtClock(max(0, player.totalDuration - displayedElapsed)))")
+        }
+        .font(ReceiptFont.mono(12)).foregroundStyle(C.muted)
+    }
+}
+
+private struct PlayerTransport: View {
+    @Environment(AudiobookPlayer.self) private var player
+
+    private var C: DS.Palette.Reclaim.Type { DS.Palette.Reclaim.self }
+
+    var body: some View {
+        HStack(spacing: 40) {
+            Button { player.skip(-15) } label: {
+                Image(systemName: "gobackward.15").font(.system(size: 33))
+                    .foregroundStyle(C.text)
+            }
+            Button { player.togglePlayPause() } label: {
+                ZStack {
+                    Circle().fill(C.mint).frame(width: 84, height: 84)
+                        .shadow(color: C.mint.opacity(0.4), radius: 12, y: 6)
+                    Image(systemName: player.isPlaying ? "pause.fill" : "play.fill")
+                        .font(.system(size: 32, weight: .bold)).foregroundStyle(C.onMint)
+                }
+            }
+            .keyboardShortcut(.space, modifiers: [])
+            Button { player.skip(30) } label: {
+                Image(systemName: "goforward.30").font(.system(size: 33))
+                    .foregroundStyle(C.text)
+            }
+        }
     }
 }
 

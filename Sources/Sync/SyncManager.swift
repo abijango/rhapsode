@@ -36,8 +36,13 @@ final class SyncManager {
     var usesSmbBackend: Bool { source is SmbLibrarySource }
     /// Selective catalogue (grey tiles) for server or SMB — not Dropbox auto-pull.
     var usesSelectiveCatalog: Bool { usesServerBackend || usesSmbBackend }
+    /// Network path is up — grey remote tiles are shown only when true.
+    private(set) var isRemoteLibraryOnline = true
+    private let reachability = RemoteLibraryReachability()
 
     private var watcher: Task<Void, Never>?
+    /// Remote catalogue entry ids the user has already seen on a shelf (listing-diff badge).
+    private var seenRemoteCatalogIDs: Set<String> = []
     /// Cached on-device keys for `availableRemoteEntries` (rebuilt on import / scan).
     private var onDeviceCacheDirty = true
     private var onDeviceRelPaths: Set<String> = []
@@ -73,6 +78,11 @@ final class SyncManager {
         self.source = source
         self.context = context
         self.progress = progress
+        seenRemoteCatalogIDs = Self.loadSeenCatalogIDs(storageKey: Self.seenCatalogStorageKey)
+        reachability.start { [weak self] online in
+            self?.isRemoteLibraryOnline = online
+        }
+        isRemoteLibraryOnline = true
     }
 
     // MARK: Foreground auto-detect (longpoll watcher)
@@ -697,6 +707,7 @@ final class SyncManager {
                 lastSmbCatalogRefresh = Date()
             }
             invalidateOnDeviceCatalogCache()
+            seedSeenCatalogIfNeeded()
             Self.log("catalog refreshed: \(remoteCatalog.count) item(s)")
         } catch {
             lastError = "Couldn't refresh library: \(error.localizedDescription)"
@@ -808,11 +819,84 @@ final class SyncManager {
     }
 
     /// Catalogue entries for one shelf that are not already imported on device.
+    /// Hidden when offline (Phase C: no unreachable grey tiles).
     func availableRemoteEntries(kind: FolderKind) -> [RemoteCatalogEntry] {
+        guard usesSelectiveCatalog, isRemoteLibraryOnline else { return [] }
+        return remoteEntriesNotOnDevice(kind: kind)
+    }
+
+    /// Unseen remote catalogue rows for one shelf (listing-diff badge).
+    func newRemoteCount(kind: FolderKind) -> Int {
+        guard usesSelectiveCatalog else { return 0 }
+        return remoteEntriesNotOnDevice(kind: kind)
+            .filter { !seenRemoteCatalogIDs.contains($0.id) }
+            .count
+    }
+
+    /// Clear the listing-diff badge after the user opens a shelf.
+    func markRemoteCatalogSeen(kind: FolderKind) {
+        guard usesSelectiveCatalog else { return }
+        var changed = false
+        for entry in remoteEntriesNotOnDevice(kind: kind) {
+            if seenRemoteCatalogIDs.insert(entry.id).inserted { changed = true }
+        }
+        if changed { persistSeenCatalogIDs() }
+    }
+
+    /// Hint for an empty selective-catalog shelf (offline vs online).
+    func selectiveCatalogEmptyHint() -> String {
+        if !isRemoteLibraryOnline {
+            return "Connect to your network to browse titles on your library."
+        }
+        return "Tap the library menu to refresh the catalogue, then tap a grey cover to download."
+    }
+
+    private func remoteEntriesNotOnDevice(kind: FolderKind) -> [RemoteCatalogEntry] {
         rebuildOnDeviceCatalogCacheIfNeeded()
         return remoteCatalog.filter { entry in
             entry.kind == kind && !isCatalogEntryOnDevice(entry)
         }
+    }
+
+    private static var seenCatalogStorageKey: String {
+        if SmbConfig.shouldUseSmb, let id = SmbConfig.activeProfileId {
+            return "rhapsode.catalog.seen.smb.\(id.uuidString)"
+        }
+        if RhapsodeServerConfig.shouldUseServer {
+            let host = RhapsodeServerConfig.activeBaseURLString
+                ?? RhapsodeServerConfig.baseURLString
+            return "rhapsode.catalog.seen.server.\(host)"
+        }
+        return "rhapsode.catalog.seen.none"
+    }
+
+    private static func loadSeenCatalogIDs(storageKey: String) -> Set<String> {
+        guard let data = UserDefaults.standard.data(forKey: storageKey),
+              let list = try? JSONDecoder().decode([String].self, from: data) else {
+            return []
+        }
+        return Set(list)
+    }
+
+    private func persistSeenCatalogIDs() {
+        let key = Self.seenCatalogStorageKey
+        if let data = try? JSONEncoder().encode(Array(seenRemoteCatalogIDs)) {
+            UserDefaults.standard.set(data, forKey: key)
+        }
+    }
+
+    /// First successful catalogue load: treat everything as already seen (no badge flood).
+    private func seedSeenCatalogIfNeeded() {
+        guard usesSelectiveCatalog else { return }
+        let seededKey = Self.seenCatalogStorageKey + ".seeded"
+        guard !UserDefaults.standard.bool(forKey: seededKey) else { return }
+        for kind in [FolderKind.audiobooks, .books] {
+            for entry in remoteEntriesNotOnDevice(kind: kind) {
+                seenRemoteCatalogIDs.insert(entry.id)
+            }
+        }
+        persistSeenCatalogIDs()
+        UserDefaults.standard.set(true, forKey: seededKey)
     }
 
     private func isCatalogEntryOnDevice(_ entry: RemoteCatalogEntry) -> Bool {

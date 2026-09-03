@@ -136,10 +136,12 @@ struct RootTabView: View {
         TabView(selection: $tabSelection) {
             AudiobooksShelfView()
                 .tabItem { Label("Audiobooks", systemImage: "headphones") }
+                .badge(sync.newRemoteCount(kind: .audiobooks))
                 .tag(0)
 
             BooksShelfView()
                 .tabItem { Label("E-books", systemImage: "books.vertical") }
+                .badge(sync.newRemoteCount(kind: .books))
                 .tag(1)
 
             NerdStatsView()
@@ -154,6 +156,14 @@ struct RootTabView: View {
 
     // MARK: Regular (iPad)
 
+    private func sidebarBadge(for item: SidebarItem) -> Int {
+        switch item {
+        case .audiobooks: sync.newRemoteCount(kind: .audiobooks)
+        case .ebooks:     sync.newRemoteCount(kind: .books)
+        default:          0
+        }
+    }
+
     private var regularSplit: some View {
         NavigationSplitView {
             // Use List(selection:) without NavigationLink wrappers: the List
@@ -161,7 +171,9 @@ struct RootTabView: View {
             // Mixing NavigationLink(value:) with a selection binding competes —
             // the link registers a navigation intent that may not update selection.
             List(SidebarItem.allCases, id: \.id, selection: $sidebarItem) { item in
-                item.label.tag(item)
+                item.label
+                    .badge(sidebarBadge(for: item))
+                    .tag(item)
             }
             .navigationTitle("Rhapsode")
         } detail: {

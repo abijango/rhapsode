@@ -57,9 +57,13 @@ struct BooksShelfView: View {
 
     private var emptyDescription: String {
         if sync.usesSelectiveCatalog {
-            return "Tap the library menu to refresh the catalogue, then tap a grey cover to download."
+            return sync.selectiveCatalogEmptyHint()
         }
         return "Drop an EPUB into your Dropbox Books folder."
+    }
+
+    private var libraryMenuBadge: Int {
+        sync.newRemoteCount(kind: .books)
     }
 
     var body: some View {
@@ -111,6 +115,7 @@ struct BooksShelfView: View {
                         } label: {
                             Label("Library", systemImage: "arrow.clockwise")
                         }
+                        .badge(libraryMenuBadge)
                         .disabled(sync.isScanning)
                     } else {
                         Button("Scan now", systemImage: "arrow.clockwise") {
@@ -158,6 +163,7 @@ struct BooksShelfView: View {
             }
             .background(DS.Palette.shelfBackground)
         }
+        .onAppear { sync.markRemoteCatalogSeen(kind: .books) }
     }
 
     @ViewBuilder

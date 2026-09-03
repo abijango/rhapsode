@@ -58,9 +58,13 @@ struct AudiobooksShelfView: View {
 
     private var emptyDescription: String {
         if sync.usesSelectiveCatalog {
-            return "Tap the library menu to refresh the catalogue, then tap a grey cover to download."
+            return sync.selectiveCatalogEmptyHint()
         }
         return "Drop an M4B or MP3 folder into your Dropbox Audiobooks folder."
+    }
+
+    private var libraryMenuBadge: Int {
+        sync.newRemoteCount(kind: .audiobooks)
     }
 
     var body: some View {
@@ -112,6 +116,7 @@ struct AudiobooksShelfView: View {
                         } label: {
                             Label("Library", systemImage: "arrow.clockwise")
                         }
+                        .badge(libraryMenuBadge)
                         .disabled(sync.isScanning)
                     } else {
                         Button("Scan now", systemImage: "arrow.clockwise") {
@@ -159,6 +164,7 @@ struct AudiobooksShelfView: View {
             }
             .background(DS.Palette.shelfBackground)
         }
+        .onAppear { sync.markRemoteCatalogSeen(kind: .audiobooks) }
     }
 
     @ViewBuilder

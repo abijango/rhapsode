@@ -442,6 +442,8 @@ window.__rhapsode = {
   },
 }
 
-setStatus('Ready')
+// Hide the in-page label — native shows its own opening chrome.
+// Do not leave "Ready" visible or it stacks with SwiftUI's "Opening…".
+setStatus(null)
 post('ready', {})
 log('bridge ready')

@@ -44,8 +44,8 @@ struct ReaderFontPreset: Identifiable, Hashable, Sendable {
     func bridgePayload() -> [String: Any] {
         [
             "fontFamilyId": id,
-            "cssStack": cssStack as Any,
-            "familyName": familyName as Any,
+            "cssStack": cssStack ?? NSNull(),
+            "familyName": familyName ?? NSNull(),
             "faces": faces.map { face -> [String: String] in
                 [
                     "file": face.file,

@@ -85,7 +85,7 @@ struct ReaderView: View {
         .task {
             reader.prepareWebViewIfNeeded()
             reader.onChromeToggle = { toggleChrome() }
-            // KOReader Progress Sync: merge remote position before open so we don't jump after paint.
+            // Merge remote position before paint. Network already has a 20s timeout.
             let pull = await KOSyncService.pullAndApply(
                 book: book, reader: nil, context: modelContext
             )

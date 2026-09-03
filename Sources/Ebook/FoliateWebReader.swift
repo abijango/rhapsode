@@ -105,6 +105,8 @@ final class FoliateWebReader: NSObject, ActiveEbookReader {
     private var saveTask: Task<Void, Never>?
     private var turnTask: Task<Void, Never>?
     private var readyContinuation: CheckedContinuation<Void, Never>?
+    /// Resumed by the `opened` / `error` script message (not by `callAsyncJavaScript`).
+    private var openContinuation: CheckedContinuation<Void, Never>?
 
     // MARK: Lifecycle
 
@@ -168,6 +170,7 @@ final class FoliateWebReader: NSObject, ActiveEbookReader {
         isOpen = false
         toc = []
         openingStatus = "Opening…"
+        Self.log("open start “\(book.title)”")
 
         prepareWebViewIfNeeded()
 
@@ -204,17 +207,9 @@ final class FoliateWebReader: NSObject, ActiveEbookReader {
                 return
             }
 
-            let bridgeOK = (try? await webView.callAsyncJavaScript(
-                "return typeof window.__rhapsode?.open === 'function'",
-                contentWorld: .page
-            ) as? Bool) ?? false
+            // callAsyncJavaScript can hang forever if the view is not in a window.
+            await waitForWebViewLayout(timeout: .seconds(4))
             guard generation == openGeneration else { return }
-            guard bridgeOK else {
-                loadError = "Reader bridge missing. The app bundle may be incomplete — reinstall."
-                openingStatus = nil
-                Self.log("bridge missing after ready")
-                return
-            }
 
             openingStatus = "Parsing book…"
 
@@ -229,31 +224,47 @@ final class FoliateWebReader: NSObject, ActiveEbookReader {
             if let fraction, fraction > 0 { opts["fraction"] = fraction }
             if let cfi { opts["cfi"] = cfi }
 
-            let openResult: Any? = try await webView.callAsyncJavaScript(
-                "return await window.__rhapsode.open(options)",
-                arguments: ["options": opts],
-                contentWorld: .page
-            )
-
-            guard generation == openGeneration else { return }
-
-            if let dict = openResult as? [String: Any],
-               let ok = dict["ok"] as? Bool, !ok {
-                loadError = Self.friendlyOpenError(dict["error"] as? String)
-                openingStatus = nil
-                Self.log("open JS reported failure: \(loadError ?? "")")
-                return
+            let json = try Self.jsonString(from: opts)
+            // Do NOT `await callAsyncJavaScript("return await __rhapsode.open")`.
+            // `open()` postMessage()s back (`log` / `opened` / `error`) on the same
+            // WK IPC as the async-JS completion, so the promise never resolves and
+            // the overlay stays on "Opening…" forever.
+            Self.log("kicking open \(opts["name"] ?? "")")
+            webView.evaluateJavaScript("void window.__rhapsode.open(\(json))") { _, error in
+                if let error {
+                    Self.log("open evaluate failed: \(error.localizedDescription)")
+                    Task { @MainActor in
+                        guard generation == self.openGeneration else { return }
+                        if self.openContinuation != nil {
+                            self.loadError = Self.friendlyOpenError(error.localizedDescription)
+                            self.openingStatus = nil
+                            self.resumeOpenWait()
+                        }
+                    }
+                }
             }
 
-            isOpen = true
-            openingStatus = nil
-            loadError = nil
-            Self.log("open OK “\(book.title)”")
+            let opened = await waitForBookOpened(timeout: .seconds(90))
+            guard generation == openGeneration else { return }
+
+            if opened {
+                openingStatus = nil
+                loadError = nil
+                Self.log("open OK “\(book.title)”")
+            } else if loadError == nil {
+                loadError = "Opening this book took too long. Try again."
+                openingStatus = nil
+                Self.log("open timed out")
+            } else {
+                openingStatus = nil
+                Self.log("open JS reported failure: \(loadError ?? "")")
+            }
         } catch {
             guard generation == openGeneration else { return }
             loadError = Self.friendlyOpenError(error.localizedDescription)
             openingStatus = nil
             Self.log("open FAILED \(error)")
+            resumeOpenWait()
         }
     }
 
@@ -261,12 +272,14 @@ final class FoliateWebReader: NSObject, ActiveEbookReader {
     func cancelOpen() {
         openGeneration += 1
         openingStatus = nil
+        resumeOpenWait()
     }
 
     /// Tear down the open book, release JS heap memory, and drop the EPUB scheme binding.
     func destroy() {
         openGeneration += 1
         openingStatus = nil
+        resumeOpenWait()
         turnTask?.cancel()
         turnTask = nil
         isOpen = false
@@ -274,12 +287,7 @@ final class FoliateWebReader: NSObject, ActiveEbookReader {
         book = nil
         scheme.bookFileURL = nil
         let wv = webView
-        Task {
-            _ = try? await wv?.callAsyncJavaScript(
-                "window.__rhapsode.destroy()",
-                contentWorld: .page
-            )
-        }
+        wv?.evaluateJavaScript("void window.__rhapsode?.destroy?.()", completionHandler: nil)
     }
 
     /// Wait until the shell posts `ready`, or until timeout. Returns whether `isReady`.
@@ -296,6 +304,49 @@ final class FoliateWebReader: NSObject, ActiveEbookReader {
             }
         }
         return isReady
+    }
+
+    /// WKWebView JS evaluation can hang if the view has no window / zero size.
+    private func waitForWebViewLayout(timeout: Duration) async {
+        let deadline = ContinuousClock.now + timeout
+        while ContinuousClock.now < deadline {
+            if let wv = webView, wv.window != nil, wv.bounds.width > 8, wv.bounds.height > 8 {
+                return
+            }
+            try? await Task.sleep(for: .milliseconds(32))
+        }
+        Self.log("layout wait timed out bounds=\(String(describing: webView?.bounds)) window=\(webView?.window != nil)")
+    }
+
+    /// Completes when the bridge posts `opened` or `error`, or when `timeout` elapses.
+    private func waitForBookOpened(timeout: Duration) async -> Bool {
+        if isOpen { return true }
+        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+            openContinuation = cont
+            Task { @MainActor in
+                try? await Task.sleep(for: timeout)
+                if let c = self.openContinuation {
+                    self.openContinuation = nil
+                    c.resume()
+                }
+            }
+        }
+        return isOpen
+    }
+
+    private func resumeOpenWait() {
+        if let c = openContinuation {
+            openContinuation = nil
+            c.resume()
+        }
+    }
+
+    private static func jsonString(from object: [String: Any]) throws -> String {
+        let data = try JSONSerialization.data(withJSONObject: object, options: [])
+        guard let s = String(data: data, encoding: .utf8) else {
+            throw CocoaError(.coderInvalidValue)
+        }
+        return s
     }
 
     private static func friendlyOpenError(_ raw: String?) -> String {
@@ -502,7 +553,7 @@ final class FoliateWebReader: NSObject, ActiveEbookReader {
         }
     }
 
-    static func log(_ message: String) {
+    nonisolated static func log(_ message: String) {
         #if DEBUG
         print("RHAPSODE-FOLIATE: \(message)")
         #endif
@@ -512,15 +563,23 @@ final class FoliateWebReader: NSObject, ActiveEbookReader {
 // MARK: - WKScriptMessageHandler
 
 extension FoliateWebReader: WKScriptMessageHandler {
-    func userContentController(
+    /// Hop off the WebKit callback immediately. Handling on MainActor synchronously
+    /// while JS is mid-`postMessage` is how `callAsyncJavaScript` deadlocks.
+    nonisolated func userContentController(
         _ userContentController: WKUserContentController,
         didReceive message: WKScriptMessage
     ) {
         guard message.name == "rhapsode",
               let body = message.body as? [String: Any],
               let type = body["type"] as? String else { return }
+        let snapshot = ScriptMessage(type: type, body: body)
+        Task { @MainActor in
+            self.handleScriptMessage(snapshot)
+        }
+    }
 
-        switch type {
+    private func handleScriptMessage(_ message: ScriptMessage) {
+        switch message.type {
         case "ready":
             isReady = true
             if let c = readyContinuation {
@@ -530,7 +589,7 @@ extension FoliateWebReader: WKScriptMessageHandler {
             Self.log("shell ready")
 
         case "opened":
-            if let items = body["toc"] as? [[String: Any]] {
+            if let items = message.body["toc"] as? [[String: Any]] {
                 toc = items.compactMap { item in
                     guard let label = item["label"] as? String,
                           let href = item["href"] as? String else { return nil }
@@ -540,13 +599,14 @@ extension FoliateWebReader: WKScriptMessageHandler {
             }
             isOpen = true
             Self.log("opened toc=\(toc.count)")
+            resumeOpenWait()
 
         case "relocate":
-            let cfi = body["cfi"] as? String
+            let cfi = message.body["cfi"] as? String
             let fraction: Double
-            if let d = body["fraction"] as? Double {
+            if let d = message.body["fraction"] as? Double {
                 fraction = d
-            } else if let n = body["fraction"] as? NSNumber {
+            } else if let n = message.body["fraction"] as? NSNumber {
                 fraction = n.doubleValue
             } else {
                 fraction = 0
@@ -554,12 +614,13 @@ extension FoliateWebReader: WKScriptMessageHandler {
             persist(cfi: cfi, fraction: fraction)
 
         case "error":
-            let msg = body["message"] as? String ?? "Unknown reader error"
+            let msg = message.body["message"] as? String ?? "Unknown reader error"
             loadError = msg
             Self.log("error \(msg)")
+            resumeOpenWait()
 
         case "log":
-            if let msg = body["message"] as? String {
+            if let msg = message.body["message"] as? String {
                 Self.log(msg)
             }
 
@@ -570,6 +631,13 @@ extension FoliateWebReader: WKScriptMessageHandler {
             break
         }
     }
+}
+
+/// Snapshot of a `webkit.messageHandlers` payload. Copied off the WK message
+/// so the handler can hop to MainActor without retaining `WKScriptMessage`.
+private struct ScriptMessage: @unchecked Sendable {
+    let type: String
+    let body: [String: Any]
 }
 
 // MARK: - WKNavigationDelegate

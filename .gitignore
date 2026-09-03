@@ -21,6 +21,9 @@ build-cat/
 .swiftpm/
 Package.resolved
 
+# Generated icon preview workspace (masters live in SupportingFiles/)
+icon-variants/
+
 # macOS
 .DS_Store
 

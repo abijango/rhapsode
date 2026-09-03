@@ -4,6 +4,11 @@ options:
   deploymentTarget:
     iOS: "26.0"
   createIntermediateGroups: true
+  # Icon Composer .icon must be a single file ref, not exploded (XcodeGen#1556).
+  fileTypes:
+    icon:
+      file: true
+      buildPhase: resources
 
 settings:
   base:
@@ -35,6 +40,7 @@ targets:
     platform: iOS
     deploymentTarget: "26.0"
     sources:
+      - path: SupportingFiles/AppIcon.icon
       - path: SupportingFiles/Assets.xcassets
       - path: Sources
       # Sample fixtures bundled as a folder reference (preserves subdirectories
@@ -73,7 +79,8 @@ targets:
       properties:
         CFBundleDisplayName: Rhapsode
         CFBundleShortVersionString: "0.1.0"
-        CFBundleVersion: "1"
+        CFBundleIconName: AppIcon
+        CFBundleVersion: "2"
         UILaunchScreen: {}
         # Lock-screen / Control Center audio control needs the audio background
         # mode. Free to declare; doing it now avoids an entitlements retrofit.
@@ -137,7 +144,7 @@ targets:
         PRODUCT_NAME: Rhapsode
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         MARKETING_VERSION: "0.1.0"
-        CURRENT_PROJECT_VERSION: "1"
+        CURRENT_PROJECT_VERSION: "2"
         TARGETED_DEVICE_FAMILY: "1,2" # iPhone + iPad (shared SwiftUI codebase)
         SWIFT_STRICT_CONCURRENCY: complete
         # Phase 4b — Mac Catalyst (feasibility probe). Shares the UIKit codebase

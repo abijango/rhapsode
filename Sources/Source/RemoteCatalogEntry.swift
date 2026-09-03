@@ -2,7 +2,7 @@ import Foundation
 
 /// One item from a remote library catalogue (rhapsode-server), not yet necessarily
 /// downloaded. Used to show greyed-out shelf tiles and drive selective download.
-struct RemoteCatalogEntry: Identifiable, Sendable, Hashable {
+struct RemoteCatalogEntry: Identifiable, Sendable, Hashable, Codable {
     /// Stable id: typically `itemId:fileId` from the server.
     let id: String
     let kind: FolderKind

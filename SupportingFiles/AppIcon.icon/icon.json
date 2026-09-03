@@ -1,0 +1,55 @@
+{
+  "fill-specializations" : [
+    {
+      "value" : {
+        "automatic-gradient" : "extended-srgb:0.49804,0.74902,0.61961,1.00000"
+      }
+    },
+    {
+      "appearance" : "dark",
+      "value" : {
+        "automatic-gradient" : "extended-srgb:0.07843,0.12549,0.10588,1.00000"
+      }
+    },
+    {
+      "appearance" : "tinted",
+      "value" : {
+        "automatic-gradient" : "extended-gray:0.17255,1.00000"
+      }
+    }
+  ],
+  "groups" : [
+    {
+      "layers" : [
+        {
+          "image-name" : "icon_light.png",
+          "image-name-specializations" : [
+            {
+              "value" : "icon_light.png"
+            },
+            {
+              "appearance" : "dark",
+              "value" : "icon_dark.png"
+            },
+            {
+              "appearance" : "tinted",
+              "value" : "icon_tinted.png"
+            }
+          ],
+          "name" : "Rhapsode"
+        }
+      ],
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0.35
+      },
+      "translucency" : {
+        "enabled" : false,
+        "value" : 0.5
+      }
+    }
+  ],
+  "supported-platforms" : {
+    "squares" : "shared"
+  }
+}

@@ -125,6 +125,13 @@ struct AudiobooksShelfView: View {
                         .disabled(sync.isScanning)
                     }
                 }
+                if sync.isRefreshingInBackground {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        ProgressView()
+                            .controlSize(.mini)
+                            .accessibilityLabel(scanningLabel)
+                    }
+                }
             }
             .overlay(alignment: .top) {
                 if sync.isScanning {

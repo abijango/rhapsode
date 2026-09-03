@@ -55,6 +55,8 @@ struct RootTabView: View {
     @State private var tabSelection  = Self.initialTabSelection
     // Regular path — sidebar selection
     @State private var sidebarItem: SidebarItem? = .audiobooks
+    /// Full-screen Now Playing opened from the mini player (any tab / sidebar).
+    @State private var showExpandedPlayer = false
 
     private static var initialTabSelection: Int {
         #if DEBUG
@@ -78,7 +80,8 @@ struct RootTabView: View {
             case .split: regularSplit
             }
         }
-        // Foreground auto-detect: watch Dropbox while active, stop when backgrounded.
+        // Foreground auto-detect: start the watcher + quiet catalogue refresh after
+        // the shelf paints so Continue stays tappable. Stop watching when backgrounded.
         .onChange(of: scenePhase, initial: true) { _, phase in
             if phase == .active {
                 // The headless self-test drives its own SyncManagers over the shared context;
@@ -152,6 +155,18 @@ struct RootTabView: View {
                 .tabItem { Label("Settings", systemImage: "gearshape") }
                 .tag(3)
         }
+        .tabViewBottomAccessory {
+            if audioPlayer.book != nil, !showExpandedPlayer {
+                NowPlayingAccessory {
+                    showExpandedPlayer = true
+                }
+            }
+        }
+        .fullScreenCover(isPresented: $showExpandedPlayer) {
+            if let book = audioPlayer.book {
+                ExpandedNowPlayingView(book: book)
+            }
+        }
     }
 
     // MARK: Regular (iPad)
@@ -182,6 +197,18 @@ struct RootTabView: View {
             case .ebooks:     BooksShelfView()
             case .stats:      NerdStatsView()
             case .settings:   SettingsView()
+            }
+        }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            if audioPlayer.book != nil, !showExpandedPlayer {
+                NowPlayingAccessory(usesMaterialBackground: true) {
+                    showExpandedPlayer = true
+                }
+            }
+        }
+        .fullScreenCover(isPresented: $showExpandedPlayer) {
+            if let book = audioPlayer.book {
+                ExpandedNowPlayingView(book: book)
             }
         }
     }

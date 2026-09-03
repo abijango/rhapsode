@@ -3,16 +3,13 @@ import Foundation
 import Observation
 import SmartSpeechKit
 
-/// EXPLORATION MODULE — the live SmartSpeech playback engine (the AVPlayer alternative the shipped
-/// feature deliberately avoids). Owns an `AVAudioEngine` graph fed by self-scheduled PCM from
-/// `LiveTrimProducer`, so silences are trimmed on the fly with no rendered file on disk.
+/// Headless / self-test live SmartSpeech engine. Owns an `AVAudioEngine` graph fed by
+/// self-scheduled PCM from `LiveTrimProducer`. Production playback uses `LiveAudioBackend`
+/// via `AudiobookPlayer` instead.
 ///
-/// Graph (M1): `AVAudioPlayerNode → mainMixerNode → output`. M2 inserts `AVAudioUnitTimePitch`
-/// between the player node and the mixer for pitch-preserving speed.
-///
-/// Everything the UI reads is SOURCE-domain (matching the shipped SmartSpeech invariant): `sourcePosition`
-/// and the scrubber are the original file's timeline; `removedSoFar` accrues `sourceΔ − outputΔ` per
-/// tick, exactly like the shipped `AudiobookPlayer.accumulateSaved`.
+/// Graph: `AVAudioPlayerNode → AVAudioUnitTimePitch → mainMixerNode → output`.
+/// Positions are SOURCE-domain: `sourcePosition` is the original file's timeline;
+/// `removedSoFar` accrues `sourceΔ − outputΔ` per tick.
 @MainActor
 @Observable
 final class LiveSmartSpeechEngine {

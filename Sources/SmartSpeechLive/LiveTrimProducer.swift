@@ -2,16 +2,14 @@ import AVFoundation
 import Foundation
 import SmartSpeechKit
 
-/// EXPLORATION MODULE — the live splice half of the hybrid. Runs on its own serial queue, decoding
-/// the original file chunk-by-chunk, trimming each chunk with SmartSpeechKit's validated splice
-/// (`TrimRenderer.renderMapped` — zero-crossing snap + equal-power crossfade), and scheduling
-/// the trimmed PCM into an `AVAudioPlayerNode`. This is the seam the research identified: silence
-/// removal is not a graph node, it's *which samples we schedule*.
+/// Live splice: decode the original file chunk-by-chunk, trim each chunk with SmartSpeechKit's
+/// splice (`TrimRenderer.renderMapped` — zero-crossing snap + equal-power crossfade), and schedule
+/// the trimmed PCM into an `AVAudioPlayerNode`. Silence removal is which samples we schedule,
+/// not a graph node.
 ///
-/// Everything is anchored in SOURCE time (the file's original timeline). The producer folds each
-/// chunk's realized `RenderSegment`s into a `SmartSpeechTimelineMapBuilder` (same code the pre-render
-/// pipeline uses), so the engine can map the player's output position back to an exact source
-/// position and compute how much silence has actually been removed.
+/// Everything is anchored in SOURCE time. The producer folds each chunk's realized `RenderSegment`s
+/// into a `SmartSpeechTimelineMapBuilder` so the engine can map output position back to source
+/// and compute how much silence has actually been removed.
 ///
 /// `@unchecked Sendable`: all mutable state is guarded by `lock`; the `AVAudioPlayerNode` (not itself
 /// Sendable) is only used for thread-safe operations (`scheduleBuffer`, `stop`).
@@ -28,7 +26,7 @@ final class LiveTrimProducer: @unchecked Sendable {
     private let decodeWindows: [SmartSpeechRenderUtil.Window]
 
     /// Live chunk length. Smaller ⇒ faster first-audio and snappier seeks, but more chunk seams
-    /// (a silence straddling a seam is under-trimmed — accepted, matches the pre-render limitation).
+    /// (a silence straddling a seam is under-trimmed — accepted, same as the CadenceLab oracle).
     private let chunkSeconds: TimeInterval = 12
     /// Keep roughly this many seconds of OUTPUT audio queued ahead of the playhead (before rate scaling).
     private let targetAheadSeconds: TimeInterval = 24

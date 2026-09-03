@@ -11,7 +11,7 @@ struct LiveSmartSpeechSource {
     let url: URL
     let sourceDuration: TimeInterval
     /// Chapter starts in source seconds (ascending, leading 0). Used to align chunk seams to
-    /// natural pauses, matching the pre-render renderer.
+    /// natural pauses.
     let cutPoints: [TimeInterval]
     let titles: [String]
     let preset: SmartSpeechSettings.Preset

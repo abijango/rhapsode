@@ -10,7 +10,7 @@ import SmartSpeechKit
 /// not). Graph: `AVAudioPlayerNode → AVAudioUnitTimePitch → mainMixer`. The owner keeps AVAudioSession
 /// config, interruption/route handling, Now Playing, remote commands, sync and stats.
 ///
-/// Two modes for now (batch/pre-rendered static-map mode is added in WP5):
+/// Two modes:
 /// - **live** (`trimEnabled: true`): decode the original, trim silence on the fly; `currentSource`
 ///   comes from the producer's live map.
 /// - **original** (`trimEnabled: false`): play the file as-is; `currentSource == sessionStart + output`.

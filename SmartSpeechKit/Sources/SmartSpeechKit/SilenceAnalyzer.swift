@@ -37,7 +37,7 @@ public struct LoudnessProfile: Sendable {
 
 /// Detects trimmable silences in mono PCM. Pure and audio-hardware-free: it takes a
 /// `[Float]` and a sample rate, so it is driven entirely by synthetic PCM in tests.
-/// Implements the pipeline in `cadence-feature-spec.md` §4.
+/// Windowed RMS + hysteresis + bridging; regions are edge-guarded before return.
 public struct SilenceAnalyzer {
     public let settings: SmartSpeechSettings
 
@@ -88,8 +88,8 @@ public struct SilenceAnalyzer {
     /// (e.g. a global, whole-file profile) in place of this chunk-local profile's percentiles. The
     /// live engine analyses short streaming chunks whose local percentiles jitter across chunk
     /// boundaries; a stable global floor makes detection deterministic regardless of where a chunk
-    /// falls (Fix A). Both `nil` ⇒ **byte-identical** to `regions(from:)`, so the shipped pre-render
-    /// path and `analyzerVersion` are unchanged. The absolute-silence ceiling (Fix B) still applies
+    /// falls (Fix A). Both `nil` ⇒ **byte-identical** to `regions(from:)`. The absolute-silence
+    /// ceiling (Fix B) still applies
     /// via `settings.absoluteSilenceCeilingDb`.
     public func regions(from profile: LoudnessProfile,
                         floorOverrideDb: Double?,

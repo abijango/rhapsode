@@ -119,47 +119,6 @@ public enum AudioIO {
         try file.write(from: buffer)
     }
 
-    /// Streaming AAC `.m4a` writer (spec §6 — the production rendition format).
-    ///
-    /// Open once, `append` chunk buffers in order, then drop the writer to finalise. Built on
-    /// `AVAudioFile` (the same primitive as `writeWAV`), which encodes MPEG-4 AAC straight to
-    /// disk and converts each float32 buffer to AAC internally — so memory stays flat regardless
-    /// of book length (WP3 chapter-chunked render feeds it one chapter at a time).
-    ///
-    /// Every appended buffer must match `processingFormat` (same sample rate + channel count);
-    /// within one source file that's guaranteed. Releasing the instance flushes and closes the
-    /// file (`AVAudioFile` finalises on deinit).
-    public final class AACFileWriter {
-        private var file: AVAudioFile?
-        /// The float32 format appended buffers must use (the file's processing format).
-        public let processingFormat: AVAudioFormat
-
-        /// - Parameters:
-        ///   - bitRate: target AAC bitrate; pass ≥ the source bitrate so spoken-word
-        ///     generation loss is inaudible (spec §6).
-        public init(url: URL, sampleRate: Double, channelCount: AVAudioChannelCount, bitRate: Int) throws {
-            let settings: [String: Any] = [
-                AVFormatIDKey: kAudioFormatMPEG4AAC,
-                AVSampleRateKey: sampleRate,
-                AVNumberOfChannelsKey: channelCount,
-                AVEncoderBitRateKey: bitRate,
-            ]
-            let file = try AVAudioFile(forWriting: url, settings: settings)
-            self.file = file
-            self.processingFormat = file.processingFormat
-        }
-
-        /// Encode and append one chunk. Its format must equal `processingFormat`.
-        public func append(_ buffer: AVAudioPCMBuffer) throws {
-            try file?.write(from: buffer)
-        }
-
-        /// Finalise the file. Optional — releasing the instance does the same.
-        public func finish() {
-            file = nil
-        }
-    }
-
     // MARK: - AVAssetReader fallback
 
     private static func decodeWithAssetReader(_ url: URL, startSeconds: Double,

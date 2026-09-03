@@ -2,8 +2,8 @@ import AVFoundation
 import Foundation
 import SmartSpeechKit
 
-/// Live-only detection tuning. Kept separate from the shipped `SmartSpeechSettings` defaults so the
-/// spike can be tuned without touching the pre-render feature.
+/// Live-only detection tuning. Kept separate from the `SmartSpeechSettings` defaults so the
+/// ceiling can be relaxed for real recordings without changing CadenceLab preset values.
 enum LiveSmartSpeechTuning {
     /// Absolute silence ceiling for the LIVE path. The shipped default (−50 dBFS) is stricter than
     /// many real recordings' noise floors (compressed / loudness-normalized audiobooks often sit at
@@ -20,23 +20,17 @@ enum LiveSmartSpeechTuning {
     }
 }
 
-/// EXPLORATION MODULE — live (on-the-fly) SmartSpeech. See `specs/realtime-cadence-exploration.md`
-/// and the plan `~/.claude/plans/the-app-currently-uses-streamed-corbato.md`. Isolated from the
-/// shipped pre-render SmartSpeech pipeline; nothing here touches `AudiobookPlayer`/`SmartSpeechRenderer`.
+/// Analyze-ahead pass for live SmartSpeech. Because a book is fully downloaded before playback, a
+/// cheap full-file analysis runs once at load for the silence picture, projected time saved, and
+/// region list. No trimmed file is written. The live splice (`LiveTrimProducer`) happens during
+/// playback. This is analysis only.
 ///
-/// The hybrid "analyze-ahead" half: because a book is always fully downloaded before playback, we
-/// run a cheap full-file analysis pass ONCE at load to learn the complete silence picture up front —
-/// the projected total time saved and the region count — without rendering a trimmed file to disk.
-/// The live splice (`LiveTrimProducer`) happens during playback. This is analysis only.
-///
-/// Reuses SmartSpeechKit verbatim (`AudioIO`, `SilenceAnalyzer`, `SilencePolicy`) and the app's existing
-/// `SmartSpeechRenderer.chunkWindows` so the chunking matches the pre-render oracle exactly — which is
-/// what makes the M0 assertion (prescan projection == `SmartSpeechRenderer` projection) meaningful.
+/// Reuses SmartSpeechKit (`AudioIO`, `SilenceAnalyzer`, `SilencePolicy`) and
+/// `SmartSpeechRenderUtil.chunkWindows` so prescan windows match the live producer.
 struct LiveSilencePrescanResult: Sendable {
     let sourceDuration: TimeInterval
     /// Ideal seconds saved for the active tier: `Σ (D − target(D))` over detected regions. Matches
-    /// `SmartSpeechRenderer.projectedSaved` / `TrimReport`'s ideal figure (actual rendered saving is a
-    /// per-join crossfade delta less).
+    /// `TrimReport`'s ideal figure (actual splice saving is a per-join crossfade delta less).
     let projectedSavedSeconds: TimeInterval
     let regionCount: Int
     /// Same projection for every tier (`Preset.rawValue` → seconds) from the shared decode/RMS pass.
@@ -170,8 +164,7 @@ enum LiveSilencePrescan {
         }
     }
 
-    /// Ideal saving for one tier: `Σ (D − target(D))`. Identical formula to
-    /// `SmartSpeechRenderer.projectedSaved` (kept private there) — reproduced so the spike stays isolated.
+    /// Ideal saving for one tier: `Σ (D − target(D))`.
     private static func projectedSaved(regions: [SilenceRegion], settings: SmartSpeechSettings) -> TimeInterval {
         regions.reduce(0.0) { acc, region in
             acc + (region.duration - SilencePolicy.target(forSilenceDuration: region.duration, settings: settings))

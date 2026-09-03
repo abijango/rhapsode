@@ -4,17 +4,13 @@ HTTP-API-not-SDK for Dropbox, **App-folder access (paths relative to app folder,
 
 ## SmartSpeech (live silence-trimming feature)
 
-Specs: specs/realtime-cadence-exploration.md (the CURRENT live design) and
-specs/cadence-feature-spec.md (the original pre-render design — HISTORICAL; that batch path
-was removed once live trimming became the default player). "SmartSpeech" is the user-facing
-name and the internal code name; the external reference oracle is still "Cadence" (CadenceLab,
-below). Filenames like specs/cadence-feature-spec.md keep their original names.
+"SmartSpeech" is the user-facing name and the internal code name; the external
+reference oracle is still "Cadence" (CadenceLab, below).
 
-Architecture (CURRENT): trim silence LIVE during playback via AVAudioEngine. `AudiobookPlayer`
+Architecture: trim silence LIVE during playback via AVAudioEngine. `AudiobookPlayer`
 drives `LiveAudioBackend` / `LiveTrimProducer` (AVAudioPlayerNode → AVAudioUnitTimePitch →
 mixer), fed by the SmartSpeechKit DSP. There is NO pre-render and NO on-disk trimmed copy —
-the original download is the only audio on device. (The earlier Path-B pre-render + AVPlayer
-design, and the producer/consumer render-share, have been removed.)
+the original download is the only audio on device.
 
 ### Integration (this repo, not greenfield)
 - Bind to existing code; don't invent parallel systems. Reuse the download pipeline, SwiftData

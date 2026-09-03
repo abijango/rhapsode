@@ -2,9 +2,7 @@ import Foundation
 
 /// The five (plus two splice) tunable parameters that control silence trimming.
 ///
-/// These transfer verbatim into the production app; the values that survive the
-/// listening A/B in the harness become the production defaults. See
-/// `cadence-feature-spec.md` §6 and `cadence-derisk-harness-spec.md` §3.
+/// Preset values must stay identical to the `cadence` CLI in CadenceLab.
 public struct SmartSpeechSettings: Equatable, Codable, Sendable {
     /// Silences shorter than this are left completely untouched — they are the
     /// inter-word / sentence rhythm, not dead air. (Rule 3.)

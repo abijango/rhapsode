@@ -47,7 +47,7 @@ Non-negotiable correctness rules:
 - All persisted positions/bookmarks/chapters live in **source time**; they are mapped to output time only at the playback boundary via the live map, so they stay stable across tier changes and on/off toggles.
 - Silence is **detected** on the mono downmix but **cut** from the original channels, zero-crossing-aligned with equal-power crossfades (a hard cut is a bug). An adaptive floor + absolute ceiling keep continuous music beds from being cut.
 
-`SmartSpeechKit` is a standalone Swift package (the silence-analysis DSP) that imports only **Accelerate** + **AVFoundation** — no app or SwiftUI types — so it stays liftable. See [`specs/cadence-feature-spec.md`](specs/cadence-feature-spec.md) and [`specs/realtime-cadence-exploration.md`](specs/realtime-cadence-exploration.md).
+`SmartSpeechKit` is a standalone Swift package (the silence-analysis DSP) that imports only **Accelerate** + **AVFoundation** — no app or SwiftUI types — so it stays liftable. Preset values must stay identical to the `cadence` CLI in CadenceLab (the external reference oracle).
 
 ---
 
@@ -155,4 +155,3 @@ SmartSpeechKit also has its own unit tests: `cd SmartSpeechKit && swift test`.
 - [`docs/design.html`](docs/design.html) — interactive design & architecture overview
 - [`docs/SPEC.md`](docs/SPEC.md) — MVP build spec (sources rationale, data model, features)
 - [`docs/ROADMAP.md`](docs/ROADMAP.md) — post-MVP phases (background sync, iPad/macOS, cross-device sync)
-- [`specs/cadence-feature-spec.md`](specs/cadence-feature-spec.md) — the SmartSpeech silence-trimming spec

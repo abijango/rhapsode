@@ -2,7 +2,7 @@ import Foundation
 
 /// Pure D→target mapping: given a silence of source duration `D`, how long should
 /// the trimmed residual be? This is the whole of the "proportional aggressiveness"
-/// behaviour and is exhaustively unit-tested. See `cadence-feature-spec.md` §6.
+/// behaviour and is exhaustively unit-tested.
 public enum SilencePolicy {
     /// Target residual duration for a silence of source duration `D`.
     ///

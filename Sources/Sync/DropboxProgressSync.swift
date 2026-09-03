@@ -10,6 +10,7 @@ import Foundation
 /// HTTP + JSON), whereas CloudKit is Apple-only and needs a paid account. The cost
 /// is a wider scope (app-folder write only — still narrow, not Full Dropbox).
 struct DropboxProgressSync: ProgressSync {
+    var storesRemotely: Bool { true }
     /// Hidden-ish sibling of `/Audiobooks` and `/Books`. The library scan only
     /// looks in those two roots, so progress files are never mistaken for content.
     static let folder = "/.rhapsode-sync"

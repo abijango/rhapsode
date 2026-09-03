@@ -100,8 +100,8 @@ struct NerdStatsView: View {
     /// Rebuild the lifetime totals from the per-book values, then back them up. Fixes a lifetime
     /// counter that has drifted from the library.
     private func recalcStats() {
-        let saved = books.reduce(0.0) { $0 + ($1.mySmartSpeechSavedSeconds ?? $1.smartSpeechSavedSeconds ?? 0) }
-        let played = books.reduce(0.0) { $0 + ($1.myListenedSeconds ?? $1.listenedSeconds ?? 0) }
+        let saved = books.reduce(0.0) { $0 + ($1.mySmartSpeechSavedSeconds ?? 0) }
+        let played = books.reduce(0.0) { $0 + ($1.myListenedSeconds ?? 0) }
         SmartSpeechStats.overwrite(savedSeconds: saved, playedSeconds: played)
         Task {
             await sync.pushSmartSpeechStats()

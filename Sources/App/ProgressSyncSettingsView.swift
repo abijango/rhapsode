@@ -17,7 +17,7 @@ struct ProgressSyncSettingsView: View {
                         .foregroundStyle(.red)
                 }
             } footer: {
-                Text("Resume, Nerd Stats, and collections sync through Dropbox so phone and Mac stay aligned when the NAS is offline. Library files still come from your active source.")
+                Text("Resume, Nerd Stats, and collections sync through Dropbox so phone and Mac stay aligned when the NAS is offline. Library files still come from your active source. Connected means a token is stored — reconnect Dropbox if pushes fail.")
             }
 
             Section {

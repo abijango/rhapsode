@@ -160,6 +160,8 @@ actor RhapsodeServerProgressSync: ProgressSync {
         nil
     }
 
+    nonisolated var storesRemotely: Bool { true }
+
     func pushDeviceStats(_ stats: DeviceStatsRecord) async throws {}
     func pullAllDeviceStats() async throws -> [DeviceStatsRecord] { [] }
     func pushBookContribution(_ contribution: DeviceBookContribution) async throws {}

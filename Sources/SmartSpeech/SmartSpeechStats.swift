@@ -82,10 +82,10 @@ enum SmartSpeechStats {
         guard !UserDefaults.standard.bool(forKey: Key.migratedMine) else { return }
         UserDefaults.standard.set(true, forKey: Key.migratedMine)
         if UserDefaults.standard.object(forKey: Key.myPlayedSeconds) == nil {
-            UserDefaults.standard.set(UserDefaults.standard.double(forKey: Key.totalPlayedSeconds), forKey: Key.myPlayedSeconds)
+            UserDefaults.standard.set(0.0, forKey: Key.myPlayedSeconds)
         }
         if UserDefaults.standard.object(forKey: Key.mySavedSeconds) == nil {
-            UserDefaults.standard.set(UserDefaults.standard.double(forKey: Key.totalSavedSeconds), forKey: Key.mySavedSeconds)
+            UserDefaults.standard.set(0.0, forKey: Key.mySavedSeconds)
         }
         if myUpdatedAt == nil { myUpdatedAt = updatedAt ?? Date() }
     }

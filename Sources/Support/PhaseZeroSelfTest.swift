@@ -946,6 +946,11 @@ enum PhaseZeroSelfTest {
         let loaded = ProgressOutboxStore.load()
         check("P5: outbox persists audiobook key", loaded.audiobookKeys.contains("Audiobooks/Outbox.m4b"))
         check("P5: outbox pending count", loaded.pendingCount == 2)
+        let noopSync = SyncManager(source: MockLibrarySource(), context: context, progress: NoopProgressSync())
+        await noopSync.flushProgressOutbox()
+        let kept = ProgressOutboxStore.load()
+        check("P5: Noop flush keeps outbox", kept.audiobookKeys.contains("Audiobooks/Outbox.m4b"))
+        check("P5: Noop flush keeps pending count", kept.pendingCount == 2)
         ProgressOutboxStore.save(ProgressOutbox())
 
         do {
@@ -983,6 +988,33 @@ enum PhaseZeroSelfTest {
             try? context.save()
         } catch {
             check("P5: true-sum threw: \(error)", false)
+        }
+
+        do {
+            for a in try context.fetch(FetchDescriptor<Audiobook>()) { context.delete(a) }
+            try? context.save()
+            let key = "Audiobooks/LegacySplit.m4b"
+            let local = Audiobook(
+                title: "Legacy Split", sourcePath: key,
+                smartSpeechSavedSeconds: 10, listenedSeconds: 40)
+            context.insert(local)
+            try context.save()
+
+            let mock = MockProgressSync()
+            try await mock.pushBookContribution(DeviceBookContribution(
+                deviceId: "other-device", key: key, kind: .audiobooks,
+                listenedSeconds: 40, savedSeconds: 10, updatedAt: new))
+
+            let sync = SyncManager(source: MockLibrarySource(), context: context, progress: mock)
+            await sync.pullAndMergeProgress()
+            check("P5: shared LWW total is not claimed as mine", local.myListenedSeconds == 0)
+            check("P5: display stays other-device total", local.listenedSeconds == 40)
+            check("P5: shared LWW saved is not claimed as mine", local.mySmartSpeechSavedSeconds == 0)
+
+            for a in try context.fetch(FetchDescriptor<Audiobook>()) { context.delete(a) }
+            try? context.save()
+        } catch {
+            check("P5: legacy-split threw: \(error)", false)
         }
 
         return failures

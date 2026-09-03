@@ -107,6 +107,8 @@ protocol ProgressSync: Sendable {
     func pullAllDeviceStats() async throws -> [DeviceStatsRecord]
     func pushBookContribution(_ contribution: DeviceBookContribution) async throws
     func pullAllBookContributions() async throws -> [DeviceBookContribution]
+    /// False for `NoopProgressSync`. Outbox must not treat a no-op push as delivered.
+    var storesRemotely: Bool { get }
 }
 
 /// No-op sync for the mock / debug / background-refresh paths (needs no Dropbox
@@ -122,6 +124,7 @@ struct NoopProgressSync: ProgressSync {
     func pullAllDeviceStats() async throws -> [DeviceStatsRecord] { [] }
     func pushBookContribution(_ contribution: DeviceBookContribution) async throws {}
     func pullAllBookContributions() async throws -> [DeviceBookContribution] { [] }
+    var storesRemotely: Bool { false }
 }
 
 /// In-memory `ProgressSync` for headless tests. Mirrors `DropboxProgressSync`'s
@@ -175,4 +178,6 @@ actor MockProgressSync: ProgressSync {
     func pullAllBookContributions() async throws -> [DeviceBookContribution] {
         Array(bookContributions.values)
     }
+
+    nonisolated var storesRemotely: Bool { true }
 }

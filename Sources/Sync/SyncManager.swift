@@ -280,6 +280,15 @@ final class SyncManager {
     /// Retry transient SMB/network failures quietly; only surface a user alert after
     /// all attempts fail (avoids one-shot collision / flaky Wi‑Fi looking “broken”).
     private func pushProgressWithRetry(_ p: PlaybackProgress, label: String) async {
+        guard progress.storesRemotely else {
+            enqueueOutbox { box in
+                switch p.kind {
+                case .audiobooks: box.insertAudiobook(p.key)
+                case .books: box.insertBook(p.key)
+                }
+            }
+            return
+        }
         var lastErr: Error?
         for attempt in 0..<3 {
             do {
@@ -346,6 +355,7 @@ final class SyncManager {
             }
         }
         lastSmbProgressPull = Date()
+        var pullSucceeded = false
         do {
             let remotes = try await progress.pullAll()
             let mergeContext = ProgressMergeContext.load(from: context, source: source)
@@ -355,18 +365,24 @@ final class SyncManager {
             }
             try? context.save()
             Self.log("pulled \(remotes.count) progress record(s), applied \(applied)")
+            pullSucceeded = true
         } catch {
             Self.log("pullAndMergeProgress failed: \(error.localizedDescription)")
+            progressLastError = Self.progressSyncErrorMessage(error)
         }
         await pullSmartSpeechStats()
         await pullAndMergeBookContributions()
         await pullAndMergeCollections()
-        markProgressSuccess()
+        if pullSucceeded && progress.storesRemotely { markProgressSuccess() }
     }
 
     /// Back up this device's lifetime SmartSpeech contribution.
     func pushSmartSpeechStats() async {
         SmartSpeechStats.migrateMineIfNeeded()
+        guard progress.storesRemotely else {
+            enqueueOutbox { $0.insertLifetimeStats() }
+            return
+        }
         let record = DeviceStatsRecord(
             deviceId: ProgressDeviceIdentity.deviceId,
             savedSeconds: SmartSpeechStats.mySavedSeconds,
@@ -385,16 +401,19 @@ final class SyncManager {
     /// Sum every device's lifetime contribution into the displayed totals.
     private func pullSmartSpeechStats() async {
         SmartSpeechStats.migrateMineIfNeeded()
-        let remotes = (try? await progress.pullAllDeviceStats()) ?? []
+        let remotes: [DeviceStatsRecord]
+        do {
+            remotes = try await progress.pullAllDeviceStats()
+        } catch {
+            Self.log("pullSmartSpeechStats failed: \(error.localizedDescription)")
+            return
+        }
         if remotes.isEmpty, let legacy = try? await progress.pullStats() {
-            if SmartSpeechStats.myPlayedSeconds == 0 && SmartSpeechStats.mySavedSeconds == 0 {
-                SmartSpeechStats.myPlayedSeconds = legacy.playedSeconds ?? 0
-                SmartSpeechStats.mySavedSeconds = legacy.savedSeconds
-                SmartSpeechStats.myUpdatedAt = legacy.updatedAt
-            }
+            // Old LWW cadence-stats.json is the same number on every device. Use it
+            // for display only — claiming it as mine on each device would double-count.
             SmartSpeechStats.applyDisplayTotals(
-                savedSeconds: max(SmartSpeechStats.mySavedSeconds, legacy.savedSeconds),
-                playedSeconds: max(SmartSpeechStats.myPlayedSeconds, legacy.playedSeconds ?? 0))
+                savedSeconds: max(SmartSpeechStats.totalSavedSeconds, legacy.savedSeconds),
+                playedSeconds: max(SmartSpeechStats.totalPlayedSeconds, legacy.playedSeconds ?? 0))
             return
         }
         var saved = 0.0
@@ -429,6 +448,13 @@ final class SyncManager {
     /// Back up local collection manifests for both shelves. Called on foreground activation
     /// and after any local collection mutation from the shelf UI.
     func pushCollections() async {
+        guard progress.storesRemotely else {
+            enqueueOutbox { box in
+                box.insertCollections(kind: .audiobooks)
+                box.insertCollections(kind: .books)
+            }
+            return
+        }
         for kind in [FolderKind.audiobooks, .books] {
             guard shouldPushCollections(kind: kind) else { continue }
             let manifest = buildCollectionsManifest(kind: kind)
@@ -1459,6 +1485,10 @@ final class SyncManager {
             refreshProgressStatus()
             return
         }
+        guard progress.storesRemotely else {
+            refreshProgressStatus()
+            return
+        }
         ProgressOutboxStore.save(ProgressOutbox())
         await pullAndMergeProgressIfNeeded(force: true)
         for key in box.audiobookKeys {
@@ -1491,6 +1521,10 @@ final class SyncManager {
     }
 
     private func pushBookContribution(forAudiobook book: Audiobook) async {
+        guard progress.storesRemotely else {
+            enqueueOutbox { $0.insertAudiobook(book.sourcePath) }
+            return
+        }
         if book.myListenedSeconds == nil {
             book.myListenedSeconds = book.listenedSeconds ?? 0
         }
@@ -1514,6 +1548,10 @@ final class SyncManager {
     }
 
     private func pushBookContribution(forBook book: Book) async {
+        guard progress.storesRemotely else {
+            enqueueOutbox { $0.insertBook(book.fileRelPath) }
+            return
+        }
         if book.myReadingSeconds == nil {
             book.myReadingSeconds = book.readingSeconds ?? 0
         }
@@ -1533,7 +1571,13 @@ final class SyncManager {
     }
 
     private func pullAndMergeBookContributions() async {
-        let remotes = (try? await progress.pullAllBookContributions()) ?? []
+        let remotes: [DeviceBookContribution]
+        do {
+            remotes = try await progress.pullAllBookContributions()
+        } catch {
+            Self.log("pullAndMergeBookContributions failed: \(error.localizedDescription)")
+            return
+        }
         guard !remotes.isEmpty else { return }
         let mine = ProgressDeviceIdentity.deviceId
         let mergeContext = ProgressMergeContext.load(from: context, source: source)
@@ -1562,23 +1606,62 @@ final class SyncManager {
         }
         for (key, slot) in listenedByKey {
             guard let book = mergeContext.audiobook(for: key) else { continue }
-            let localMine = book.myListenedSeconds ?? book.listenedSeconds ?? 0
-            book.myListenedSeconds = max(localMine, slot.mine)
+            book.myListenedSeconds = Self.seedMine(
+                localMine: book.myListenedSeconds,
+                localTotal: book.listenedSeconds,
+                remoteMine: slot.mine,
+                others: slot.others)
             book.listenedSeconds = (book.myListenedSeconds ?? 0) + slot.others
         }
         for (key, slot) in savedByKey {
             guard let book = mergeContext.audiobook(for: key) else { continue }
-            let localMine = book.mySmartSpeechSavedSeconds ?? book.smartSpeechSavedSeconds ?? 0
-            book.mySmartSpeechSavedSeconds = max(localMine, slot.mine)
+            book.mySmartSpeechSavedSeconds = Self.seedMine(
+                localMine: book.mySmartSpeechSavedSeconds,
+                localTotal: book.smartSpeechSavedSeconds,
+                remoteMine: slot.mine,
+                others: slot.others)
             book.smartSpeechSavedSeconds = (book.mySmartSpeechSavedSeconds ?? 0) + slot.others
         }
         for (key, slot) in readingByKey {
             guard let book = mergeContext.book(for: key) else { continue }
-            let localMine = book.myReadingSeconds ?? book.readingSeconds ?? 0
-            book.myReadingSeconds = max(localMine, slot.mine)
+            book.myReadingSeconds = Self.seedMine(
+                localMine: book.myReadingSeconds,
+                localTotal: book.readingSeconds,
+                remoteMine: slot.mine,
+                others: slot.others)
             book.readingSeconds = (book.myReadingSeconds ?? 0) + slot.others
         }
         try? context.save()
+        seedLifetimeMineFromBooksIfNeeded()
+    }
+
+    /// When other devices already hold the old LWW total, this device must not also
+    /// claim `listenedSeconds` as mine. Residual after subtracting others is the
+    /// conservative split of a shared historical blob.
+    private static func seedMine(
+        localMine: Double?,
+        localTotal: Double?,
+        remoteMine: Double,
+        others: Double
+    ) -> Double {
+        if let localMine {
+            return max(localMine, remoteMine)
+        }
+        if others > 0 {
+            return max(remoteMine, max(0, (localTotal ?? 0) - others))
+        }
+        return max(remoteMine, localTotal ?? 0)
+    }
+
+    private func seedLifetimeMineFromBooksIfNeeded() {
+        guard SmartSpeechStats.myPlayedSeconds == 0 && SmartSpeechStats.mySavedSeconds == 0 else { return }
+        let books = (try? context.fetch(FetchDescriptor<Audiobook>())) ?? []
+        let played = books.reduce(0.0) { $0 + ($1.myListenedSeconds ?? 0) }
+        let saved = books.reduce(0.0) { $0 + ($1.mySmartSpeechSavedSeconds ?? 0) }
+        guard played > 0 || saved > 0 else { return }
+        SmartSpeechStats.myPlayedSeconds = played
+        SmartSpeechStats.mySavedSeconds = saved
+        SmartSpeechStats.myUpdatedAt = Date()
     }
 
     /// One-time NAS `rhapsode-sync` → Dropbox. Retries later if the share is unreachable.
@@ -1604,12 +1687,9 @@ final class SyncManager {
                 applyRemoteProgressReturningApplied(p, context: mergeContext)
             }
             if let stats = try await nas.pullStats() {
-                SmartSpeechStats.migrateMineIfNeeded()
-                if SmartSpeechStats.myPlayedSeconds == 0 && SmartSpeechStats.mySavedSeconds == 0 {
-                    SmartSpeechStats.myPlayedSeconds = stats.playedSeconds ?? 0
-                    SmartSpeechStats.mySavedSeconds = stats.savedSeconds
-                    SmartSpeechStats.myUpdatedAt = stats.updatedAt
-                }
+                SmartSpeechStats.applyDisplayTotals(
+                    savedSeconds: max(SmartSpeechStats.totalSavedSeconds, stats.savedSeconds),
+                    playedSeconds: max(SmartSpeechStats.totalPlayedSeconds, stats.playedSeconds ?? 0))
             }
             for kind in [FolderKind.audiobooks, .books] {
                 if let manifest = try await nas.pullCollections(kind: kind) {
@@ -1618,7 +1698,6 @@ final class SyncManager {
                 }
             }
             try? context.save()
-            ProgressImportState.nasV1Done = true
             enqueueOutbox { box in
                 box.insertLifetimeStats()
                 box.insertCollections(kind: .audiobooks)
@@ -1626,8 +1705,23 @@ final class SyncManager {
                 for book in (try? context.fetch(FetchDescriptor<Audiobook>())) ?? [] {
                     box.insertAudiobook(book.sourcePath)
                 }
+                if !KOSyncSettings.isEbookProgressAuthority {
+                    for book in (try? context.fetch(FetchDescriptor<Book>())) ?? [] {
+                        box.insertBook(book.fileRelPath)
+                    }
+                }
             }
-            Self.log("NAS progress import done")
+            if progress.storesRemotely {
+                await flushProgressOutbox()
+                if ProgressOutboxStore.load().isEmpty {
+                    ProgressImportState.nasV1Done = true
+                    Self.log("NAS progress import done")
+                } else {
+                    Self.log("NAS progress import applied locally; waiting for Dropbox delivery")
+                }
+            } else {
+                Self.log("NAS progress import applied locally; waiting for Dropbox")
+            }
         } catch {
             Self.log("NAS progress import failed: \(error.localizedDescription)")
             progressLastError = Self.progressSyncErrorMessage(error)

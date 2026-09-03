@@ -175,18 +175,16 @@ final class AudiobookPlayer {
             return
         }
         if pendingListenedSeconds > 0 {
-            if book.myListenedSeconds == nil {
-                book.myListenedSeconds = book.listenedSeconds ?? 0
+            if let mine = book.myListenedSeconds {
+                book.myListenedSeconds = mine + pendingListenedSeconds
             }
-            book.myListenedSeconds = (book.myListenedSeconds ?? 0) + pendingListenedSeconds
             book.listenedSeconds = (book.listenedSeconds ?? 0) + pendingListenedSeconds
             pendingListenedSeconds = 0
         }
         if pendingSavedSeconds > 0 {
-            if book.mySmartSpeechSavedSeconds == nil {
-                book.mySmartSpeechSavedSeconds = book.smartSpeechSavedSeconds ?? 0
+            if let mine = book.mySmartSpeechSavedSeconds {
+                book.mySmartSpeechSavedSeconds = mine + pendingSavedSeconds
             }
-            book.mySmartSpeechSavedSeconds = (book.mySmartSpeechSavedSeconds ?? 0) + pendingSavedSeconds
             book.smartSpeechSavedSeconds = (book.smartSpeechSavedSeconds ?? 0) + pendingSavedSeconds
             pendingSavedSeconds = 0
         }

@@ -37,7 +37,7 @@ struct KOSyncSettingsView: View {
             } header: {
                 Text("Server")
             } footer: {
-                Text("Example: https://sync.koreader.rocks or http://192.168.1.10:7200. Password is stored as MD5 (KOReader userkey) in the Keychain.")
+                Text("Default server is https://sync.koreader.rocks (often unreliable). For a local or self-hosted server, use something like http://192.168.1.10:7200. Password is stored as MD5 (KOReader userkey) in the Keychain.")
             }
 
             Section("Conflict strategy") {

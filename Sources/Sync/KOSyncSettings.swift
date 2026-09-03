@@ -39,14 +39,17 @@ enum KOSyncSettings {
     private static let keychainService = "com.naufalmir.rhapsode.kosync"
     private static let userkeyAccount = "userkey"
 
+    /// Public KOReader sync server; shown by default until the user chooses another URL.
+    static let defaultServerURL = "https://sync.koreader.rocks"
+
     static var isEnabled: Bool {
         get { UserDefaults.standard.bool(forKey: enabledKey) }
         set { UserDefaults.standard.set(newValue, forKey: enabledKey) }
     }
 
-    /// Base URL without trailing slash, e.g. `https://sync.example.com` or `http://192.168.1.10:7200`.
+    /// Base URL without trailing slash, e.g. `https://sync.koreader.rocks` or `http://192.168.1.10:7200`.
     static var serverURL: String {
-        get { UserDefaults.standard.string(forKey: serverKey) ?? "" }
+        get { UserDefaults.standard.string(forKey: serverKey) ?? defaultServerURL }
         set {
             var s = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
             while s.hasSuffix("/") { s.removeLast() }

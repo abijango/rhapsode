@@ -106,11 +106,11 @@ actor KOSyncClient {
                 if reg.status == 402 {
                     return .init(success: false, message: "Invalid credentials.")
                 }
-                let msg = jsonMessage(reg.data) ?? "Registration failed (\(reg.status))."
+                let msg = jsonMessage(reg.data) ?? humanHTTPStatusMessage(reg.status) ?? "Registration failed (\(reg.status))."
                 return .init(success: false, message: msg)
             }
 
-            let msg = jsonMessage(auth.data) ?? "Authorization failed (\(auth.status))."
+            let msg = jsonMessage(auth.data) ?? humanHTTPStatusMessage(auth.status) ?? "Authorization failed (\(auth.status))."
             return .init(success: false, message: msg)
         } catch {
             return .init(success: false, message: error.localizedDescription)
@@ -228,6 +228,20 @@ actor KOSyncClient {
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else { return nil }
         return (obj["message"] as? String) ?? (obj["error"] as? String)
+    }
+
+    /// Plain-language hints for common HTTP/proxy status codes (Cloudflare, gateways).
+    private func humanHTTPStatusMessage(_ status: Int) -> String? {
+        switch status {
+        case 401:
+            return "Invalid username or password."
+        case 521, 522, 523, 524:
+            return "Sync server unreachable (HTTP \(status)). sync.koreader.rocks is often down — try again later or point Server URL at a self-hosted KOReader sync server."
+        case 502, 503, 504:
+            return "Sync server temporarily unavailable (HTTP \(status)). Try again later."
+        default:
+            return nil
+        }
     }
 }
 

@@ -11,7 +11,6 @@ import UIKit
 /// status subtitle; dense controls live one level down (HIG: hierarchical lists,
 /// essential info first, secondary detail on drill-down).
 struct SettingsView: View {
-    @Environment(\.modelContext) private var modelContext
     @Environment(SyncManager.self) private var sync
     @Query(sort: \DownloadItem.remoteEntryID) private var downloadItems: [DownloadItem]
 
@@ -96,15 +95,6 @@ struct SettingsView: View {
                 } footer: {
                     Text("Sync ebook position with KOReader and CrossInk via the Progress Sync protocol.")
                 }
-
-                #if DEBUG
-                Section("Developer") {
-                    NavigationLink("Live SmartSpeech (spike)") {
-                        LiveSmartSpeechPlayerView()
-                    }
-                    Button("Insert sample audiobook") { insertSample() }
-                }
-                #endif
             }
             .navigationTitle("Settings")
             .task { smartSpeechEnabled = SmartSpeechPreferences.isEnabled }
@@ -132,15 +122,6 @@ struct SettingsView: View {
                 .lineLimit(1)
         }
     }
-
-    #if DEBUG
-    private func insertSample() {
-        let store = LibraryStore(context: modelContext)
-        let book = Audiobook(title: "Sample Audiobook", author: "Test", sourcePath: "sample")
-        store.insert(book)
-        try? store.save()
-    }
-    #endif
 }
 
 // MARK: - SmartSpeech

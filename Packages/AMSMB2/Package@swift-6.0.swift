@@ -12,9 +12,15 @@ let package = Package(
         .visionOS(.v1),
     ],
     products: [
+        // Static link for Rhapsode (Mac Catalyst + free team): upstream forces
+        // `.dynamic` for App Store LGPL compliance, but dynamic SPM frameworks
+        // fail at launch on device (not embedded) and on Catalyst with "different
+        // Team IDs" signature errors. Personal / sideload builds: static is fine.
+        // Revisit if shipping App Store. Keep in sync with Package.swift — Swift 6
+        // tools prefer this overlay and ignore the 5.9 manifest.
         .library(
             name: "AMSMB2",
-            type: .dynamic,
+            type: .static,
             targets: ["AMSMB2"]
         ),
     ],

@@ -24,6 +24,9 @@ Package.resolved
 # Generated icon preview workspace (masters live in SupportingFiles/)
 icon-variants/
 
+# Local agent decision trails
+.audit/
+
 # macOS
 .DS_Store
 

@@ -13,6 +13,10 @@ enum SmartSpeechStats {
         static let totalSavedSeconds = "cadence.totalSavedSeconds"
         static let totalPlayedSeconds = "cadence.totalPlayedSeconds"
         static let updatedAt = "cadence.statsUpdatedAt"
+        static let mySavedSeconds = "rhapsode.stats.mySavedSeconds"
+        static let myPlayedSeconds = "rhapsode.stats.myPlayedSeconds"
+        static let myUpdatedAt = "rhapsode.stats.myUpdatedAt"
+        static let migratedMine = "rhapsode.stats.migratedMine.v1"
     }
 
     /// Total seconds saved by the SmartSpeech feature across all books, accumulated from
@@ -51,11 +55,50 @@ enum SmartSpeechStats {
 
     /// Add saved seconds to the cumulative total, clamping negatives to zero.
     /// - Parameter seconds: seconds to add; negative values are treated as zero (no-op).
+    static var mySavedSeconds: TimeInterval {
+        get {
+            migrateMineIfNeeded()
+            let raw = UserDefaults.standard.double(forKey: Key.mySavedSeconds)
+            return raw < 0 ? 0 : raw
+        }
+        set { UserDefaults.standard.set(newValue < 0 ? 0 : newValue, forKey: Key.mySavedSeconds) }
+    }
+
+    static var myPlayedSeconds: TimeInterval {
+        get {
+            migrateMineIfNeeded()
+            let raw = UserDefaults.standard.double(forKey: Key.myPlayedSeconds)
+            return raw < 0 ? 0 : raw
+        }
+        set { UserDefaults.standard.set(newValue < 0 ? 0 : newValue, forKey: Key.myPlayedSeconds) }
+    }
+
+    static var myUpdatedAt: Date? {
+        get { UserDefaults.standard.object(forKey: Key.myUpdatedAt) as? Date }
+        set { UserDefaults.standard.set(newValue, forKey: Key.myUpdatedAt) }
+    }
+
+    static func migrateMineIfNeeded() {
+        guard !UserDefaults.standard.bool(forKey: Key.migratedMine) else { return }
+        UserDefaults.standard.set(true, forKey: Key.migratedMine)
+        if UserDefaults.standard.object(forKey: Key.myPlayedSeconds) == nil {
+            UserDefaults.standard.set(UserDefaults.standard.double(forKey: Key.totalPlayedSeconds), forKey: Key.myPlayedSeconds)
+        }
+        if UserDefaults.standard.object(forKey: Key.mySavedSeconds) == nil {
+            UserDefaults.standard.set(UserDefaults.standard.double(forKey: Key.totalSavedSeconds), forKey: Key.mySavedSeconds)
+        }
+        if myUpdatedAt == nil { myUpdatedAt = updatedAt ?? Date() }
+    }
+
     static func addSaved(_ seconds: TimeInterval) {
         let clamped = seconds < 0 ? 0 : seconds
         guard clamped > 0 else { return }
+        migrateMineIfNeeded()
         totalSavedSeconds += clamped
-        updatedAt = Date()
+        mySavedSeconds += clamped
+        let now = Date()
+        updatedAt = now
+        myUpdatedAt = now
     }
 
     /// Add listened content seconds to the cumulative played total, clamping negatives to zero.
@@ -63,14 +106,30 @@ enum SmartSpeechStats {
     static func addPlayed(_ seconds: TimeInterval) {
         let clamped = seconds < 0 ? 0 : seconds
         guard clamped > 0 else { return }
+        migrateMineIfNeeded()
         totalPlayedSeconds += clamped
-        updatedAt = Date()
+        myPlayedSeconds += clamped
+        let now = Date()
+        updatedAt = now
+        myUpdatedAt = now
     }
 
     /// Overwrite the lifetime totals locally and stamp `updatedAt = now` so the next cross-device
     /// push wins last-writer-wins. Used by "Recalculate" in Settings to rebuild the totals from the
     /// actual per-book data (e.g. to clear stale/seeded values).
+    /// Rewrite this device's contribution (Recalculate). Display totals are refreshed after pull.
     static func overwrite(savedSeconds: TimeInterval, playedSeconds: TimeInterval) {
+        migrateMineIfNeeded()
+        mySavedSeconds = max(0, savedSeconds)
+        myPlayedSeconds = max(0, playedSeconds)
+        let now = Date()
+        myUpdatedAt = now
+        updatedAt = now
+        totalSavedSeconds = mySavedSeconds
+        totalPlayedSeconds = myPlayedSeconds
+    }
+
+    static func applyDisplayTotals(savedSeconds: TimeInterval, playedSeconds: TimeInterval) {
         totalSavedSeconds = max(0, savedSeconds)
         totalPlayedSeconds = max(0, playedSeconds)
         updatedAt = Date()

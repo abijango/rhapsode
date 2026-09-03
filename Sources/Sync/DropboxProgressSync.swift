@@ -75,6 +75,87 @@ struct DropboxProgressSync: ProgressSync {
         return try? PlaybackProgress.decoder.decode(SmartSpeechStatsRecord.self, from: data)
     }
 
+    static func deviceStatsPath(deviceId: String) -> String {
+        "\(folder)/devices/\(deviceId)/stats.json"
+    }
+
+    static func bookContributionPath(deviceId: String, key: String) -> String {
+        let digest = SHA256.hash(data: Data(key.utf8))
+        let hex = digest.map { String(format: "%02x", $0) }.joined()
+        return "\(folder)/devices/\(deviceId)/books/\(hex).json"
+    }
+
+    func pushDeviceStats(_ stats: DeviceStatsRecord) async throws {
+        let path = Self.deviceStatsPath(deviceId: stats.deviceId)
+        if let data = try? await source.readFile(at: path),
+           let existing = try? PlaybackProgress.decoder.decode(DeviceStatsRecord.self, from: data),
+           existing.updatedAt > stats.updatedAt {
+            return
+        }
+        try await source.ensureFolderExists(Self.folder)
+        try await source.ensureFolderExists("\(Self.folder)/devices")
+        try await source.ensureFolderExists("\(Self.folder)/devices/\(stats.deviceId)")
+        let data = try PlaybackProgress.encoder.encode(stats)
+        try await source.writeFile(data, to: path)
+    }
+
+    func pullAllDeviceStats() async throws -> [DeviceStatsRecord] {
+        let devices: [RemoteEntry]
+        do {
+            devices = try await source.listFolder("\(Self.folder)/devices")
+        } catch {
+            return []
+        }
+        var result: [DeviceStatsRecord] = []
+        for entry in devices where entry.isFolder {
+            if let data = try? await source.readFile(at: "\(entry.path)/stats.json"),
+               let record = try? PlaybackProgress.decoder.decode(DeviceStatsRecord.self, from: data) {
+                result.append(record)
+            }
+        }
+        return result
+    }
+
+    func pushBookContribution(_ contribution: DeviceBookContribution) async throws {
+        let path = Self.bookContributionPath(deviceId: contribution.deviceId, key: contribution.key)
+        if let data = try? await source.readFile(at: path),
+           let existing = try? PlaybackProgress.decoder.decode(DeviceBookContribution.self, from: data),
+           existing.updatedAt > contribution.updatedAt {
+            return
+        }
+        try await source.ensureFolderExists(Self.folder)
+        try await source.ensureFolderExists("\(Self.folder)/devices")
+        try await source.ensureFolderExists("\(Self.folder)/devices/\(contribution.deviceId)")
+        try await source.ensureFolderExists("\(Self.folder)/devices/\(contribution.deviceId)/books")
+        let data = try PlaybackProgress.encoder.encode(contribution)
+        try await source.writeFile(data, to: path)
+    }
+
+    func pullAllBookContributions() async throws -> [DeviceBookContribution] {
+        let devices: [RemoteEntry]
+        do {
+            devices = try await source.listFolder("\(Self.folder)/devices")
+        } catch {
+            return []
+        }
+        var result: [DeviceBookContribution] = []
+        for device in devices where device.isFolder {
+            let books: [RemoteEntry]
+            do {
+                books = try await source.listFolder("\(device.path)/books")
+            } catch {
+                continue
+            }
+            for entry in books where !entry.isFolder && entry.name.hasSuffix(".json") {
+                if let data = try? await source.readFile(at: entry.path),
+                   let c = try? PlaybackProgress.decoder.decode(DeviceBookContribution.self, from: data) {
+                    result.append(c)
+                }
+            }
+        }
+        return result
+    }
+
     func pushCollections(_ manifest: CollectionsManifest) async throws {
         let path = Self.collectionsPath(for: manifest.kind)
         if let data = try? await source.readFile(at: path),

@@ -15,15 +15,20 @@ final class SyncManager {
     let source: LibrarySource
     private let context: ModelContext
     private let notifier = NotificationService()
-    /// Cross-device progress sync (Phase 5). Defaults to a no-op so the mock /
-    /// background-refresh call sites need no change; the app injects
-    /// `DropboxProgressSync`.
+    /// Cross-device progress sync. Independent of `source` (library can be SMB
+    /// while progress writes to Dropbox).
     private let progress: ProgressSync
+    /// Dropbox actor used to longpoll `/.rhapsode-sync` when progress is Dropbox.
+    private let progressDropbox: DropboxSource?
 
     private(set) var isScanning = false
     /// Launch / watcher catalogue refresh — must not cover the shelf or block Continue.
     private(set) var isRefreshingInBackground = false
     var lastError: String?
+    var progressLastError: String?
+    var progressLastSuccessAt: Date?
+    var progressPendingCount: Int = 0
+    var dropboxProgressConnected: Bool { progressDropbox != nil }
     /// rhapsode-server catalogue (metadata only). Populated by `refreshCatalog` /
     /// server-mode scan; used for greyed shelf tiles + selective download.
     private(set) var remoteCatalog: [RemoteCatalogEntry] = []
@@ -84,16 +89,26 @@ final class SyncManager {
     weak var activeReader: (any ActiveEbookReader)?
     var activeReaderBookID: UUID?
 
-    init(source: LibrarySource, context: ModelContext, progress: ProgressSync = NoopProgressSync()) {
+    init(
+        source: LibrarySource,
+        context: ModelContext,
+        progress: ProgressSync = NoopProgressSync(),
+        progressDropbox: DropboxSource? = nil
+    ) {
         self.source = source
         self.context = context
         self.progress = progress
+        self.progressDropbox = progressDropbox
         seenRemoteCatalogIDs = Self.loadSeenCatalogIDs(storageKey: Self.seenCatalogStorageKey)
         if source is SmbLibrarySource || source is RhapsodeServerSource {
             remoteCatalog = Self.loadCachedCatalog()
         }
+        refreshProgressStatus()
         reachability.start { [weak self] online in
             self?.isRemoteLibraryOnline = online
+            if online {
+                Task { await self?.flushProgressOutbox() }
+            }
         }
         isRemoteLibraryOnline = true
         refreshDownloadingRemoteEntryIDs()
@@ -180,7 +195,9 @@ final class SyncManager {
                 await scanNow(showProgress: false)
             }
         }
+        await importNASProgressIfNeeded()
         await pullAndMergeProgressIfNeeded(force: true)
+        await flushProgressOutbox()
         await pushSmartSpeechStats()
         await pushCollections()
     }
@@ -225,6 +242,7 @@ final class SyncManager {
             readingLocatorJSON: nil, listenedSeconds: book.listenedSeconds,
             savedSeconds: book.smartSpeechSavedSeconds, updatedAt: updatedAt)
         await pushProgressWithRetry(p, label: "pushAudiobookProgress")
+        await pushBookContribution(forAudiobook: book)
     }
 
     /// Push the current local reading position for one book to the cloud.
@@ -256,6 +274,7 @@ final class SyncManager {
             readingLocatorJSON: b.readingLocator, readingSeconds: b.readingSeconds,
             updatedAt: updatedAt)
         await pushProgressWithRetry(p, label: "pushBookProgress")
+        await pushBookContribution(forBook: b)
     }
 
     /// Retry transient SMB/network failures quietly; only surface a user alert after
@@ -274,8 +293,14 @@ final class SyncManager {
                 try? await Task.sleep(for: .milliseconds(200 + attempt * 300))
             }
         }
+        enqueueOutbox { box in
+            switch p.kind {
+            case .audiobooks: box.insertAudiobook(p.key)
+            case .books: box.insertBook(p.key)
+            }
+        }
         if let lastErr {
-            lastError = Self.progressSyncErrorMessage(lastErr)
+            progressLastError = Self.progressSyncErrorMessage(lastErr)
         }
     }
 
@@ -299,18 +324,9 @@ final class SyncManager {
     /// points the user at the reconnect that fixes it.
     private static func progressSyncErrorMessage(_ error: Error) -> String {
         Self.log("progress sync user alert: \(error)")
-        if SmbConfig.shouldUseSmb {
-            let detail = error.localizedDescription
-            return "Couldn't sync progress to the NAS (SMB). Check that your user can write "
-                + "to the sync folder (\(SmbConfig.syncPath)) on the share."
-                + (detail.isEmpty ? "" : "\n\n\(detail)")
-        }
-        if RhapsodeServerConfig.shouldUseServer {
-            return "Couldn't sync progress to Rhapsode Server. Check the server URL, "
-                + "that you're on Tailscale/LAN, and that your device token is still valid."
-        }
-        return "Couldn't sync your reading progress to Dropbox. If this keeps happening, "
+        return "Couldn't sync progress to Dropbox. If this keeps happening, "
             + "disconnect and reconnect Dropbox in Settings on both devices."
+            + (error.localizedDescription.isEmpty ? "" : "\n\n\(error.localizedDescription)")
     }
 
     /// Pull every remote progress record and apply each to the matching local
@@ -343,30 +359,69 @@ final class SyncManager {
             Self.log("pullAndMergeProgress failed: \(error.localizedDescription)")
         }
         await pullSmartSpeechStats()
+        await pullAndMergeBookContributions()
         await pullAndMergeCollections()
+        markProgressSuccess()
     }
 
-    /// Back up the lifetime SmartSpeech stats (time saved + time listened) to Dropbox. Single shared
-    /// record, LWW by `updatedAt` (read-before-write guard inside `pushStats`).
+    /// Back up this device's lifetime SmartSpeech contribution.
     func pushSmartSpeechStats() async {
-        let record = SmartSpeechStatsRecord(
-            savedSeconds: SmartSpeechStats.totalSavedSeconds,
-            playedSeconds: SmartSpeechStats.totalPlayedSeconds,
-            updatedAt: SmartSpeechStats.updatedAt ?? Date())
-        do { try await progress.pushStats(record) }
-        catch { Self.log("pushSmartSpeechStats failed: \(error.localizedDescription)") }
+        SmartSpeechStats.migrateMineIfNeeded()
+        let record = DeviceStatsRecord(
+            deviceId: ProgressDeviceIdentity.deviceId,
+            savedSeconds: SmartSpeechStats.mySavedSeconds,
+            playedSeconds: SmartSpeechStats.myPlayedSeconds,
+            updatedAt: SmartSpeechStats.myUpdatedAt ?? Date())
+        do {
+            try await progress.pushDeviceStats(record)
+            markProgressSuccess()
+        } catch {
+            Self.log("pushSmartSpeechStats failed: \(error.localizedDescription)")
+            enqueueOutbox { $0.insertLifetimeStats() }
+            progressLastError = Self.progressSyncErrorMessage(error)
+        }
     }
 
-    /// Adopt the backed-up SmartSpeech stats if the remote record is newer (carry-over to a new
-    /// device / reinstall). Called inside `pullAndMergeProgress`.
+    /// Sum every device's lifetime contribution into the displayed totals.
     private func pullSmartSpeechStats() async {
-        guard let record = try? await progress.pullStats() else { return }
-        if record.isNewer(than: SmartSpeechStats.updatedAt) {
-            SmartSpeechStats.apply(savedSeconds: record.savedSeconds,
-                               // Old records lack playedSeconds — keep the local total rather than zero it.
-                               playedSeconds: record.playedSeconds ?? SmartSpeechStats.totalPlayedSeconds,
-                               updatedAt: record.updatedAt)
+        SmartSpeechStats.migrateMineIfNeeded()
+        let remotes = (try? await progress.pullAllDeviceStats()) ?? []
+        if remotes.isEmpty, let legacy = try? await progress.pullStats() {
+            if SmartSpeechStats.myPlayedSeconds == 0 && SmartSpeechStats.mySavedSeconds == 0 {
+                SmartSpeechStats.myPlayedSeconds = legacy.playedSeconds ?? 0
+                SmartSpeechStats.mySavedSeconds = legacy.savedSeconds
+                SmartSpeechStats.myUpdatedAt = legacy.updatedAt
+            }
+            SmartSpeechStats.applyDisplayTotals(
+                savedSeconds: max(SmartSpeechStats.mySavedSeconds, legacy.savedSeconds),
+                playedSeconds: max(SmartSpeechStats.myPlayedSeconds, legacy.playedSeconds ?? 0))
+            return
         }
+        var saved = 0.0
+        var played = 0.0
+        var sawMine = false
+        for record in remotes {
+            if record.deviceId == ProgressDeviceIdentity.deviceId {
+                sawMine = true
+                let playedMine = max(record.playedSeconds, SmartSpeechStats.myPlayedSeconds)
+                let savedMine = max(record.savedSeconds, SmartSpeechStats.mySavedSeconds)
+                if playedMine > SmartSpeechStats.myPlayedSeconds {
+                    SmartSpeechStats.myPlayedSeconds = playedMine
+                    SmartSpeechStats.mySavedSeconds = savedMine
+                    SmartSpeechStats.myUpdatedAt = record.updatedAt
+                }
+                saved += savedMine
+                played += playedMine
+            } else {
+                saved += record.savedSeconds
+                played += record.playedSeconds
+            }
+        }
+        if !sawMine {
+            saved += SmartSpeechStats.mySavedSeconds
+            played += SmartSpeechStats.myPlayedSeconds
+        }
+        SmartSpeechStats.applyDisplayTotals(savedSeconds: saved, playedSeconds: played)
     }
 
     // MARK: Cross-device collections sync
@@ -377,8 +432,14 @@ final class SyncManager {
         for kind in [FolderKind.audiobooks, .books] {
             guard shouldPushCollections(kind: kind) else { continue }
             let manifest = buildCollectionsManifest(kind: kind)
-            do { try await progress.pushCollections(manifest) }
-            catch { Self.log("pushCollections(\(kind)) failed: \(error.localizedDescription)") }
+            do {
+                try await progress.pushCollections(manifest)
+                markProgressSuccess()
+            } catch {
+                Self.log("pushCollections(\(kind)) failed: \(error.localizedDescription)")
+                enqueueOutbox { $0.insertCollections(kind: kind) }
+                progressLastError = Self.progressSyncErrorMessage(error)
+            }
         }
     }
 
@@ -552,41 +613,24 @@ final class SyncManager {
     /// (back off, then re-seed the cursor and retry). Never ingests its files as library
     /// content (it is not a `WatchedFolder` and `pullAndMergeProgress` reads it directly).
     private func watchProgress() async {
-        if usesServerBackend {
-            while !Task.isCancelled {
-                await pullAndMergeProgressIfNeeded(force: true)
-                try? await Task.sleep(for: .seconds(Self.smbProgressMinInterval))
-            }
-            return
-        }
+        guard let dbx = progressDropbox else { return }
 
-        // Progress folder path depends on backend (Dropbox app folder vs SMB share).
-        let progressFolder: String = {
-            if usesSmbBackend { return SmbProgressSync.folder }
-            return DropboxProgressSync.folder
-        }()
-
+        let progressFolder = DropboxProgressSync.folder
         var cursor: String?
         while !Task.isCancelled {
             do {
                 if cursor == nil {
-                    cursor = try await source.latestCursor(progressFolder)
+                    cursor = try await dbx.latestCursor(progressFolder)
                 }
                 guard let c = cursor else { return }
-                let hasChanges = try await source.longpoll(cursor: c)
+                let hasChanges = try await dbx.longpoll(cursor: c)
                 if Task.isCancelled { return }
                 if hasChanges {
-                    if usesSmbBackend {
-                        cursor = try? await source.latestCursor(progressFolder)
-                        await pullAndMergeProgressIfNeeded(force: true)
-                    } else {
-                        let (_, newCursor) = try await source.changes(since: c)
-                        cursor = newCursor
-                        await pullAndMergeProgress()
-                    }
+                    let (_, newCursor) = try await dbx.changes(since: c)
+                    cursor = newCursor
+                    await pullAndMergeProgress()
                 }
             } catch {
-                // Folder missing (no push yet) or transient error — re-seed + back off.
                 Self.log("watchProgress error: \(error) — backing off")
                 cursor = nil
                 try? await Task.sleep(for: .seconds(15))
@@ -1391,6 +1435,204 @@ final class SyncManager {
         (.audiobooks, DropboxConfig.audiobooksPath),
         (.books, DropboxConfig.booksPath),
     ]
+
+    func refreshProgressStatus() {
+        progressPendingCount = ProgressOutboxStore.load().pendingCount
+    }
+
+    func flushProgressOutbox(force: Bool = false) async {
+        var box = ProgressOutboxStore.load()
+        if force {
+            for book in (try? context.fetch(FetchDescriptor<Audiobook>())) ?? [] {
+                box.insertAudiobook(book.sourcePath)
+            }
+            if !KOSyncSettings.isEbookProgressAuthority {
+                for book in (try? context.fetch(FetchDescriptor<Book>())) ?? [] {
+                    box.insertBook(book.fileRelPath)
+                }
+            }
+            box.insertLifetimeStats()
+            box.insertCollections(kind: .audiobooks)
+            box.insertCollections(kind: .books)
+        }
+        guard !box.isEmpty else {
+            refreshProgressStatus()
+            return
+        }
+        ProgressOutboxStore.save(ProgressOutbox())
+        await pullAndMergeProgressIfNeeded(force: true)
+        for key in box.audiobookKeys {
+            await pushAudiobookProgress(sourcePath: key)
+        }
+        for key in box.bookKeys {
+            await pushBookProgress(relPath: key)
+        }
+        if box.lifetimeStats {
+            await pushSmartSpeechStats()
+        }
+        if box.collectionsAudiobooks || box.collectionsBooks {
+            await pushCollections()
+        }
+        refreshProgressStatus()
+        if ProgressOutboxStore.load().isEmpty { markProgressSuccess() }
+    }
+
+    private func enqueueOutbox(_ mutate: (inout ProgressOutbox) -> Void) {
+        var box = ProgressOutboxStore.load()
+        mutate(&box)
+        ProgressOutboxStore.save(box)
+        refreshProgressStatus()
+    }
+
+    private func markProgressSuccess() {
+        progressLastSuccessAt = Date()
+        progressLastError = nil
+        refreshProgressStatus()
+    }
+
+    private func pushBookContribution(forAudiobook book: Audiobook) async {
+        if book.myListenedSeconds == nil {
+            book.myListenedSeconds = book.listenedSeconds ?? 0
+        }
+        if book.mySmartSpeechSavedSeconds == nil {
+            book.mySmartSpeechSavedSeconds = book.smartSpeechSavedSeconds ?? 0
+        }
+        let c = DeviceBookContribution(
+            deviceId: ProgressDeviceIdentity.deviceId,
+            key: book.sourcePath,
+            kind: .audiobooks,
+            listenedSeconds: book.myListenedSeconds,
+            savedSeconds: book.mySmartSpeechSavedSeconds,
+            updatedAt: book.progressUpdatedAt ?? Date())
+        do {
+            try await progress.pushBookContribution(c)
+            markProgressSuccess()
+        } catch {
+            enqueueOutbox { $0.insertAudiobook(book.sourcePath) }
+            progressLastError = Self.progressSyncErrorMessage(error)
+        }
+    }
+
+    private func pushBookContribution(forBook book: Book) async {
+        if book.myReadingSeconds == nil {
+            book.myReadingSeconds = book.readingSeconds ?? 0
+        }
+        let c = DeviceBookContribution(
+            deviceId: ProgressDeviceIdentity.deviceId,
+            key: book.fileRelPath,
+            kind: .books,
+            readingSeconds: book.myReadingSeconds,
+            updatedAt: book.progressUpdatedAt ?? Date())
+        do {
+            try await progress.pushBookContribution(c)
+            markProgressSuccess()
+        } catch {
+            enqueueOutbox { $0.insertBook(book.fileRelPath) }
+            progressLastError = Self.progressSyncErrorMessage(error)
+        }
+    }
+
+    private func pullAndMergeBookContributions() async {
+        let remotes = (try? await progress.pullAllBookContributions()) ?? []
+        guard !remotes.isEmpty else { return }
+        let mine = ProgressDeviceIdentity.deviceId
+        let mergeContext = ProgressMergeContext.load(from: context, source: source)
+        var listenedByKey: [String: (mine: Double, others: Double)] = [:]
+        var savedByKey: [String: (mine: Double, others: Double)] = [:]
+        var readingByKey: [String: (mine: Double, others: Double)] = [:]
+        for c in remotes {
+            if let listened = c.listenedSeconds {
+                var slot = listenedByKey[c.key] ?? (0, 0)
+                if c.deviceId == mine { slot.mine = max(slot.mine, listened) }
+                else { slot.others += listened }
+                listenedByKey[c.key] = slot
+            }
+            if let saved = c.savedSeconds {
+                var slot = savedByKey[c.key] ?? (0, 0)
+                if c.deviceId == mine { slot.mine = max(slot.mine, saved) }
+                else { slot.others += saved }
+                savedByKey[c.key] = slot
+            }
+            if let reading = c.readingSeconds {
+                var slot = readingByKey[c.key] ?? (0, 0)
+                if c.deviceId == mine { slot.mine = max(slot.mine, reading) }
+                else { slot.others += reading }
+                readingByKey[c.key] = slot
+            }
+        }
+        for (key, slot) in listenedByKey {
+            guard let book = mergeContext.audiobook(for: key) else { continue }
+            let localMine = book.myListenedSeconds ?? book.listenedSeconds ?? 0
+            book.myListenedSeconds = max(localMine, slot.mine)
+            book.listenedSeconds = (book.myListenedSeconds ?? 0) + slot.others
+        }
+        for (key, slot) in savedByKey {
+            guard let book = mergeContext.audiobook(for: key) else { continue }
+            let localMine = book.mySmartSpeechSavedSeconds ?? book.smartSpeechSavedSeconds ?? 0
+            book.mySmartSpeechSavedSeconds = max(localMine, slot.mine)
+            book.smartSpeechSavedSeconds = (book.mySmartSpeechSavedSeconds ?? 0) + slot.others
+        }
+        for (key, slot) in readingByKey {
+            guard let book = mergeContext.book(for: key) else { continue }
+            let localMine = book.myReadingSeconds ?? book.readingSeconds ?? 0
+            book.myReadingSeconds = max(localMine, slot.mine)
+            book.readingSeconds = (book.myReadingSeconds ?? 0) + slot.others
+        }
+        try? context.save()
+    }
+
+    /// One-time NAS `rhapsode-sync` → Dropbox. Retries later if the share is unreachable.
+    func importNASProgressIfNeeded() async {
+        guard !ProgressImportState.nasV1Done else { return }
+        guard SmbConfig.isConfigured else {
+            ProgressImportState.nasV1Done = true
+            return
+        }
+        let smb = SmbLibrarySource()
+        do {
+            _ = try await smb.listFolder(SmbProgressSync.folder)
+        } catch {
+            Self.log("NAS progress import deferred: \(error.localizedDescription)")
+            progressLastError = "Couldn't import progress from the NAS yet. Will retry when it's reachable."
+            return
+        }
+        let nas = SmbProgressSync(source: smb)
+        do {
+            let remotes = try await nas.pullAll()
+            let mergeContext = ProgressMergeContext.load(from: context, source: source)
+            for p in remotes {
+                applyRemoteProgressReturningApplied(p, context: mergeContext)
+            }
+            if let stats = try await nas.pullStats() {
+                SmartSpeechStats.migrateMineIfNeeded()
+                if SmartSpeechStats.myPlayedSeconds == 0 && SmartSpeechStats.mySavedSeconds == 0 {
+                    SmartSpeechStats.myPlayedSeconds = stats.playedSeconds ?? 0
+                    SmartSpeechStats.mySavedSeconds = stats.savedSeconds
+                    SmartSpeechStats.myUpdatedAt = stats.updatedAt
+                }
+            }
+            for kind in [FolderKind.audiobooks, .books] {
+                if let manifest = try await nas.pullCollections(kind: kind) {
+                    applyCollectionsManifest(manifest)
+                    CollectionsSyncState.setUpdatedAt(manifest.updatedAt, for: kind)
+                }
+            }
+            try? context.save()
+            ProgressImportState.nasV1Done = true
+            enqueueOutbox { box in
+                box.insertLifetimeStats()
+                box.insertCollections(kind: .audiobooks)
+                box.insertCollections(kind: .books)
+                for book in (try? context.fetch(FetchDescriptor<Audiobook>())) ?? [] {
+                    box.insertAudiobook(book.sourcePath)
+                }
+            }
+            Self.log("NAS progress import done")
+        } catch {
+            Self.log("NAS progress import failed: \(error.localizedDescription)")
+            progressLastError = Self.progressSyncErrorMessage(error)
+        }
+    }
 
     /// One-shot lookup tables for progress pull — avoids fetch-all + linear scan per remote row.
     @MainActor

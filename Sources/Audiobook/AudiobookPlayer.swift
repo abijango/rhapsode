@@ -175,10 +175,18 @@ final class AudiobookPlayer {
             return
         }
         if pendingListenedSeconds > 0 {
+            if book.myListenedSeconds == nil {
+                book.myListenedSeconds = book.listenedSeconds ?? 0
+            }
+            book.myListenedSeconds = (book.myListenedSeconds ?? 0) + pendingListenedSeconds
             book.listenedSeconds = (book.listenedSeconds ?? 0) + pendingListenedSeconds
             pendingListenedSeconds = 0
         }
         if pendingSavedSeconds > 0 {
+            if book.mySmartSpeechSavedSeconds == nil {
+                book.mySmartSpeechSavedSeconds = book.smartSpeechSavedSeconds ?? 0
+            }
+            book.mySmartSpeechSavedSeconds = (book.mySmartSpeechSavedSeconds ?? 0) + pendingSavedSeconds
             book.smartSpeechSavedSeconds = (book.smartSpeechSavedSeconds ?? 0) + pendingSavedSeconds
             pendingSavedSeconds = 0
         }
@@ -594,10 +602,10 @@ final class AudiobookPlayer {
     }
 
     private var bookTime: Double {
-        if isSingleFile { return backend.currentSource }
-        // Guard the subscript: the SwiftUI body reads this (via bookProgress) BEFORE
-        // `load()` populates `prefixSums`/`currentIndex`, so an unguarded
-        // `prefixSums[currentIndex]` traps on the empty array (Index out of range).
+        // Must read stored player fields — not `backend.currentSource`. Observation only
+        // invalidates views that touched a stored property; the backend is an untracked
+        // let, so a live getter there freezes the on-screen clock for single-file M4Bs.
+        // `tick()` / seek already keep `offsetInTrack` in source-domain sync.
         guard prefixSums.indices.contains(currentIndex) else { return offsetInTrack }
         return prefixSums[currentIndex] + offsetInTrack
     }
@@ -607,8 +615,9 @@ final class AudiobookPlayer {
     // MARK: Book-level progress (source-domain; identical math for M4B & MP3)
 
     /// Absolute position within the whole book, in source-domain seconds.
-    /// `bookTime` reads `backend.currentSource` (already source-domain), so this is
-    /// honest whether or not SmartSpeech trimming is active.
+    /// Derived from `currentIndex` + `offsetInTrack` (already source-domain), so this
+    /// is honest whether or not SmartSpeech trimming is active, and so SwiftUI
+    /// observes each tick.
     var bookPosition: Double { bookTime }
 
     /// Fraction of the whole book completed, clamped 0...1 and NaN-safe (0 when
@@ -825,8 +834,7 @@ extension AudiobookPlayer {
     }
 
     /// Inject a multi-file mock (book + tracks + position) WITHOUT loading audio, so the redesigned
-    /// player chrome can be screenshotted. Uses `isSingleFile = false` so `bookTime` reads the
-    /// injected `prefixSums`/`offset` instead of the (unloaded) backend.
+    /// player chrome can be screenshotted. `bookTime` reads `prefixSums`/`offsetInTrack`.
     func debugMockPresent(book: Audiobook, tracks: [AudiobookTrack], currentIndex: Int,
                           offsetInTrack: Double, isPlaying: Bool) {
         self.book = book

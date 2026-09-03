@@ -37,7 +37,7 @@ Last updated: 2026-09-03
 _(all items shipped — see Done)_
 
 ### Later
-_(all items shipped — see Done)_
+- [x] Progress off the NAS: Dropbox now (decouple + outbox + true-sum + import). GCP Firestore later. See `specs/integrations/progress-sync-plan.md`.
 
 ## Notes
 

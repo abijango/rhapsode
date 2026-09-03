@@ -633,7 +633,7 @@ struct DropboxSourceEditView: View {
                         .foregroundStyle(.orange)
                 }
                 if SmbConfig.shouldUseSmb || RhapsodeServerConfig.shouldUseServer {
-                    Text("Another source is active. Turn it off (or choose Use as Active on Dropbox after connect) and relaunch.")
+                    Text("Library stays on the active source. Dropbox is still used for resume and stats. Relaunch after connecting.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }

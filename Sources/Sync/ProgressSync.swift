@@ -49,10 +49,30 @@ struct PlaybackProgress: Codable, Sendable, Equatable {
     }()
 }
 
+/// One device's lifetime SmartSpeech totals. Displayed Nerd Stats is the sum of every device.
+struct DeviceStatsRecord: Codable, Sendable, Equatable {
+    var deviceId: String
+    var savedSeconds: TimeInterval
+    var playedSeconds: TimeInterval
+    var updatedAt: Date
+}
+
+/// One device's contribution to a single book's listened / saved / reading time.
+struct DeviceBookContribution: Codable, Sendable, Equatable {
+    var deviceId: String
+    var key: String
+    var kind: FolderKind
+    var listenedSeconds: Double? = nil
+    var savedSeconds: Double? = nil
+    var readingSeconds: Double? = nil
+    var updatedAt: Date
+}
+
 /// Lifetime SmartSpeech stat totals (time saved + time listened), backed up to the Dropbox app
 /// folder so they carry over to a new device / reinstall. A single shared record, last-writer-wins
 /// by `updatedAt` — simple; concurrent multi-device adds can clobber (accepted trade-off).
 /// (A legacy `renderSeconds` field from the removed batch pre-render is silently ignored on decode.)
+/// Prefer `DeviceStatsRecord` for new writes; this shape remains for NAS import and old files.
 struct SmartSpeechStatsRecord: Codable, Sendable, Equatable {
     var savedSeconds: TimeInterval
     /// Lifetime content seconds listened through. Optional for back-compat: records written before
@@ -83,6 +103,10 @@ protocol ProgressSync: Sendable {
     func pushCollections(_ manifest: CollectionsManifest) async throws
     /// Fetch the backed-up collections manifest for one shelf, or nil if none stored yet.
     func pullCollections(kind: FolderKind) async throws -> CollectionsManifest?
+    func pushDeviceStats(_ stats: DeviceStatsRecord) async throws
+    func pullAllDeviceStats() async throws -> [DeviceStatsRecord]
+    func pushBookContribution(_ contribution: DeviceBookContribution) async throws
+    func pullAllBookContributions() async throws -> [DeviceBookContribution]
 }
 
 /// No-op sync for the mock / debug / background-refresh paths (needs no Dropbox
@@ -94,6 +118,10 @@ struct NoopProgressSync: ProgressSync {
     func pullStats() async throws -> SmartSpeechStatsRecord? { nil }
     func pushCollections(_ manifest: CollectionsManifest) async throws {}
     func pullCollections(kind: FolderKind) async throws -> CollectionsManifest? { nil }
+    func pushDeviceStats(_ stats: DeviceStatsRecord) async throws {}
+    func pullAllDeviceStats() async throws -> [DeviceStatsRecord] { [] }
+    func pushBookContribution(_ contribution: DeviceBookContribution) async throws {}
+    func pullAllBookContributions() async throws -> [DeviceBookContribution] { [] }
 }
 
 /// In-memory `ProgressSync` for headless tests. Mirrors `DropboxProgressSync`'s
@@ -126,5 +154,25 @@ actor MockProgressSync: ProgressSync {
     }
     func pullCollections(kind: FolderKind) async throws -> CollectionsManifest? {
         collectionManifests[kind]
+    }
+
+    private var deviceStats: [String: DeviceStatsRecord] = [:]
+    func pushDeviceStats(_ stats: DeviceStatsRecord) async throws {
+        if let existing = deviceStats[stats.deviceId], existing.updatedAt > stats.updatedAt { return }
+        deviceStats[stats.deviceId] = stats
+    }
+    func pullAllDeviceStats() async throws -> [DeviceStatsRecord] { Array(deviceStats.values) }
+
+    private var bookContributions: [String: DeviceBookContribution] = [:]
+    private func contributionKey(_ c: DeviceBookContribution) -> String {
+        "\(c.deviceId)\u{1e}\(c.key)"
+    }
+    func pushBookContribution(_ contribution: DeviceBookContribution) async throws {
+        let k = contributionKey(contribution)
+        if let existing = bookContributions[k], existing.updatedAt > contribution.updatedAt { return }
+        bookContributions[k] = contribution
+    }
+    func pullAllBookContributions() async throws -> [DeviceBookContribution] {
+        Array(bookContributions.values)
     }
 }

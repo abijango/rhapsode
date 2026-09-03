@@ -71,6 +71,10 @@ final class Audiobook {
     /// trimming). Drives the per-book "played" stat. Additive optional (nil treated as 0) →
     /// lightweight, CloudKit-safe migration.
     var listenedSeconds: Double?
+    /// This device's contribution to `listenedSeconds`. Displayed listened time is the sum across devices.
+    var myListenedSeconds: Double?
+    /// This device's contribution to `smartSpeechSavedSeconds`.
+    var mySmartSpeechSavedSeconds: Double?
     /// User-defined collections (tags) for filtering the shelf. Per-shelf scope via `LibraryCollection.kind`.
     @Relationship(deleteRule: .nullify)
     var collections: [LibraryCollection]
@@ -91,6 +95,8 @@ final class Audiobook {
         smartSpeechUnavailable: Bool? = nil,
         smartSpeechSavedSeconds: Double? = nil,
         listenedSeconds: Double? = nil,
+        myListenedSeconds: Double? = nil,
+        mySmartSpeechSavedSeconds: Double? = nil,
         collections: [LibraryCollection] = []
     ) {
         self.id = id
@@ -108,6 +114,8 @@ final class Audiobook {
         self.smartSpeechUnavailable = smartSpeechUnavailable
         self.smartSpeechSavedSeconds = smartSpeechSavedSeconds
         self.listenedSeconds = listenedSeconds
+        self.myListenedSeconds = myListenedSeconds
+        self.mySmartSpeechSavedSeconds = mySmartSpeechSavedSeconds
         self.collections = collections
     }
 
@@ -195,6 +203,8 @@ final class Book {
     /// Cumulative seconds spent reading with this book open in the foreground.
     /// Additive optional (nil treated as 0) → lightweight, CloudKit-safe migration.
     var readingSeconds: Double?
+    /// This device's contribution to `readingSeconds`.
+    var myReadingSeconds: Double?
     /// Set when `fractionComplete` crosses ~98%. Additive optional → lightweight migration.
     var finishedAt: Date?
     /// KOReader partial-MD5 document id (cached). Additive optional → lightweight migration.
@@ -212,6 +222,7 @@ final class Book {
         readingLocator: String? = nil,
         progressUpdatedAt: Date? = nil,
         readingSeconds: Double? = nil,
+        myReadingSeconds: Double? = nil,
         finishedAt: Date? = nil,
         koreaderDocumentHash: String? = nil,
         collections: [LibraryCollection] = []
@@ -224,6 +235,7 @@ final class Book {
         self.readingLocator = readingLocator
         self.progressUpdatedAt = progressUpdatedAt
         self.readingSeconds = readingSeconds
+        self.myReadingSeconds = myReadingSeconds
         self.finishedAt = finishedAt
         self.koreaderDocumentHash = koreaderDocumentHash
         self.collections = collections

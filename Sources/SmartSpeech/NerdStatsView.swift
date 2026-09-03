@@ -100,12 +100,16 @@ struct NerdStatsView: View {
     /// Rebuild the lifetime totals from the per-book values, then back them up. Fixes a lifetime
     /// counter that has drifted from the library.
     private func recalcStats() {
-        let saved = books.reduce(0.0) { $0 + ($1.smartSpeechSavedSeconds ?? 0) }
-        let played = books.reduce(0.0) { $0 + ($1.listenedSeconds ?? 0) }
+        let saved = books.reduce(0.0) { $0 + ($1.mySmartSpeechSavedSeconds ?? $1.smartSpeechSavedSeconds ?? 0) }
+        let played = books.reduce(0.0) { $0 + ($1.myListenedSeconds ?? $1.listenedSeconds ?? 0) }
         SmartSpeechStats.overwrite(savedSeconds: saved, playedSeconds: played)
-        totalSaved = saved; totalPlayed = played
-        Task { await sync.pushSmartSpeechStats() }
-        noticeText = "Recalculated from your library and backed up."
+        Task {
+            await sync.pushSmartSpeechStats()
+            await sync.pullAndMergeProgress()
+            totalSaved = SmartSpeechStats.totalSavedSeconds
+            totalPlayed = SmartSpeechStats.totalPlayedSeconds
+        }
+        noticeText = "Recalculated this device and backed up."
     }
 
     /// Force a backup of the lifetime stats to the Dropbox app folder (they also back up
@@ -113,7 +117,7 @@ struct NerdStatsView: View {
     private func backUpNow() {
         Task {
             await sync.pushSmartSpeechStats()
-            noticeText = "Your stats are backed up to Dropbox."
+            noticeText = "Your stats are backed up."
         }
     }
 

@@ -597,6 +597,24 @@ enum PhaseZeroSelfTest {
         check("RootLayoutMode: regular → split",  RootLayoutMode.resolve(.regular)  == .split)
         check("RootLayoutMode: nil → tabs",       RootLayoutMode.resolve(nil)        == .tabs)
 
+        let dummy = Audiobook(title: "Test", sourcePath: "Audiobooks/Test.m4b")
+        check("RootPlayer: browsing + tabs → none",
+              RootPlayerPresentation.surface(intent: .browsing, layout: .tabs) == .none)
+        check("RootPlayer: browsing + split → none",
+              RootPlayerPresentation.surface(intent: .browsing, layout: .split) == .none)
+        check("RootPlayer: showing + tabs → cover",
+              RootPlayerPresentation.surface(intent: .showing(dummy), layout: .tabs) == .cover)
+        check("RootPlayer: showing + split → detail",
+              RootPlayerPresentation.surface(intent: .showing(dummy), layout: .split) == .detail)
+        check("RootPlayer: mini hidden with no playing book",
+              !RootPlayerPresentation.showsMiniPlayer(hasPlayingBook: false, surface: .none))
+        check("RootPlayer: mini hidden on cover",
+              !RootPlayerPresentation.showsMiniPlayer(hasPlayingBook: true, surface: .cover))
+        check("RootPlayer: mini hidden on detail",
+              !RootPlayerPresentation.showsMiniPlayer(hasPlayingBook: true, surface: .detail))
+        check("RootPlayer: mini visible on shelf when playing",
+              RootPlayerPresentation.showsMiniPlayer(hasPlayingBook: true, surface: .none))
+
         // Design system: the fixed regular cover width must be larger than the compact minimum
         // so iPad/Mac get bigger covers than iPhone.
         check("DS.Shelf: iPad cover width > compact minWidth",
@@ -919,6 +937,52 @@ enum PhaseZeroSelfTest {
             try? context.save()
         } catch {
             check("P5: ebook merge threw: \(error)", false)
+        }
+
+        var box = ProgressOutbox()
+        box.insertAudiobook("Audiobooks/Outbox.m4b")
+        box.insertLifetimeStats()
+        ProgressOutboxStore.save(box)
+        let loaded = ProgressOutboxStore.load()
+        check("P5: outbox persists audiobook key", loaded.audiobookKeys.contains("Audiobooks/Outbox.m4b"))
+        check("P5: outbox pending count", loaded.pendingCount == 2)
+        ProgressOutboxStore.save(ProgressOutbox())
+
+        do {
+            for a in try context.fetch(FetchDescriptor<Audiobook>()) { context.delete(a) }
+            try? context.save()
+            let key = "Audiobooks/TrueSum.m4b"
+            let local = Audiobook(
+                title: "True Sum", sourcePath: key,
+                smartSpeechSavedSeconds: 10, listenedSeconds: 40,
+                myListenedSeconds: 40, mySmartSpeechSavedSeconds: 10)
+            context.insert(local)
+            try context.save()
+
+            let mock = MockProgressSync()
+            try await mock.pushBookContribution(DeviceBookContribution(
+                deviceId: ProgressDeviceIdentity.deviceId, key: key, kind: .audiobooks,
+                listenedSeconds: 40, savedSeconds: 10, updatedAt: new))
+            try await mock.pushBookContribution(DeviceBookContribution(
+                deviceId: "other-device", key: key, kind: .audiobooks,
+                listenedSeconds: 20, savedSeconds: 5, updatedAt: new))
+            try await mock.pushDeviceStats(DeviceStatsRecord(
+                deviceId: ProgressDeviceIdentity.deviceId,
+                savedSeconds: 10, playedSeconds: 40, updatedAt: new))
+            try await mock.pushDeviceStats(DeviceStatsRecord(
+                deviceId: "other-device",
+                savedSeconds: 5, playedSeconds: 20, updatedAt: new))
+
+            let sync = SyncManager(source: MockLibrarySource(), context: context, progress: mock)
+            await sync.pullAndMergeProgress()
+            check("P5: per-book listened is true-sum", local.listenedSeconds == 60)
+            check("P5: per-book saved is true-sum", local.smartSpeechSavedSeconds == 15)
+            check("P5: this device contribution preserved", local.myListenedSeconds == 40)
+
+            for a in try context.fetch(FetchDescriptor<Audiobook>()) { context.delete(a) }
+            try? context.save()
+        } catch {
+            check("P5: true-sum threw: \(error)", false)
         }
 
         return failures

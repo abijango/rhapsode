@@ -159,4 +159,9 @@ actor RhapsodeServerProgressSync: ProgressSync {
     func pullCollections(kind: FolderKind) async throws -> CollectionsManifest? {
         nil
     }
+
+    func pushDeviceStats(_ stats: DeviceStatsRecord) async throws {}
+    func pullAllDeviceStats() async throws -> [DeviceStatsRecord] { [] }
+    func pushBookContribution(_ contribution: DeviceBookContribution) async throws {}
+    func pullAllBookContributions() async throws -> [DeviceBookContribution] { [] }
 }

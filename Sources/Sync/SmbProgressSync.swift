@@ -96,6 +96,11 @@ actor SmbProgressSync: ProgressSync {
         return try? PlaybackProgress.decoder.decode(CollectionsManifest.self, from: data)
     }
 
+    func pushDeviceStats(_ stats: DeviceStatsRecord) async throws {}
+    func pullAllDeviceStats() async throws -> [DeviceStatsRecord] { [] }
+    func pushBookContribution(_ contribution: DeviceBookContribution) async throws {}
+    func pullAllBookContributions() async throws -> [DeviceBookContribution] { [] }
+
     /// Same stable hash scheme as Dropbox so a path key always maps to one filename.
     static func path(for key: String) -> String {
         let digest = SHA256.hash(data: Data(key.utf8))

@@ -8,14 +8,14 @@
 | Topic | Decision |
 |-------|----------|
 | Primary remote library | **SMB** (Synology), LAN or Tailscale |
-| Dropbox | Keep until SMB is solid, then remove |
+| Dropbox | Library: keep only as fallback. Progress/stats/collections: **official store for now** ([progress-sync-plan.md](./progress-sync-plan.md)). |
 | rhapsode-server | **Parked** (optional; lower priority than SMB) |
 | Share layout | One share: `Audiobooks/`, `Books/`, `.rhapsode-sync/` |
 | Library RO / sync RW | Single share with RW is fine |
 | Play model | **Download first**, then play/read (no stream-for-SmartSpeech) |
 | Selective download | Yes; grey remote tiles when online; **hide remote-only when offline** |
 | New files | Foreground refresh + optional listing-diff badge (no push without infra) |
-| Progress (audiobooks) | `.rhapsode-sync/` JSON (Dropbox-shaped) — **MVP B** |
+| Progress (audiobooks) | **Superseded 2026-09-03:** always-on store, not the NAS. Dropbox `/.rhapsode-sync` now; GCP Firestore later. See [progress-sync-plan.md](./progress-sync-plan.md). |
 | Progress (ebooks) | **P1: KOReader cloud only** from the app (not NAS JSON once KOReader client exists) |
 | CrossInk X3 position | Same KOReader account as Rhapsode |
 | CrossInk-style reading stats | Separate track: NAS stats exchange / CrossInk format (not KOReader Progress API) |

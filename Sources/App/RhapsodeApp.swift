@@ -170,26 +170,33 @@ struct RhapsodeApp: App {
     static func makeSyncManager(container: ModelContainer) -> SyncManager {
         // Backend preference is read at launch (change in Settings, then relaunch):
         // SMB NAS > rhapsode-server (parked) > Dropbox.
+        let dropbox = DropboxSource()
+        let dropboxConnected = ((try? KeychainTokenStore().load()) ?? nil) != nil
+        let progress: ProgressSync = dropboxConnected
+            ? DropboxProgressSync(source: dropbox)
+            : NoopProgressSync()
+        let progressDropbox: DropboxSource? = dropboxConnected ? dropbox : nil
+
         if SmbConfig.shouldUseSmb {
-            let smb = SmbLibrarySource()
             return SyncManager(
-                source: smb,
+                source: SmbLibrarySource(),
                 context: container.mainContext,
-                progress: SmbProgressSync(source: smb))
+                progress: progress,
+                progressDropbox: progressDropbox)
         }
         if RhapsodeServerConfig.shouldUseServer {
             let client = RhapsodeServerClient()
-            let server = RhapsodeServerSource(client: client)
             return SyncManager(
-                source: server,
+                source: RhapsodeServerSource(client: client),
                 context: container.mainContext,
-                progress: RhapsodeServerProgressSync(client: client))
+                progress: progress,
+                progressDropbox: progressDropbox)
         }
-        let dropbox = DropboxSource()
         return SyncManager(
             source: dropbox,
             context: container.mainContext,
-            progress: DropboxProgressSync(source: dropbox))
+            progress: progress,
+            progressDropbox: progressDropbox)
     }
 
     #if DEBUG

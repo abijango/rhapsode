@@ -82,6 +82,15 @@ struct SettingsView: View {
 
                 Section {
                     NavigationLink {
+                        ProgressSyncSettingsView()
+                    } label: {
+                        settingsRow(
+                            title: "Progress Sync",
+                            systemImage: "arrow.triangle.2.circlepath.icloud",
+                            status: progressSyncStatus
+                        )
+                    }
+                    NavigationLink {
                         KOSyncSettingsView()
                     } label: {
                         settingsRow(
@@ -93,7 +102,7 @@ struct SettingsView: View {
                 } header: {
                     Text("Reading")
                 } footer: {
-                    Text("Sync ebook position with KOReader and CrossInk via the Progress Sync protocol.")
+                    Text("Audiobook resume and stats use Dropbox. Ebook position uses KOReader when it is on.")
                 }
             }
             .navigationTitle("Settings")
@@ -110,6 +119,13 @@ struct SettingsView: View {
         if SmbConfig.isConfigured { return "SMB (off)" }
         if RhapsodeServerConfig.isConfigured { return "Server (off)" }
         return "Not set"
+    }
+
+    private var progressSyncStatus: String {
+        if !sync.dropboxProgressConnected { return "Dropbox off" }
+        if sync.progressPendingCount > 0 { return "\(sync.progressPendingCount) pending" }
+        if sync.progressLastError != nil { return "Error" }
+        return "Dropbox"
     }
 
     private func settingsRow(title: String, systemImage: String, status: String) -> some View {

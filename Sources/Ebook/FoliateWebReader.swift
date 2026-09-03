@@ -497,6 +497,10 @@ final class FoliateWebReader: NSObject, ActiveEbookReader {
         guard let book, let start = sessionStart else { return }
         let elapsed = Date().timeIntervalSince(start)
         guard elapsed > 0 else { return }
+        if book.myReadingSeconds == nil {
+            book.myReadingSeconds = book.readingSeconds ?? 0
+        }
+        book.myReadingSeconds = (book.myReadingSeconds ?? 0) + elapsed
         book.readingSeconds = (book.readingSeconds ?? 0) + elapsed
         sessionStart = Date()
         markFinishedIfNeeded(book)

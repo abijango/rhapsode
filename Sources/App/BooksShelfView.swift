@@ -8,7 +8,6 @@ struct BooksShelfView: View {
     @Environment(SyncManager.self) private var sync
     @Query(sort: \Book.title) private var books: [Book]
     @Query(sort: \LibraryCollection.name) private var allCollections: [LibraryCollection]
-    @Query(sort: \DownloadItem.remoteEntryID) private var downloadItems: [DownloadItem]
     @State private var searchText = ""
     @State private var selectedCollectionID: UUID?
     @State private var showManageCollections = false
@@ -90,6 +89,11 @@ struct BooksShelfView: View {
                     }
                 }
             }
+            .safeAreaInset(edge: .top, spacing: 0) {
+                if sync.isScanning || sync.isRefreshingInBackground {
+                    LibraryScanBanner(label: scanningLabel)
+                }
+            }
             .navigationTitle("E-books")
             .navigationBarTitleDisplayMode(.inline)
             .searchable(
@@ -123,18 +127,6 @@ struct BooksShelfView: View {
                         }
                         .disabled(sync.isScanning)
                     }
-                }
-                if sync.isRefreshingInBackground {
-                    ToolbarItem(placement: .topBarTrailing) {
-                        ProgressView()
-                            .controlSize(.mini)
-                            .accessibilityLabel(scanningLabel)
-                    }
-                }
-            }
-            .overlay(alignment: .top) {
-                if sync.isScanning {
-                    ProgressView(scanningLabel).padding(DS.Spacing.sm)
                 }
             }
             .alert("Sync Issue", isPresented: Binding(
@@ -232,10 +224,7 @@ struct BooksShelfView: View {
     }
 
     private func isDownloading(_ entry: RemoteCatalogEntry) -> Bool {
-        downloadItems.contains {
-            $0.remoteEntryID == entry.id
-                && ($0.state == .pending || $0.state == .downloading)
-        }
+        sync.isDownloadingRemoteEntry(entry.id)
     }
 
     private func remoteTile(_ entry: RemoteCatalogEntry) -> some View {

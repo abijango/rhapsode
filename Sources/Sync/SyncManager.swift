@@ -48,19 +48,27 @@ final class SyncManager {
     /// Cached on-device keys for `availableRemoteEntries` (rebuilt on import / scan).
     private var onDeviceCacheDirty = true
     private var onDeviceRelPaths: Set<String> = []
+    /// Remote catalogue entry ids with an active download (pending/downloading).
+    /// Shelves observe this set instead of `@Query`ing every `DownloadItem`.
+    private(set) var downloadingRemoteEntryIDs: Set<String> = []
+    /// MP3-folder downloads: container-relative folder paths with in-flight child transfers.
+    private(set) var activeGroupFolderRelPaths: Set<String> = []
     private var onDeviceServerItemIds: Set<String> = []
     /// SMB longpoll is a 60s timer — debounce expensive catalogue / progress pulls.
     private var lastSmbCatalogRefresh: Date?
     private var lastSmbCatalogFingerprint: (count: Int, totalBytes: Int64)?
     private var lastSmbProgressPull: Date?
     private static let smbCatalogMinInterval: TimeInterval = 5 * 60
-    private static let smbProgressMinInterval: TimeInterval = 5 * 60
+    /// Foreground watch pulls progress at most this often (SMB timer + server poll).
+    private static let smbProgressMinInterval: TimeInterval = 30
     /// Whether the full-library scan has run yet this launch. The longpoll watcher
     /// only reports changes *after* each folder's seeded cursor, so it can never
     /// surface files that were already in Dropbox when this device connected. A
     /// one-shot full scan per launch closes that gap so every device converges on
     /// the same library.
     private var didInitialScan = false
+    /// Ensures deferred launch sync is scheduled once per process.
+    private var didScheduleDeferredLaunchSync = false
 
     // MARK: WP-C — live auto-jump targets
     /// The app-lifetime audiobook player (wired in `RhapsodeApp`). When a newer remote
@@ -88,6 +96,33 @@ final class SyncManager {
             self?.isRemoteLibraryOnline = online
         }
         isRemoteLibraryOnline = true
+        refreshDownloadingRemoteEntryIDs()
+    }
+
+    /// True when a selective-catalogue tile is actively downloading.
+    func isDownloadingRemoteEntry(_ entryID: String) -> Bool {
+        if downloadingRemoteEntryIDs.contains(entryID) { return true }
+        guard let entry = remoteCatalog.first(where: { $0.id == entryID }) else { return false }
+        let rel = relPath(for: entry.asRemoteEntry(), kind: entry.kind)
+        return activeGroupFolderRelPaths.contains(rel)
+    }
+
+    /// Rebuild the in-flight download set from SwiftData (launch / reconcile).
+    func refreshDownloadingRemoteEntryIDs() {
+        let items = (try? context.fetch(FetchDescriptor<DownloadItem>())) ?? []
+        let active = items.filter { $0.state == .pending || $0.state == .downloading }
+        downloadingRemoteEntryIDs = Set(active.map(\.remoteEntryID))
+        activeGroupFolderRelPaths = Set(active.compactMap(\.groupFolderRelPath))
+    }
+
+    private func trackDownloadStarted(remoteEntryID: String, groupFolderRelPath: String? = nil) {
+        downloadingRemoteEntryIDs.insert(remoteEntryID)
+        if let groupFolderRelPath { activeGroupFolderRelPaths.insert(groupFolderRelPath) }
+    }
+
+    private func trackDownloadEnded(remoteEntryID: String, groupFolderRelPath: String? = nil) {
+        downloadingRemoteEntryIDs.remove(remoteEntryID)
+        if let groupFolderRelPath { activeGroupFolderRelPaths.remove(groupFolderRelPath) }
     }
 
     // MARK: Foreground auto-detect (longpoll watcher)
@@ -106,12 +141,12 @@ final class SyncManager {
         watcher = nil
     }
 
-    /// Called when the app becomes active. Seeds watched folders if needed, starts
-    /// the longpoll watcher, then refreshes the remote catalogue / progress **without**
-    /// blocking the shelf. Local SwiftData (Continue, on-device covers) stays tappable.
+    /// Called when the app becomes active. Seeds watched folders if needed and starts
+    /// the longpoll watcher immediately. Heavy launch work (initial scan, progress pull,
+    /// stats/collections push) is deferred until after the first paint.
     func ensureWatching() async {
-        // Let the first frame commit so Continue is hittable before any network work.
         await Task.yield()
+        refreshDownloadingRemoteEntryIDs()
         let hasFolders = !(((try? context.fetch(FetchDescriptor<WatchedFolder>())) ?? []).isEmpty)
         Self.log("ensureWatching: hasFolders=\(hasFolders)")
         if !hasFolders {
@@ -121,10 +156,22 @@ final class SyncManager {
         }
         startWatching()
         Self.log("watcher started")
-        // First activation this launch: pull the FULL existing library. A device
-        // connected after files were already in Dropbox would otherwise never see
-        // them (the watcher only reports post-cursor changes). Cheap on reruns —
-        // dedup skips anything already imported. Quiet so the shelf does not look hung.
+        scheduleDeferredLaunchSyncIfNeeded()
+    }
+
+    /// After first paint + brief idle: initial library scan, progress pull, stats/collections backup.
+    private func scheduleDeferredLaunchSyncIfNeeded() {
+        guard !didScheduleDeferredLaunchSync else { return }
+        didScheduleDeferredLaunchSync = true
+        Task {
+            await Task.yield()
+            try? await Task.sleep(for: .seconds(1.5))
+            await runDeferredLaunchSync()
+        }
+    }
+
+    private func runDeferredLaunchSync() async {
+        BackgroundDownloader.shared.reconcileOnLaunch()
         if !didInitialScan {
             didInitialScan = true
             if usesSelectiveCatalog {
@@ -182,6 +229,10 @@ final class SyncManager {
 
     /// Push the current local reading position for one book to the cloud.
     func pushBookProgress(relPath: String) async {
+        guard !KOSyncSettings.isEbookProgressAuthority else {
+            Self.log("pushBookProgress skipped (KOSync authority)")
+            return
+        }
         guard let b = (try? context.fetch(FetchDescriptor<Book>()))?
             .first(where: { $0.fileRelPath == relPath }) else { return }
         // WP-A: TRANSMIT the existing change-time stamp; never overwrite with "now" at push time.
@@ -281,10 +332,10 @@ final class SyncManager {
         lastSmbProgressPull = Date()
         do {
             let remotes = try await progress.pullAll()
+            let mergeContext = ProgressMergeContext.load(from: context, source: source)
             var applied = 0
             for p in remotes {
-                let before = applyRemoteProgressReturningApplied(p)
-                if before { applied += 1 }
+                if applyRemoteProgressReturningApplied(p, context: mergeContext) { applied += 1 }
             }
             try? context.save()
             Self.log("pulled \(remotes.count) progress record(s), applied \(applied)")
@@ -368,17 +419,13 @@ final class SyncManager {
         return CollectionsManifest(kind: kind, collections: wires, updatedAt: updatedAt)
     }
 
-    /// Replace one shelf's local collections with a newer remote manifest. Membership is keyed
-    /// by stable container-relative paths (`sourcePath` / `fileRelPath`).
+    /// Merge-by-id: union remote members with local, adopt remote names when the manifest wins LWW.
+    /// Local-only collections are kept — absence from a remote snapshot is not treated as delete.
     private func applyCollectionsManifest(_ manifest: CollectionsManifest) {
         let kind = manifest.kind
         let localCollections = (try? context.fetch(FetchDescriptor<LibraryCollection>()))?
             .filter { $0.kind == kind } ?? []
-        let remoteIDs = Set(manifest.collections.map(\.id))
-
-        for local in localCollections where !remoteIDs.contains(local.id) {
-            context.delete(local)
-        }
+        let localByID = Dictionary(uniqueKeysWithValues: localCollections.map { ($0.id, $0) })
 
         let audiobooksByKey = Dictionary(
             uniqueKeysWithValues: ((try? context.fetch(FetchDescriptor<Audiobook>())) ?? [])
@@ -389,7 +436,7 @@ final class SyncManager {
 
         for wire in manifest.collections {
             let collection: LibraryCollection
-            if let existing = localCollections.first(where: { $0.id == wire.id }) {
+            if let existing = localByID[wire.id] {
                 collection = existing
             } else {
                 collection = LibraryCollection(id: wire.id, name: wire.name, kind: kind)
@@ -398,27 +445,26 @@ final class SyncManager {
             collection.name = wire.name
             switch kind {
             case .audiobooks:
-                collection.audiobooks = wire.memberKeys.compactMap { audiobooksByKey[$0] }
+                let mergedKeys = Set(collection.audiobooks.map(\.sourcePath))
+                    .union(wire.memberKeys)
+                collection.audiobooks = mergedKeys.sorted().compactMap { audiobooksByKey[$0] }
             case .books:
-                collection.books = wire.memberKeys.compactMap { booksByKey[$0] }
+                let mergedKeys = Set(collection.books.map(\.fileRelPath))
+                    .union(wire.memberKeys)
+                collection.books = mergedKeys.sorted().compactMap { booksByKey[$0] }
             }
         }
     }
 
     /// Apply one remote record to its matching local model when it wins LWW.
-    /// Match is by the stable container-relative key (`sourcePath` / `fileRelPath`),
-    /// or by rhapsode-server item id embedded as the second path component.
-    private func applyRemoteProgress(_ p: PlaybackProgress) {
-        _ = applyRemoteProgressReturningApplied(p)
-    }
-
-    /// - Returns: `true` if a position/locator was applied (LWW won).
     @discardableResult
-    private func applyRemoteProgressReturningApplied(_ p: PlaybackProgress) -> Bool {
+    private func applyRemoteProgressReturningApplied(
+        _ p: PlaybackProgress,
+        context mergeContext: ProgressMergeContext
+    ) -> Bool {
         switch p.kind {
         case .audiobooks:
-            guard let book = (try? context.fetch(FetchDescriptor<Audiobook>()))?
-                .first(where: { Self.progressKeysMatch($0.sourcePath, p.key) }) else {
+            guard let book = mergeContext.audiobook(for: p.key) else {
                 Self.log("pull skip audio — no local match for key=\(p.key)")
                 return false
             }
@@ -440,7 +486,7 @@ final class SyncManager {
             // source seconds with track index 0. Dropbox keeps chapter index + offset.
             let track: Int
             let offset: Double
-            if p.key.hasSuffix("/_server") || source is RhapsodeServerSource {
+            if p.key.hasSuffix("/_server") || mergeContext.usesServerBackend {
                 (track, offset) = Self.splitAbsolutePosition(
                     p.lastOffsetSeconds, tracks: book.orderedTracks)
             } else {
@@ -450,6 +496,7 @@ final class SyncManager {
             book.lastTrackIndex = track
             book.lastOffsetSeconds = offset
             book.progressUpdatedAt = p.updatedAt
+            book.refreshCachedFractionComplete()
             // WP-C: if the app-lifetime player holds this book, reconcile its in-memory
             // position to the merged value (auto-jump + prevents the player from later
             // clobbering the merge with its stale cached position). No-op (anti-echo)
@@ -459,8 +506,11 @@ final class SyncManager {
             Self.log("pull applied audio key=\(p.key)")
             return true
         case .books:
-            guard let b = (try? context.fetch(FetchDescriptor<Book>()))?
-                .first(where: { Self.progressKeysMatch($0.fileRelPath, p.key) }) else {
+            guard !KOSyncSettings.isEbookProgressAuthority else {
+                Self.log("pull skip book — KOSync authority key=\(p.key)")
+                return false
+            }
+            guard let b = mergeContext.book(for: p.key) else {
                 Self.log("pull skip book — no local match for key=\(p.key)")
                 return false
             }
@@ -502,13 +552,19 @@ final class SyncManager {
     /// (back off, then re-seed the cursor and retry). Never ingests its files as library
     /// content (it is not a `WatchedFolder` and `pullAndMergeProgress` reads it directly).
     private func watchProgress() async {
+        if usesServerBackend {
+            while !Task.isCancelled {
+                await pullAndMergeProgressIfNeeded(force: true)
+                try? await Task.sleep(for: .seconds(Self.smbProgressMinInterval))
+            }
+            return
+        }
+
         // Progress folder path depends on backend (Dropbox app folder vs SMB share).
         let progressFolder: String = {
             if usesSmbBackend { return SmbProgressSync.folder }
             return DropboxProgressSync.folder
         }()
-        // Server progress is polled via its own API elsewhere; skip Dropbox-style watch.
-        if usesServerBackend { return }
 
         var cursor: String?
         while !Task.isCancelled {
@@ -520,10 +576,9 @@ final class SyncManager {
                 let hasChanges = try await source.longpoll(cursor: c)
                 if Task.isCancelled { return }
                 if hasChanges {
-                    // SMB longpoll is a timer; always pull. Dropbox uses real deltas.
                     if usesSmbBackend {
                         cursor = try? await source.latestCursor(progressFolder)
-                        await pullAndMergeProgressIfNeeded()
+                        await pullAndMergeProgressIfNeeded(force: true)
                     } else {
                         let (_, newCursor) = try await source.changes(since: c)
                         cursor = newCursor
@@ -1026,6 +1081,7 @@ final class SyncManager {
             remotePath: entry.path)
         context.insert(item)
         try? context.save()
+        trackDownloadStarted(remoteEntryID: entry.id)
         await notifier.notifyDownloadStarted(title: title)
 
         // Route single files to the background URLSession when the source can build a
@@ -1038,6 +1094,7 @@ final class SyncManager {
             } catch {
                 item.state = .failed
                 try? context.save()
+                trackDownloadEnded(remoteEntryID: entry.id)
                 lastError = "Failed to enqueue \(title): \(error.localizedDescription)"
             }
         } else if let server = source as? RhapsodeServerSource {
@@ -1048,6 +1105,7 @@ final class SyncManager {
             } catch {
                 item.state = .failed
                 try? context.save()
+                trackDownloadEnded(remoteEntryID: entry.id)
                 lastError = "Failed to enqueue \(title): \(error.localizedDescription)"
             }
         } else {
@@ -1057,11 +1115,13 @@ final class SyncManager {
                 try await importItem(at: dest, kind: kind)
                 context.delete(item)
                 try context.save()
+                trackDownloadEnded(remoteEntryID: entry.id)
                 invalidateOnDeviceCatalogCache()
                 await notifier.notifyDownloadFinished(title: title)
             } catch {
                 item.state = .failed
                 try? context.save()
+                trackDownloadEnded(remoteEntryID: entry.id)
                 lastError = "Failed to download \(title): \(error.localizedDescription)"
             }
         }
@@ -1128,6 +1188,7 @@ final class SyncManager {
             )
             context.insert(item)
             try? context.save()
+            trackDownloadStarted(remoteEntryID: child.id, groupFolderRelPath: folderRel)
 
             do {
                 let req = try await dbx.downloadRequest(for: child.path)
@@ -1153,6 +1214,7 @@ final class SyncManager {
                                 remotePath: entry.path)
         context.insert(item)
         try? context.save()
+        trackDownloadStarted(remoteEntryID: entry.id)
         await notifier.notifyDownloadStarted(title: entry.name)
 
         do {
@@ -1161,11 +1223,13 @@ final class SyncManager {
             try await importItem(at: dest, kind: kind)
             context.delete(item)
             try context.save()
+            trackDownloadEnded(remoteEntryID: entry.id)
             invalidateOnDeviceCatalogCache()
             await notifier.notifyDownloadFinished(title: entry.name)
         } catch {
             item.state = .failed
             try? context.save()
+            trackDownloadEnded(remoteEntryID: entry.id)
             lastError = "Failed to download \(entry.name): \(error.localizedDescription)"
         }
     }
@@ -1176,9 +1240,11 @@ final class SyncManager {
     func retryDownload(_ row: DownloadQueueRow) async {
         do { try await source.authenticate() }
         catch {
-            lastError = RhapsodeServerConfig.shouldUseServer
-                ? "Connect Rhapsode Server in Settings first."
-                : "Connect Dropbox in Settings first."
+            lastError = usesSmbBackend
+                ? "Connect SMB (NAS) in Settings first."
+                : RhapsodeServerConfig.shouldUseServer
+                    ? "Connect Rhapsode Server in Settings first."
+                    : "Connect Dropbox in Settings first."
             return
         }
 
@@ -1191,24 +1257,41 @@ final class SyncManager {
             try? context.save()
 
             do {
-                let req: URLRequest
                 if let dbx = source as? DropboxSource {
-                    req = try await dbx.downloadRequest(for: remotePath)
+                    let req = try await dbx.downloadRequest(for: remotePath)
+                    BackgroundDownloader.shared.registerDownloadItem(item)
+                    BackgroundDownloader.shared.enqueue(
+                        request: req,
+                        item: item,
+                        destRelPath: destRel,
+                        groupTitle: groupTitle
+                    )
                 } else if let server = source as? RhapsodeServerSource {
-                    req = try await server.downloadRequest(for: remotePath)
+                    let req = try await server.downloadRequest(for: remotePath)
+                    BackgroundDownloader.shared.registerDownloadItem(item)
+                    BackgroundDownloader.shared.enqueue(
+                        request: req,
+                        item: item,
+                        destRelPath: destRel,
+                        groupTitle: groupTitle
+                    )
                 } else {
-                    lastError = "Retry is only available for Dropbox or Rhapsode Server downloads."
-                    item.state = .failed
-                    try? context.save()
-                    continue
+                    let dest = try ContainerPaths.url(forRelativePath: destRel)
+                    let name = (remotePath as NSString).lastPathComponent
+                    let entry = RemoteEntry(
+                        id: item.remoteEntryID,
+                        name: name,
+                        path: remotePath,
+                        size: item.totalBytes,
+                        isFolder: false
+                    )
+                    try await transfer(entry, to: dest)
+                    try await importItem(at: dest, kind: item.kind)
+                    context.delete(item)
+                    try context.save()
+                    invalidateOnDeviceCatalogCache()
+                    await notifier.notifyDownloadFinished(title: item.title ?? name)
                 }
-                BackgroundDownloader.shared.registerDownloadItem(item)
-                BackgroundDownloader.shared.enqueue(
-                    request: req,
-                    item: item,
-                    destRelPath: destRel,
-                    groupTitle: groupTitle
-                )
             } catch {
                 item.state = .failed
                 try? context.save()
@@ -1260,27 +1343,17 @@ final class SyncManager {
     // MARK: Dedup helpers
 
     private func isAlreadyImported(rel: String, kind: FolderKind) -> Bool {
-        switch kind {
-        case .audiobooks:
-            return (try? context.fetch(FetchDescriptor<Audiobook>()))?.contains { $0.sourcePath == rel } ?? false
-        case .books:
-            return (try? context.fetch(FetchDescriptor<Book>()))?.contains { $0.fileRelPath == rel } ?? false
-        }
+        rebuildOnDeviceCatalogCacheIfNeeded()
+        return onDeviceRelPaths.contains(rel)
     }
 
     private func isInFlight(remoteEntryID: String) -> Bool {
-        let items = (try? context.fetch(FetchDescriptor<DownloadItem>())) ?? []
-        return items.contains {
-            $0.remoteEntryID == remoteEntryID && ($0.state == .pending || $0.state == .downloading)
-        }
+        downloadingRemoteEntryIDs.contains(remoteEntryID)
     }
 
     /// True when any child transfer for this MP3-folder group is still active.
     private func isFolderInFlight(folderRel: String) -> Bool {
-        let items = (try? context.fetch(FetchDescriptor<DownloadItem>())) ?? []
-        return items.contains {
-            $0.groupFolderRelPath == folderRel && ($0.state == .pending || $0.state == .downloading)
-        }
+        activeGroupFolderRelPaths.contains(folderRel)
     }
 
     private func relPath(for entry: RemoteEntry, kind: FolderKind) -> String {
@@ -1318,4 +1391,46 @@ final class SyncManager {
         (.audiobooks, DropboxConfig.audiobooksPath),
         (.books, DropboxConfig.booksPath),
     ]
+
+    /// One-shot lookup tables for progress pull — avoids fetch-all + linear scan per remote row.
+    @MainActor
+    private struct ProgressMergeContext {
+        let audiobooksByKey: [String: Audiobook]
+        let booksByKey: [String: Book]
+        let usesServerBackend: Bool
+
+        static func load(from context: ModelContext, source: LibrarySource) -> ProgressMergeContext {
+            let audiobooks = (try? context.fetch(FetchDescriptor<Audiobook>())) ?? []
+            let books = (try? context.fetch(FetchDescriptor<Book>())) ?? []
+            var audioMap: [String: Audiobook] = [:]
+            for book in audiobooks {
+                audioMap[book.sourcePath] = book
+                if let itemId = RhapsodeServerSource.itemId(fromLocalRelPath: book.sourcePath) {
+                    audioMap["Audiobooks/\(itemId)/_server"] = book
+                }
+            }
+            var bookMap: [String: Book] = [:]
+            for book in books {
+                bookMap[book.fileRelPath] = book
+                if let itemId = RhapsodeServerSource.itemId(fromLocalRelPath: book.fileRelPath) {
+                    bookMap["Books/\(itemId)/_server"] = book
+                }
+            }
+            return ProgressMergeContext(
+                audiobooksByKey: audioMap,
+                booksByKey: bookMap,
+                usesServerBackend: source is RhapsodeServerSource
+            )
+        }
+
+        func audiobook(for key: String) -> Audiobook? {
+            if let hit = audiobooksByKey[key] { return hit }
+            return audiobooksByKey.values.first { SyncManager.progressKeysMatch($0.sourcePath, key) }
+        }
+
+        func book(for key: String) -> Book? {
+            if let hit = booksByKey[key] { return hit }
+            return booksByKey.values.first { SyncManager.progressKeysMatch($0.fileRelPath, key) }
+        }
+    }
 }

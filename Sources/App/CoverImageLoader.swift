@@ -10,6 +10,30 @@ enum CoverImageLoader {
         let aspectRatio: CGFloat
     }
 
+    /// Limits concurrent decodes so scrolling the shelf doesn't serialize on one actor.
+    private actor DecodeGate {
+        static let shared = DecodeGate()
+        private let maxConcurrent = 4
+        private var inFlight = 0
+        private var waiters: [CheckedContinuation<Void, Never>] = []
+
+        func acquire() async {
+            if inFlight < maxConcurrent {
+                inFlight += 1
+                return
+            }
+            await withCheckedContinuation { waiters.append($0) }
+            inFlight += 1
+        }
+
+        func release() {
+            inFlight -= 1
+            if !waiters.isEmpty {
+                waiters.removeFirst().resume()
+            }
+        }
+    }
+
     actor Cache {
         static let shared = Cache()
 
@@ -19,18 +43,30 @@ enum CoverImageLoader {
         }
 
         private let cache = NSCache<NSString, Box>()
+        private var inFlight: [String: Task<LoadedCover?, Never>] = [:]
 
         init() {
             cache.countLimit = 200
+            cache.totalCostLimit = 96 * 1024 * 1024
         }
 
         func load(relativePath: String, maxPixelSize: CGFloat) async -> LoadedCover? {
-            let key = "\(relativePath)|\(Int(maxPixelSize))" as NSString
-            if let hit = cache.object(forKey: key) { return hit.cover }
-            guard let cover = await Self.decode(path: relativePath, maxPixelSize: maxPixelSize) else {
-                return nil
+            let key = "\(relativePath)|\(Int(maxPixelSize))"
+            let nsKey = key as NSString
+            if let hit = cache.object(forKey: nsKey) { return hit.cover }
+            if let existing = inFlight[key] { return await existing.value }
+
+            let task = Task<LoadedCover?, Never> {
+                await DecodeGate.shared.acquire()
+                defer { Task { await DecodeGate.shared.release() } }
+                return await Self.decode(path: relativePath, maxPixelSize: maxPixelSize)
             }
-            cache.setObject(Box(cover), forKey: key)
+            inFlight[key] = task
+            defer { inFlight.removeValue(forKey: key) }
+            guard let cover = await task.value else { return nil }
+            let cost = Int(cover.image.size.width * cover.image.size.height
+                * cover.image.scale * cover.image.scale * 4)
+            cache.setObject(Box(cover), forKey: nsKey, cost: max(cost, 1))
             return cover
         }
 

@@ -51,6 +51,7 @@ private struct CollectionChip: View {
                 .foregroundStyle(isSelected ? Color(.systemBackground) : .primary)
         }
         .buttonStyle(.plain)
+        .hoverEffect(.highlight)
     }
 }
 

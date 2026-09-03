@@ -2,15 +2,23 @@ import AMSMB2
 import Foundation
 import UIKit
 
+/// Task-local so nested SMB calls (catalog → listFolder) reuse the same exclusive
+/// section instead of deadlocking. Separate SwiftUI `.task`s do not inherit this.
+private enum SmbLibraryIOLock {
+    @TaskLocal static var held = false
+}
+
 /// `LibrarySource` over an SMB2/3 share (Synology / Windows NAS).
 ///
 /// Paths in `listFolder` match Dropbox-style roots (`/Audiobooks`, `/Books`) and
 /// are mapped onto `SmbConfig.audiobooksPath` / `booksPath` under the share.
 actor SmbLibrarySource: LibrarySource {
     private var manager: SMB2Manager?
+    private var ioBusy = false
+    private var ioWaiters: [CheckedContinuation<Void, Never>] = []
 
     func authenticate() async throws {
-        _ = try await connectedManager()
+        _ = try await withExclusiveClient { $0 }
     }
 
     /// Connect and return a short diagnostic string for Settings "Test".
@@ -50,11 +58,12 @@ actor SmbLibrarySource: LibrarySource {
     /// Directories only, paths relative to the **current share root** (for folder pickers).
     /// Pass `""` for the share root.
     func listSubdirectories(atShareRelativePath path: String) async throws -> [String] {
-        let client = try await connectedManager()
         let smbPath = SmbConfig.normalizeRelPath(path)
         let files: [[URLResourceKey: Any]]
         do {
-            files = try await client.contentsOfDirectory(atPath: smbPath, recursive: false)
+            files = try await withExclusiveClient {
+                try await $0.contentsOfDirectory(atPath: smbPath, recursive: false)
+            }
         } catch {
             throw Self.mapError(
                 error,
@@ -85,11 +94,12 @@ actor SmbLibrarySource: LibrarySource {
     }
 
     func listFolder(_ path: String) async throws -> [RemoteEntry] {
-        let client = try await connectedManager()
         let smbPath = Self.mapLibraryPath(path)
         let files: [[URLResourceKey: Any]]
         do {
-            files = try await client.contentsOfDirectory(atPath: smbPath, recursive: false)
+            files = try await withExclusiveClient {
+                try await $0.contentsOfDirectory(atPath: smbPath, recursive: false)
+            }
         } catch {
             throw Self.mapError(error, context: "List “\(smbPath)”")
         }
@@ -136,13 +146,14 @@ actor SmbLibrarySource: LibrarySource {
     }
 
     func download(_ entry: RemoteEntry, to destination: URL) async throws {
-        let client = try await connectedManager()
         let smbPath = Self.mapLibraryPath(entry.path)
-        if entry.isFolder {
-            try await downloadFolder(client: client, smbPath: smbPath, to: destination)
-            return
+        try await withExclusiveClient { client in
+            if entry.isFolder {
+                try await self.downloadFolder(client: client, smbPath: smbPath, to: destination)
+                return
+            }
+            try await self.streamDownload(client: client, smbPath: smbPath, to: destination)
         }
-        try await streamDownload(client: client, smbPath: smbPath, to: destination)
     }
 
     /// Small-file write for progress / stats JSON under the share (e.g. `rhapsode-sync/…`).
@@ -156,8 +167,13 @@ actor SmbLibrarySource: LibrarySource {
     ///    in-memory bytes (do **not** use `append(offset:0)` — that truncates first
     ///    and throws ENOENT when the file is gone, which was wiping progress JSON).
     func writeFile(_ data: Data, to path: String) async throws {
-        let client = try await connectedManager()
         let smbPath = Self.mapLibraryPath(path)
+        try await withExclusiveClient { client in
+            try await self.writeFileUnlocked(data, smbPath: smbPath, client: client)
+        }
+    }
+
+    private func writeFileUnlocked(_ data: Data, smbPath: String, client: SMB2Manager) async throws {
         let parent = (smbPath as NSString).deletingLastPathComponent
         let leaf = (smbPath as NSString).lastPathComponent
 
@@ -221,10 +237,11 @@ actor SmbLibrarySource: LibrarySource {
 
     /// Small-file read for progress / stats JSON. Returns `nil` if missing.
     func readFile(at path: String) async throws -> Data? {
-        let client = try await connectedManager()
         let smbPath = Self.mapLibraryPath(path)
         do {
-            return try await client.contents(atPath: smbPath)
+            return try await withExclusiveClient {
+                try await $0.contents(atPath: smbPath)
+            }
         } catch {
             // Missing path is common before the first push — treat as nil.
             let ns = error as NSError
@@ -234,16 +251,17 @@ actor SmbLibrarySource: LibrarySource {
     }
 
     func ensureFolderExists(_ path: String) async throws {
-        let client = try await connectedManager()
         let smbPath = Self.mapLibraryPath(path)
         guard !smbPath.isEmpty else { return }
-        var built = ""
-        for part in smbPath.split(separator: "/") {
-            built = built.isEmpty ? String(part) : "\(built)/\(part)"
-            do {
-                try await client.createDirectory(atPath: built)
-            } catch {
-                // Exists is fine
+        try await withExclusiveClient { client in
+            var built = ""
+            for part in smbPath.split(separator: "/") {
+                built = built.isEmpty ? String(part) : "\(built)/\(part)"
+                do {
+                    try await client.createDirectory(atPath: built)
+                } catch {
+                    // Exists is fine
+                }
             }
         }
     }
@@ -260,8 +278,17 @@ actor SmbLibrarySource: LibrarySource {
     /// 3) M4B/M4A/MP4: range-read top-level atoms, download only `moov`, pull `covr`.
     /// 4) MP3: range-read the ID3v2 prefix and parse `APIC`.
     func fetchCoverData(for entry: RemoteCatalogEntry) async throws -> Data? {
-        let client = try await connectedManager()
         let mediaSmb = Self.mapLibraryPath(entry.remotePath)
+        return try await withExclusiveClient { client in
+            try await self.fetchCoverDataUnlocked(for: entry, client: client, mediaSmb: mediaSmb)
+        }
+    }
+
+    private func fetchCoverDataUnlocked(
+        for entry: RemoteCatalogEntry,
+        client: SMB2Manager,
+        mediaSmb: String
+    ) async throws -> Data? {
         if let sidecar = try await fetchSidecarCover(client: client, mediaSmbPath: mediaSmb) {
             return sidecar
         }
@@ -367,6 +394,12 @@ actor SmbLibrarySource: LibrarySource {
     // MARK: - Catalogue helpers (selective download)
 
     func listCatalog() async throws -> [RemoteCatalogEntry] {
+        try await withExclusiveClient { _ in
+            try await self.listCatalogUnlocked()
+        }
+    }
+
+    private func listCatalogUnlocked() async throws -> [RemoteCatalogEntry] {
         try await authenticate()
         var out: [RemoteCatalogEntry] = []
         for (kind, root) in [
@@ -405,9 +438,79 @@ actor SmbLibrarySource: LibrarySource {
 
     // MARK: - Internals
 
+    /// AMSMB2’s queue is concurrent and libsmb2 is not safe for overlapping I/O.
+    /// Cover fetches + downloads on a cached session were dropping the TCP
+    /// connection (`ENOTCONN` / “SMB2 server not connected.”).
+    private func withExclusiveClient<T>(
+        _ body: (SMB2Manager) async throws -> T
+    ) async throws -> T {
+        if SmbLibraryIOLock.held {
+            return try await performWithReconnect(body)
+        }
+        await beginExclusiveIO()
+        defer { endExclusiveIO() }
+        return try await SmbLibraryIOLock.$held.withValue(true) {
+            try await self.performWithReconnect(body)
+        }
+    }
+
+    private func performWithReconnect<T>(
+        _ body: (SMB2Manager) async throws -> T
+    ) async throws -> T {
+        do {
+            return try await body(try await connectedManager())
+        } catch {
+            guard Self.isDisconnected(error) else { throw error }
+            manager = nil
+            return try await body(try await connectedManager())
+        }
+    }
+
+    private func beginExclusiveIO() async {
+        if ioBusy {
+            await withCheckedContinuation { continuation in
+                ioWaiters.append(continuation)
+            }
+            return
+        }
+        ioBusy = true
+    }
+
+    private func endExclusiveIO() {
+        if ioWaiters.isEmpty {
+            ioBusy = false
+        } else {
+            ioWaiters.removeFirst().resume()
+        }
+    }
+
+    /// True for a dead SMB session (`ENOTCONN` / code 57), including after `mapError`.
+    nonisolated static func isDisconnected(_ error: Error) -> Bool {
+        if let source = error as? LibrarySourceError, case .network(let detail) = source {
+            return detail.contains("[code 57]")
+                || detail.localizedCaseInsensitiveContains("not connected")
+        }
+        let ns = error as NSError
+        return ns.domain == NSPOSIXErrorDomain && ns.code == Int(POSIXErrorCode.ENOTCONN.rawValue)
+    }
+
     private func connectedManager() async throws -> SMB2Manager {
-        if let manager { return manager }
+        if let manager {
+            do {
+                try await connectConfiguredShare(manager)
+                return manager
+            } catch {
+                self.manager = nil
+            }
+        }
         let mgr = try makeManager()
+        try await connectConfiguredShare(mgr)
+        manager = mgr
+        return mgr
+    }
+
+    /// `connectShare` echoes and reconnects when the NAS dropped an idle session.
+    private func connectConfiguredShare(_ mgr: SMB2Manager) async throws {
         let share = SmbConfig.share
         guard !share.isEmpty else {
             throw LibrarySourceError.network(underlying: "SMB share name is empty.")
@@ -431,8 +534,6 @@ actor SmbLibrarySource: LibrarySource {
                 throw Self.mapError(second, context: context)
             }
         }
-        manager = mgr
-        return mgr
     }
 
     private func makeManager() throws -> SMB2Manager {
@@ -454,6 +555,8 @@ actor SmbLibrarySource: LibrarySource {
         guard let mgr = SMB2Manager(url: url, credential: credential) else {
             throw LibrarySourceError.network(underlying: "Could not create SMB client for \(url.absoluteString)")
         }
+        // Default 60s is tight for a large M4B over Tailscale / a slow NAS.
+        mgr.timeout = 180
         return mgr
     }
 
@@ -476,6 +579,7 @@ actor SmbLibrarySource: LibrarySource {
         guard let mgr = SMB2Manager(url: url, credential: credential) else {
             throw LibrarySourceError.network(underlying: "Could not create SMB client.")
         }
+        mgr.timeout = 180
         do {
             try await mgr.connectShare(name: profile.share, encrypted: false)
         } catch {
@@ -596,7 +700,7 @@ actor SmbLibrarySource: LibrarySource {
         return result
     }
 
-    static func mapLibraryPath(_ dropboxStyle: String) -> String {
+    nonisolated static func mapLibraryPath(_ dropboxStyle: String) -> String {
         var p = dropboxStyle
         if p.hasPrefix("/") { p = String(p.dropFirst()) }
         let lower = p.lowercased()
@@ -615,7 +719,7 @@ actor SmbLibrarySource: LibrarySource {
         return SmbConfig.normalizeRelPath(p)
     }
 
-    static func toDropboxStylePath(_ smbPath: String) -> String {
+    nonisolated static func toDropboxStylePath(_ smbPath: String) -> String {
         let p = SmbConfig.normalizeRelPath(smbPath)
         let audio = SmbConfig.audiobooksPath
         let books = SmbConfig.booksPath
@@ -631,16 +735,18 @@ actor SmbLibrarySource: LibrarySource {
     }
 
     /// Turn opaque POSIX/libsmb2 errors into actionable copy.
-    static func mapError(_ error: Error, context: String) -> LibrarySourceError {
+    nonisolated static func mapError(_ error: Error, context: String) -> LibrarySourceError {
         let ns = error as NSError
         let code = ns.code
         let posixHint: String = {
-            // Darwin: 1 = EPERM, 2 = ENOENT, 13 = EACCES, 60 = ETIMEDOUT, 61 = ECONNREFUSED
+            // Darwin: 1 = EPERM, 2 = ENOENT, 13 = EACCES, 57 = ENOTCONN, 60 = ETIMEDOUT, 61 = ECONNREFUSED
             switch code {
             case 1, 13:
                 return "Permission or login failed. Check username/password, and that the user can access the share. On Synology, use the DSM account name (leave Domain empty unless you use AD)."
             case 2:
                 return "Path or share not found. Share name is the short share (e.g. “Rhapsode”), not a full volume path. Folder paths are relative to that share (e.g. Audiobooks)."
+            case 57:
+                return "The NAS dropped the SMB session. Stay on the same Wi‑Fi or Tailscale and tap Retry — large audiobooks often succeed on the second try."
             case 60, 51:
                 return "Timed out. Confirm LAN/Tailscale can reach the host and SMB is enabled."
             case 61, 111:

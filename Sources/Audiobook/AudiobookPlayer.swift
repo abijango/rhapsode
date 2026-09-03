@@ -26,6 +26,8 @@ final class AudiobookPlayer {
     private(set) var currentIndex = 0
     private(set) var offsetInTrack: Double = 0
     private(set) var isPlaying = false
+    /// Session-only sleep timer end; nil when off or expired.
+    private(set) var sleepTimerEnd: Date?
     var rate: Float = 1.0 { didSet { backend.rate = rate; updateNowPlaying() } }
 
     private let backend = LiveAudioBackend()
@@ -33,6 +35,8 @@ final class AudiobookPlayer {
     private var prefixSums: [Double] = []   // single-file: cumulative start time per track
     private var context: ModelContext?
     private var lastPersist = Date(timeIntervalSince1970: 0)
+    /// Minimum interval between unforced position/stats persists during playback (~30s).
+    private static let positionPersistInterval: TimeInterval = 30
 
     /// True when the live backend is trimming silence for the current file (`resolvedSmartSpeech == .on`).
     /// Replaces the old `activeMap != nil` check — gates the time-saved stat accumulation.
@@ -45,6 +49,7 @@ final class AudiobookPlayer {
     private var prescanByURL: [URL: LiveSilencePrescanResult] = [:]
     /// In-flight prescan for the current load; cancelled when the file/book changes.
     private var prescanTask: Task<Void, Never>?
+    private var sleepTimerTask: Task<Void, Never>?
 
     // AVAudioSession event handling. AVPlayer handled these implicitly; the AVAudioEngine-based
     // backend does not, so the player owns interruption + route-change reactions.
@@ -54,11 +59,13 @@ final class AudiobookPlayer {
     /// can resume only in that case — not after a user-initiated pause.
     private var wasInterrupted = false
 
-    // MARK: WP-B — continuous cross-device push
+    /// Cached lock-screen artwork for the current cover path (avoid reloading on every tick).
+    private var nowPlayingCoverPath: String?
+    private var nowPlayingArtwork: MPMediaItemArtwork?
     /// Fired (with `book.sourcePath`) when the persisted position genuinely changed and is
     /// user-driven (not a remote auto-jump), so the app can upload the latest position more
     /// than just on navigate-away. Throttled from `persist(force:false)` (~25s, a SEPARATE
-    /// throttle from the ~5s local-persist throttle below); fires immediately on pause, seek,
+    /// throttle from the ~30s local-persist throttle below); fires immediately on pause, seek,
     /// and track-jump (where `persist(force:true)` runs). Wired in `RhapsodeApp`.
     var onProgressChanged: ((_ sourcePath: String) -> Void)?
     /// Last time a push was attempted via `onProgressChanged`. Gates the unforced (tick) push
@@ -266,11 +273,14 @@ final class AudiobookPlayer {
     /// not on every view disappearance.
     func teardown() {
         persist(force: true)
+        cancelSleepTimer()
         prescanTask?.cancel()
         prescanTask = nil
         isPlaying = false
         backend.stop()
         loadedURL = nil
+        nowPlayingCoverPath = nil
+        nowPlayingArtwork = nil
         updateNowPlaying()
     }
 
@@ -297,6 +307,37 @@ final class AudiobookPlayer {
         pendingResumeNudge = true   // WP8: arm so next play() nudges
         persist(force: true)
         updateNowPlaying()
+    }
+
+    /// Session-only sleep timer. Pauses playback when it fires; does not persist across launches.
+    func setSleepTimer(minutes: Int?) {
+        sleepTimerTask?.cancel()
+        sleepTimerTask = nil
+        sleepTimerEnd = nil
+        guard let minutes, minutes > 0 else { return }
+        let end = Date().addingTimeInterval(TimeInterval(minutes * 60))
+        sleepTimerEnd = end
+        sleepTimerTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(TimeInterval(minutes * 60)))
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                guard let self, self.sleepTimerEnd == end else { return }
+                self.sleepTimerEnd = nil
+                self.sleepTimerTask = nil
+                if self.isPlaying { self.pause() }
+            }
+        }
+    }
+
+    func cancelSleepTimer() { setSleepTimer(minutes: nil) }
+
+    /// Remaining sleep-timer label for menus, e.g. `"12m"`, or nil when off.
+    var sleepTimerRemainingLabel: String? {
+        guard let end = sleepTimerEnd else { return nil }
+        let remaining = end.timeIntervalSinceNow
+        guard remaining > 0 else { return nil }
+        let minutes = Int(ceil(remaining / 60))
+        return minutes >= 60 ? "\(minutes / 60)h \(minutes % 60)m" : "\(minutes)m"
     }
 
     /// Skip relative seconds within the book (crosses track boundaries).
@@ -597,22 +638,29 @@ final class AudiobookPlayer {
 
     private func persist(force: Bool) {
         guard let book, let context else { return }
-        if !force && Date().timeIntervalSince(lastPersist) < 5 { return }
+        let changed = currentIndex != lastPersistedIndex || offsetInTrack != lastPersistedOffset
+        let statsPending = pendingListenedSeconds > 0 || pendingSavedSeconds > 0
+        if !force {
+            guard Date().timeIntervalSince(lastPersist) >= Self.positionPersistInterval else { return }
+            // Do not hit SwiftData every tick just to refresh on-screen time — only when the
+            // position moved or accrued stats need flushing.
+            guard changed || statsPending else { return }
+        }
         lastPersist = Date()
         flushPendingStats()
         // WP-A: stamp progressUpdatedAt ONLY when the position genuinely changed AND the change
         // is user-driven (not a remote auto-jump). The timestamp marks WHEN the user last moved,
         // so an idle device that pushes later can't clobber a newer remote with a stale position.
-        let changed = currentIndex != lastPersistedIndex || offsetInTrack != lastPersistedOffset
         if changed && !applyingRemote {
             book.progressUpdatedAt = Date()
         }
-        book.lastTrackIndex = currentIndex
-        book.lastOffsetSeconds = offsetInTrack
-        // Update the baseline unconditionally (including under applyingRemote) so a remote-applied
-        // jump doesn't leave a stale baseline that phantom-stamps on the next tick.
-        lastPersistedIndex = currentIndex
-        lastPersistedOffset = offsetInTrack
+        if changed {
+            book.lastTrackIndex = currentIndex
+            book.lastOffsetSeconds = offsetInTrack
+            book.refreshCachedFractionComplete()
+            lastPersistedIndex = currentIndex
+            lastPersistedOffset = offsetInTrack
+        }
         try? context.save()
         // WP-B: push the latest position cross-device. Fire AFTER the save so the push (which
         // re-fetches the row by key and reads its persisted position) sends the current value.
@@ -665,11 +713,30 @@ final class AudiobookPlayer {
         info[MPMediaItemPropertyPlaybackDuration] = totalDuration
         info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = bookPosition
         info[MPNowPlayingInfoPropertyPlaybackRate] = isPlaying ? rate : 0
-        if let coverRel = book?.coverPath,
-           let url = try? ContainerPaths.url(forRelativePath: coverRel),
-           let image = UIImage(contentsOfFile: url.path) {
-            info[MPMediaItemPropertyArtwork] = Self.makeArtwork(image)
+        if let coverRel = book?.coverPath {
+            if coverRel == nowPlayingCoverPath, let nowPlayingArtwork {
+                info[MPMediaItemPropertyArtwork] = nowPlayingArtwork
+            } else {
+                Task { await loadNowPlayingArtwork(coverRel: coverRel) }
+            }
+        } else {
+            nowPlayingCoverPath = nil
+            nowPlayingArtwork = nil
         }
+        MPNowPlayingInfoCenter.default().nowPlayingInfo = info
+    }
+
+    private func loadNowPlayingArtwork(coverRel: String) async {
+        guard book?.coverPath == coverRel else { return }
+        guard let loaded = await CoverImageLoader.Cache.shared.load(
+            relativePath: coverRel,
+            maxPixelSize: 600
+        ) else { return }
+        guard book?.coverPath == coverRel else { return }
+        nowPlayingCoverPath = coverRel
+        nowPlayingArtwork = Self.makeArtwork(loaded.image)
+        var info = MPNowPlayingInfoCenter.default().nowPlayingInfo ?? [:]
+        info[MPMediaItemPropertyArtwork] = nowPlayingArtwork
         MPNowPlayingInfoCenter.default().nowPlayingInfo = info
     }
 

@@ -1,4 +1,9 @@
+import CoreText
 import Foundation
+import SwiftUI
+#if canImport(UIKit)
+import UIKit
+#endif
 
 // MARK: - Data-driven font catalog (Path 1e.2)
 
@@ -207,6 +212,55 @@ struct ReaderFontChoice: RawRepresentable, Hashable, Identifiable, CaseIterable 
     var preset: ReaderFontPreset { ReaderFontCatalog.resolve(id: rawValue) }
     var label: String { preset.label }
     var subtitle: String { preset.subtitle }
+
+    /// SwiftUI font for the settings-sheet preview (registers bundled/custom faces on demand).
+    func previewFont(size: CGFloat = 17) -> Font {
+        ReaderFontPreview.font(for: self, size: size)
+    }
+}
+
+/// Registers bundled / imported faces and returns a SwiftUI `Font` for picker previews.
+enum ReaderFontPreview {
+    /// Process-local cache of registered font file paths (font APIs are not Sendable).
+    private nonisolated(unsafe) static var registeredPaths: Set<String> = []
+
+    static func font(for choice: ReaderFontChoice, size: CGFloat) -> Font {
+        let preset = choice.preset
+        if preset.isPublisher { return .body }
+        if choice.rawValue.hasPrefix("custom:"),
+           let custom = CustomReaderFontStore.all().first(where: { $0.preferenceID == choice.rawValue }),
+           let url = try? ContainerPaths.url(forRelativePath: custom.relativePath) {
+            register(url: url)
+            if UIFont(name: custom.familyName, size: size) != nil {
+                return .custom(custom.familyName, size: size)
+            }
+            return .body
+        }
+        guard let family = preset.familyName else { return .body }
+        for face in preset.faces where !face.file.hasPrefix("custom/") {
+            registerBundled(filename: face.file)
+        }
+        if UIFont(name: family, size: size) != nil {
+            return .custom(family, size: size)
+        }
+        return .body
+    }
+
+    private static func registerBundled(filename: String) {
+        let base = (filename as NSString).deletingPathExtension
+        let ext = (filename as NSString).pathExtension
+        guard let url = Bundle.main.url(forResource: base, withExtension: ext, subdirectory: "ReaderFonts")
+            ?? Bundle.main.url(forResource: filename, withExtension: nil, subdirectory: "ReaderFonts")
+        else { return }
+        register(url: url)
+    }
+
+    private static func register(url: URL) {
+        let path = url.path
+        guard !registeredPaths.contains(path) else { return }
+        CTFontManagerRegisterFontsForURL(url as CFURL, .process, nil)
+        registeredPaths.insert(path)
+    }
 }
 
 /// Catalog helpers (filenames for diagnostics).

@@ -1,8 +1,9 @@
 import SwiftUI
 
 /// Global light/dark preference, persisted in `@AppStorage("appAppearance")` and applied at the app
-/// root via `.preferredColorScheme`. The player and Nerd Stats are deliberately always-dark (Ink &
-/// Mint) branded surfaces and use explicit colors, so they stay dark regardless of this setting.
+/// root via `.preferredColorScheme`. The player and Nerd Stats use the Reclaim palette (Ink & Mint),
+/// which is trait-adaptive in `DesignSystem` — they follow light/dark like the rest of the app while
+/// keeping branded colors explicit rather than relying on semantic `.primary` alone.
 enum AppAppearance: String, CaseIterable, Identifiable {
     case system, light, dark
 

@@ -33,7 +33,7 @@ struct LiveSilencePrescanResult: Sendable {
     /// `TrimReport`'s ideal figure (actual splice saving is a per-join crossfade delta less).
     let projectedSavedSeconds: TimeInterval
     let regionCount: Int
-    /// Same projection for every tier (`Preset.rawValue` → seconds) from the shared decode/RMS pass.
+    /// Active-tier projection only (key = `preset.rawValue`).
     let projectedSavedByTier: [String: TimeInterval]
     /// Global (whole-file) adaptive noise floor / speech level. The live producer feeds `globalFloorDb`
     /// into per-chunk detection so the threshold is stable across chunk boundaries (Fix A).
@@ -94,17 +94,13 @@ enum LiveSilencePrescan {
 
         var projectedSavedByTier: [String: TimeInterval] = [:]
         var presetRegions: [SilenceRegion] = []
+        let tierSettings = LiveSmartSpeechTuning.settings(preset: preset)
         for (windowStart, profile) in windowProfiles {
-            for tierPreset in SmartSpeechSettings.Preset.allCases {
-                let tierSettings = LiveSmartSpeechTuning.settings(preset: tierPreset)
-                let regions = SilenceAnalyzer(settings: tierSettings)
-                    .regions(from: profile, floorOverrideDb: globalFloorDb, speechOverrideDb: nil)
-                projectedSavedByTier[tierPreset.rawValue, default: 0] += projectedSaved(regions: regions, settings: tierSettings)
-                if tierPreset == preset {
-                    presetRegions += regions.map {
-                        SilenceRegion(start: windowStart + $0.start, end: windowStart + $0.end)
-                    }
-                }
+            let regions = SilenceAnalyzer(settings: tierSettings)
+                .regions(from: profile, floorOverrideDb: globalFloorDb, speechOverrideDb: nil)
+            projectedSavedByTier[preset.rawValue, default: 0] += projectedSaved(regions: regions, settings: tierSettings)
+            presetRegions += regions.map {
+                SilenceRegion(start: windowStart + $0.start, end: windowStart + $0.end)
             }
         }
         let mergedRegions = mergeRegionsAcrossSeams(presetRegions)

@@ -353,7 +353,7 @@ private struct ReaderSettingsSheet: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     Text(Self.sampleParagraph)
-                        .font(.body)
+                        .font(settings.fontChoice.previewFont(size: 17 * settings.fontSize))
                         .lineSpacing(4)
                         .padding(.vertical, DS.Spacing.xs)
                 } header: {

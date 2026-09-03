@@ -66,6 +66,9 @@ struct RhapsodeApp: App {
             syncManager.invalidateOnDeviceCatalogCache()
             Task { await syncManager.pullAndMergeProgress() }
         }
+        BackgroundDownloader.shared.onDownloadQueueChanged = { [syncManager] in
+            syncManager.refreshDownloadingRemoteEntryIDs()
+        }
         // WP-B: continuous push — when the app-lifetime player reports a position change
         // (throttled/forced inside the player), upload it cross-device. Wire the callback BEFORE
         // storing the player in @State (mirrors `_sync = State(initialValue:)` above) so the wired
@@ -81,8 +84,6 @@ struct RhapsodeApp: App {
         syncManager.audioPlayer = player
         // Show download notifications even while the app is in the foreground.
         NotificationPresenter.install()
-        // Reconcile any downloads that were in-flight when the app was last killed.
-        BackgroundDownloader.shared.reconcileOnLaunch()
     }
 
     var body: some Scene {
@@ -91,8 +92,6 @@ struct RhapsodeApp: App {
                 #if DEBUG
                 if CommandLine.arguments.contains("-readerscreenshot") {
                     DebugReaderHarness()
-                } else if CommandLine.arguments.contains("-previewbookstats") {
-                    BookStatsPreviewHarness()
                 } else if CommandLine.arguments.contains("-previewplayer") {
                     PlayerPreviewHarness().environment(sync)
                 } else {
@@ -135,16 +134,15 @@ struct RhapsodeApp: App {
 
             // Library menu: manual Scan Now accessible from the menu bar.
             // scanNow() is @MainActor and guards against double-runs internally.
-            // NOTE: Player/reader commands (play-pause, page-turn) are intentionally
-            // omitted — driving AudiobookPlayer/FoliateWebReader from menu items requires
-            // @FocusedValue bindings injected in PlayerView/ReaderView, which are
-            // not owned by this file. Left as future work.
+            // Playback menu: play/pause/skip via @FocusedValue from PlayerView.
             CommandMenu("Library") {
                 Button("Scan Now") {
                     Task { @MainActor in await sync.scanNow() }
                 }
                 .keyboardShortcut("r", modifiers: .command)
             }
+
+            PlaybackCommands()
         }
 #endif
     }

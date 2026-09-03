@@ -8,7 +8,7 @@ enum LibraryShelf {
     /// In-progress audiobooks, most recently touched first.
     static func continueAudiobooks(_ books: [Audiobook]) -> [Audiobook] {
         books
-            .filter { $0.fractionComplete > 0.001 && $0.fractionComplete < 0.995 }
+            .filter { $0.shelfFractionComplete > 0.001 && $0.shelfFractionComplete < 0.995 }
             .sorted {
                 ($0.progressUpdatedAt ?? .distantPast) > ($1.progressUpdatedAt ?? .distantPast)
             }
@@ -64,7 +64,6 @@ struct ShelfSectionHeader: View {
         Text(title)
             .font(.headline)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, DS.Spacing.md)
             .padding(.top, DS.Spacing.sm)
     }
 }
@@ -90,8 +89,29 @@ struct ContinueShelfRow<Book: Identifiable, Tile: View>: View {
                     }
                 }
             }
-            .padding(.horizontal, DS.Spacing.md)
             .padding(.bottom, DS.Spacing.xs)
         }
+    }
+}
+
+/// Material banner for background catalogue refresh / scan — one surface, not overlay + toolbar spinner.
+struct LibraryScanBanner: View {
+    let label: String
+
+    var body: some View {
+        HStack(spacing: DS.Spacing.sm) {
+            ProgressView()
+                .controlSize(.small)
+            Text(label)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, DS.Spacing.md)
+        .padding(.vertical, DS.Spacing.sm)
+        .background(.regularMaterial)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(label)
     }
 }

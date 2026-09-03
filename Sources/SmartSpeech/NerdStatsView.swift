@@ -255,7 +255,7 @@ struct NerdStatsView: View {
                     .font(BrandFont.display(16, .bold))
                     .foregroundStyle(DS.Palette.Reclaim.text)
                     .lineLimit(1)
-                miniBar(fraction: progress, fill: DS.Palette.Reclaim.mintBright)
+                miniBar(fraction: progress, fill: Self.ebookAccent)
                 Text(book.finishedAt != nil ? "Finished" : "\(pct)% through")
                     .font(ReceiptFont.mono(11))
                     .foregroundStyle(DS.Palette.Reclaim.muted)
@@ -263,7 +263,7 @@ struct NerdStatsView: View {
             VStack(alignment: .trailing, spacing: 6) {
                 Text(Self.hms(read))
                     .font(ReceiptFont.mono(15, .bold))
-                    .foregroundStyle(DS.Palette.Reclaim.mintBright)
+                    .foregroundStyle(Self.ebookAccent)
                 Text("read")
                     .font(ReceiptFont.mono(11))
                     .foregroundStyle(DS.Palette.Reclaim.muted)

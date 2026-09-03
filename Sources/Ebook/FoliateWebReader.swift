@@ -280,14 +280,23 @@ final class FoliateWebReader: NSObject, ActiveEbookReader {
         openGeneration += 1
         openingStatus = nil
         resumeOpenWait()
+        saveTask?.cancel()
+        saveTask = nil
         turnTask?.cancel()
         turnTask = nil
         isOpen = false
+        isReady = false
         toc = []
         book = nil
+        context = nil
         scheme.bookFileURL = nil
         let wv = webView
+        webView = nil
         wv?.evaluateJavaScript("void window.__rhapsode?.destroy?.()", completionHandler: nil)
+        wv?.stopLoading()
+        wv?.navigationDelegate = nil
+        wv?.configuration.userContentController.removeScriptMessageHandler(forName: "rhapsode")
+        wv?.removeFromSuperview()
     }
 
     /// Wait until the shell posts `ready`, or until timeout. Returns whether `isReady`.

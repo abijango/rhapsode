@@ -55,8 +55,11 @@ struct RootTabView: View {
     @State private var tabSelection  = Self.initialTabSelection
     // Regular path — sidebar selection
     @State private var sidebarItem: SidebarItem? = .audiobooks
-    /// Full-screen Now Playing opened from the mini player (any tab / sidebar).
+    /// Full-screen Now Playing opened from the mini player or a shelf tile.
     @State private var showExpandedPlayer = false
+    @State private var expandedAudiobook: Audiobook?
+    @State private var hideAccessoryForExpanded = false
+    @Namespace private var playerCoverNamespace
 
     private static var initialTabSelection: Int {
         #if DEBUG
@@ -80,6 +83,7 @@ struct RootTabView: View {
             case .split: regularSplit
             }
         }
+        .environment(\.expandAudiobookPlayer, expandPlayer(for:))
         // Foreground auto-detect: start the watcher + quiet catalogue refresh after
         // the shelf paints so Continue stays tappable. Stop watching when backgrounded.
         .onChange(of: scenePhase, initial: true) { _, phase in
@@ -106,16 +110,32 @@ struct RootTabView: View {
                 sync.stopWatching()
                 if phase == .background {
                     BackgroundRefresh.schedule()
-                    // WP-B: before suspension, force-persist the live audiobook position and push
-                    // it cross-device. `savePosition()` runs persist(force:true), which fires the
-                    // wired onProgressChanged push (gated on a genuine, non-remote change), so we
-                    // don't also call sync.push directly here (that would double-push or push stale).
-                    audioPlayer.savePosition()
-                    // Back up lifetime SmartSpeech stats (time saved + render time) before suspension.
                     Task { await sync.pushSmartSpeechStats() }
+                }
+                if phase == .inactive || phase == .background {
+                    // WP-B: persist live position before suspension (including force-quit via
+                    // inactive). `savePosition()` triggers the wired onProgressChanged push.
+                    audioPlayer.savePosition()
                 }
             }
         }
+        .onChange(of: showExpandedPlayer) { _, expanded in
+            if expanded {
+                Task { @MainActor in
+                    try? await Task.sleep(for: .milliseconds(320))
+                    hideAccessoryForExpanded = true
+                }
+            } else {
+                hideAccessoryForExpanded = false
+                expandedAudiobook = nil
+            }
+        }
+    }
+
+    private func expandPlayer(for book: Audiobook) {
+        expandedAudiobook = book
+        hideAccessoryForExpanded = false
+        showExpandedPlayer = true
     }
 
     #if targetEnvironment(macCatalyst)
@@ -156,15 +176,11 @@ struct RootTabView: View {
                 .tag(3)
         }
         .tabViewBottomAccessory {
-            if audioPlayer.book != nil, !showExpandedPlayer {
-                NowPlayingAccessory {
-                    showExpandedPlayer = true
-                }
-            }
+            nowPlayingAccessory
         }
         .fullScreenCover(isPresented: $showExpandedPlayer) {
-            if let book = audioPlayer.book {
-                ExpandedNowPlayingView(book: book)
+            if let book = expandedAudiobook ?? audioPlayer.book {
+                ExpandedNowPlayingView(book: book, coverNamespace: playerCoverNamespace)
             }
         }
     }
@@ -200,15 +216,22 @@ struct RootTabView: View {
             }
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {
-            if audioPlayer.book != nil, !showExpandedPlayer {
-                NowPlayingAccessory(usesMaterialBackground: true) {
-                    showExpandedPlayer = true
-                }
-            }
+            nowPlayingAccessory
         }
         .fullScreenCover(isPresented: $showExpandedPlayer) {
-            if let book = audioPlayer.book {
-                ExpandedNowPlayingView(book: book)
+            if let book = expandedAudiobook ?? audioPlayer.book {
+                ExpandedNowPlayingView(book: book, coverNamespace: playerCoverNamespace)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var nowPlayingAccessory: some View {
+        if audioPlayer.book != nil, !hideAccessoryForExpanded {
+            NowPlayingAccessory(coverNamespace: playerCoverNamespace) {
+                if let book = audioPlayer.book {
+                    expandPlayer(for: book)
+                }
             }
         }
     }

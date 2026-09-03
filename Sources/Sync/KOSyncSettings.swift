@@ -117,6 +117,9 @@ enum KOSyncSettings {
             && !(userkey ?? "").isEmpty
     }
 
+    /// When configured, ebook reading position syncs via KOReader instead of Dropbox/SMB/server.
+    static var isEbookProgressAuthority: Bool { isConfigured }
+
     static func setPassword(_ password: String) {
         // KOReader hashes the password with MD5 for X-Auth-Key.
         userkey = PartialMD5.md5Hex(password.data(using: .utf8) ?? Data())

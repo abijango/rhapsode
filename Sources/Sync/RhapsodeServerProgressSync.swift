@@ -144,11 +144,11 @@ actor RhapsodeServerProgressSync: ProgressSync {
     }
 
     func pullStats() async throws -> SmartSpeechStatsRecord? {
-        let (saved, played) = try await client.getLifetime()
+        let (saved, played, updatedAt) = try await client.getLifetime()
         return SmartSpeechStatsRecord(
             savedSeconds: saved,
             playedSeconds: played,
-            updatedAt: Date()
+            updatedAt: updatedAt
         )
     }
 

@@ -32,8 +32,15 @@ struct CoverGrid<Header: View, Content: View>: View {
                 let n = max(1, Int((usable + spacing) / (w + spacing)))
                 let contentW = CGFloat(n) * w + CGFloat(n - 1) * spacing
                 ScrollView {
-                    VStack(alignment: .leading, spacing: 0) {
-                        header
+                    VStack(spacing: 0) {
+                        HStack(spacing: 0) {
+                            Spacer(minLength: 0)
+                            VStack(alignment: .leading, spacing: 0) {
+                                header
+                            }
+                            .frame(width: contentW, alignment: .leading)
+                            Spacer(minLength: 0)
+                        }
                         HStack(spacing: 0) {
                             Spacer(minLength: 0)
                             LazyVGrid(columns: Array(repeating: GridItem(.fixed(w), spacing: spacing), count: n),

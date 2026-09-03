@@ -337,6 +337,7 @@ enum PhaseZeroSelfTest {
             check("Sync pipeline threw: \(error)", false)
         }
 
+        failures += runSmbMappingChecks()
         failures += await runPhase3Checks(context: context)
         failures += runPhase4aChecks()
         failures += runCollectionChecks(context: context)
@@ -351,6 +352,40 @@ enum PhaseZeroSelfTest {
         // pass/fail code. Lets `open -W --stdout` capture the result on Mac Catalyst,
         // where a directly-exec'd GUI binary creates no window scene.
         exit(failures == 0 ? 0 : 1)
+    }
+
+    // -------------------------------------------------------------------------
+    // SMB path / disconnect mapping
+    // -------------------------------------------------------------------------
+    static func runSmbMappingChecks() -> Int {
+        var failures = 0
+        func check(_ name: String, _ condition: Bool) {
+            print("\(tag): \(condition ? "PASS" : "FAIL") — \(name)")
+            if !condition { failures += 1 }
+        }
+
+        let mapped = SmbLibrarySource.mapLibraryPath(
+            "/Audiobooks/Harry Potter and the Goblet of Fire (Full-Cast Edition).m4b")
+        check(
+            "SMB: mapLibraryPath keeps the filename",
+            mapped.hasSuffix("Harry Potter and the Goblet of Fire (Full-Cast Edition).m4b"))
+
+        let enotconn = POSIXError(
+            .ENOTCONN,
+            userInfo: [NSLocalizedDescriptionKey: "SMB2 server not connected."]
+        )
+        check("SMB: isDisconnected recognizes ENOTCONN", SmbLibrarySource.isDisconnected(enotconn))
+
+        let mappedError = SmbLibrarySource.mapError(
+            enotconn, context: "Download “Audiobooks/book.m4b”")
+        check("SMB: isDisconnected recognizes mapped code 57", SmbLibrarySource.isDisconnected(mappedError))
+        let text = mappedError.errorDescription ?? ""
+        check("SMB: mapError mentions Retry for code 57", text.contains("[code 57]") && text.contains("Retry"))
+
+        let missing = POSIXError(.ENOENT, userInfo: [:])
+        check("SMB: isDisconnected ignores ENOENT", !SmbLibrarySource.isDisconnected(missing))
+
+        return failures
     }
 
     // -------------------------------------------------------------------------

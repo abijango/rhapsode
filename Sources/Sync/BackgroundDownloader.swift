@@ -43,6 +43,10 @@ final class BackgroundDownloader: NSObject {
     /// than only on the next foreground). Optional — unset in tests.
     var onImportFinished: (@MainActor () -> Void)?
 
+    /// Invoked when a download reaches a terminal state or leaves the queue so
+    /// `SyncManager` can refresh its in-flight ID set without shelf `@Query`s.
+    var onDownloadQueueChanged: (@MainActor () -> Void)?
+
     /// Fast lookup from `DownloadItem.id` → SwiftData persistent ID. Populated on
     /// enqueue and rebuilt on launch for in-flight rows; avoids a full-table fetch on
     /// every `URLSession` progress callback.
@@ -182,12 +186,14 @@ final class BackgroundDownloader: NSObject {
             try ctx.save()
             removeGroupItems(groupID: groupID, ctx: ctx)
             onImportFinished?()
+            notifyDownloadQueueChanged()
 
             let notifier = NotificationService()
             await notifier.notifyDownloadFinished(title: groupTitle)
         } catch {
             for item in all where item.groupID == groupID { item.state = .failed }
             try? ctx.save()
+            notifyDownloadQueueChanged()
             SyncManager.log("group import failed for \(folderRel): \(error)")
         }
     }
@@ -199,6 +205,7 @@ final class BackgroundDownloader: NSObject {
             ctx.delete(item)
         }
         try? ctx.save()
+        notifyDownloadQueueChanged()
     }
 
     @MainActor
@@ -208,6 +215,7 @@ final class BackgroundDownloader: NSObject {
             try? ctx.save()
         }
         unregisterDownloadItem(id: id)
+        notifyDownloadQueueChanged()
     }
 
     @MainActor
@@ -235,11 +243,17 @@ final class BackgroundDownloader: NSObject {
     }
 
     @MainActor
+    private func notifyDownloadQueueChanged() {
+        onDownloadQueueChanged?()
+    }
+
+    @MainActor
     private func markItemFailed(id: UUID, ctx: ModelContext) {
         if let item = findItem(id: id, ctx: ctx) {
             item.state = .failed
             try? ctx.save()
         }
+        notifyDownloadQueueChanged()
     }
 
     @MainActor

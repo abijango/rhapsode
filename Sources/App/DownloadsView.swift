@@ -87,7 +87,7 @@ private struct DownloadRow: View {
             }
 
             if showRetry {
-                Text("Couldn't finish downloading. Tap Retry — if it keeps failing, disconnect and reconnect Dropbox in Settings.")
+                Text("Couldn't finish downloading. Tap Retry — if it keeps failing, check the library connection in Settings.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 HStack(spacing: DS.Spacing.md) {

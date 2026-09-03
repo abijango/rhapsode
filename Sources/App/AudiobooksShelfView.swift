@@ -8,7 +8,7 @@ struct AudiobooksShelfView: View {
     @Environment(SyncManager.self) private var sync
     @Query(sort: \Audiobook.title) private var audiobooks: [Audiobook]
     @Query(sort: \LibraryCollection.name) private var allCollections: [LibraryCollection]
-    @Query(sort: \DownloadItem.remoteEntryID) private var downloadItems: [DownloadItem]
+    @Environment(\.expandAudiobookPlayer) private var expandAudiobookPlayer
     @State private var searchText = ""
     @State private var selectedCollectionID: UUID?
     @State private var showManageCollections = false
@@ -91,6 +91,11 @@ struct AudiobooksShelfView: View {
                     }
                 }
             }
+            .safeAreaInset(edge: .top, spacing: 0) {
+                if sync.isScanning || sync.isRefreshingInBackground {
+                    LibraryScanBanner(label: scanningLabel)
+                }
+            }
             .navigationTitle("Audiobooks")
             .navigationBarTitleDisplayMode(.inline)
             .searchable(
@@ -124,18 +129,6 @@ struct AudiobooksShelfView: View {
                         }
                         .disabled(sync.isScanning)
                     }
-                }
-                if sync.isRefreshingInBackground {
-                    ToolbarItem(placement: .topBarTrailing) {
-                        ProgressView()
-                            .controlSize(.mini)
-                            .accessibilityLabel(scanningLabel)
-                    }
-                }
-            }
-            .overlay(alignment: .top) {
-                if sync.isScanning {
-                    ProgressView(scanningLabel).padding(DS.Spacing.sm)
                 }
             }
             .alert("Sync Issue", isPresented: Binding(
@@ -233,10 +226,7 @@ struct AudiobooksShelfView: View {
     }
 
     private func isDownloading(_ entry: RemoteCatalogEntry) -> Bool {
-        downloadItems.contains {
-            $0.remoteEntryID == entry.id
-                && ($0.state == .pending || $0.state == .downloading)
-        }
+        sync.isDownloadingRemoteEntry(entry.id)
     }
 
     private func remoteTile(_ entry: RemoteCatalogEntry) -> some View {
@@ -276,17 +266,18 @@ struct AudiobooksShelfView: View {
     }
 
     private func audiobookLink(_ book: Audiobook) -> some View {
-        NavigationLink {
-            PlayerView(audiobook: book)
+        Button {
+            expandAudiobookPlayer?(book)
         } label: {
             CoverTile(
                 title: book.title,
                 subtitle: book.author,
                 coverPath: book.coverPath,
-                progress: book.fractionComplete,
+                progress: book.shelfFractionComplete,
                 kind: .audiobooks
             )
         }
+        .buttonStyle(.plain)
         .tint(.primary)
         .contextMenu {
             Button("Add to Collection…", systemImage: "folder.badge.plus") {

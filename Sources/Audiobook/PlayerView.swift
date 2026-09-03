@@ -4,17 +4,19 @@ import UIKit
 
 /// The "Reclaimed" full-screen player: a dominant cover that swipes to Chapters then This-book stats,
 /// a single book-domain thick progress bar, a lowered transport, and a slim SmartSpeech · AirPlay ·
-/// More dock. Always-dark Ink & Mint; Hanken display + IBM Plex Mono data. Playback lives in the
-/// app-lifetime `AudiobookPlayer` (injected), so it continues as the user navigates away.
+/// More dock. Reclaim palette (trait-adaptive Ink & Mint); Hanken display + IBM Plex Mono data.
+/// Playback lives in the app-lifetime `AudiobookPlayer` (injected), so it continues as the user navigates away.
 struct PlayerView: View {
     let audiobook: Audiobook
     /// DEBUG preview: skip the `onAppear` load so a mock player's injected state survives (for
     /// screenshotting the chrome without real audio).
     var previewMode = false
+    var coverNamespace: Namespace.ID? = nil
 
-    init(audiobook: Audiobook, previewMode: Bool = false, initialPage: Int = 0) {
+    init(audiobook: Audiobook, previewMode: Bool = false, initialPage: Int = 0, coverNamespace: Namespace.ID? = nil) {
         self.audiobook = audiobook
         self.previewMode = previewMode
+        self.coverNamespace = coverNamespace
         _coverPage = State(initialValue: initialPage)
     }
 
@@ -66,13 +68,14 @@ struct PlayerView: View {
             let key = audiobook.sourcePath
             Task { await sync.pushAudiobookProgress(sourcePath: key) }
         }
+        .focusedValue(\.audiobookPlayer, player)
     }
 
     // MARK: Cover pager (cover → chapters → this-book stats)
 
     private func coverPager(side: CGFloat) -> some View {
         TabView(selection: $coverPage) {
-            PlayerCoverArt(audiobook: audiobook, side: side).tag(0)
+            PlayerCoverArt(audiobook: audiobook, side: side, coverNamespace: coverNamespace).tag(0)
             PlayerChaptersPanel(side: side).tag(1)
             PlayerThisBookPanel(audiobook: audiobook, side: side).tag(2)
         }
@@ -98,37 +101,65 @@ struct PlayerView: View {
     // MARK: Dock (SmartSpeech · AirPlay · More)
 
     private var dock: some View {
-        HStack(spacing: 30) {
-            Button { showSmartSpeech = true } label: {
-                Image(systemName: "speedometer").font(.system(size: 21))
-                    .foregroundStyle(C.muted)
-            }
-            .accessibilityLabel("SmartSpeech — speed and trimming")
+        GlassEffectContainer {
+            HStack(spacing: 30) {
+                Button { showSmartSpeech = true } label: {
+                    Image(systemName: "speedometer").font(.system(size: 21))
+                        .foregroundStyle(C.muted)
+                }
+                .hoverEffect(.highlight)
+                .accessibilityLabel("SmartSpeech — speed and trimming")
 
-            AudioRoutePickerButton(tint: UIColor(C.text), activeTint: UIColor(C.mint))
-                .frame(width: 28, height: 28)
-                .accessibilityLabel("AirPlay")
+                AudioRoutePickerButton(tint: UIColor(C.text), activeTint: UIColor(C.mint))
+                    .frame(width: 28, height: 28)
+                    .accessibilityLabel("AirPlay")
 
-            Menu {
-                Button { withAnimation { coverPage = 1 } } label: { Label("Chapters", systemImage: "list.bullet") }
-                Button { withAnimation { coverPage = 2 } } label: { Label("This-book stats", systemImage: "chart.bar.xaxis") }
-                Button { showSmartSpeech = true } label: { Label("SmartSpeech", systemImage: "speedometer") }
-            } label: {
-                Image(systemName: "ellipsis").font(.system(size: 21, weight: .semibold))
-                    .foregroundStyle(C.muted)
+                sleepTimerControl
+
+                Menu {
+                    Button { withAnimation { coverPage = 1 } } label: { Label("Chapters", systemImage: "list.bullet") }
+                    Button { withAnimation { coverPage = 2 } } label: { Label("This-book stats", systemImage: "chart.bar.xaxis") }
+                    Button { showSmartSpeech = true } label: { Label("SmartSpeech", systemImage: "speedometer") }
+                    sleepTimerMenu
+                } label: {
+                    Image(systemName: "ellipsis").font(.system(size: 21, weight: .semibold))
+                        .foregroundStyle(C.muted)
+                }
+                .hoverEffect(.highlight)
+                .accessibilityLabel("More")
             }
-            .accessibilityLabel("More")
+            .frame(height: 26)
+            .padding(.vertical, 12)
+            .padding(.horizontal, 28)
         }
-        .frame(height: 26)
-        .padding(.vertical, 12)
-        .padding(.horizontal, 28)
-        .background(C.fill, in: Capsule())
-        .overlay(Capsule().stroke(C.stroke))
+        .glassEffect()
+    }
+
+    private var sleepTimerControl: some View {
+        Menu {
+            sleepTimerMenu
+        } label: {
+            Image(systemName: player.sleepTimerEnd != nil ? "moon.zzz.fill" : "moon.zzz")
+                .font(.system(size: 21))
+                .foregroundStyle(player.sleepTimerEnd != nil ? C.mint : C.muted)
+        }
+        .hoverEffect(.highlight)
+        .accessibilityLabel(player.sleepTimerRemainingLabel.map { "Sleep timer, \($0) remaining" }
+            ?? "Sleep timer")
+    }
+
+    @ViewBuilder
+    private var sleepTimerMenu: some View {
+        Button("Off") { player.cancelSleepTimer() }
+        Divider()
+        ForEach([5, 15, 30, 45, 60], id: \.self) { minutes in
+            Button("\(minutes) minutes") { player.setSleepTimer(minutes: minutes) }
+        }
     }
 
     // MARK: Formatting
 
-    /// "M:SS" (used by TrackListView too).
+    /// "M:SS" time formatter for chapter durations.
     static func fmt(_ seconds: Double) -> String {
         guard seconds.isFinite else { return "0:00" }
         let s = Int(seconds)
@@ -148,6 +179,7 @@ struct PlayerView: View {
 private struct PlayerCoverArt: View {
     let audiobook: Audiobook
     let side: CGFloat
+    var coverNamespace: Namespace.ID? = nil
     @Environment(\.displayScale) private var displayScale
     @State private var coverImage: UIImage?
 
@@ -164,6 +196,7 @@ private struct PlayerCoverArt: View {
         }
         .frame(width: side, height: side)
         .clipShape(shape)
+        .modifier(PlayerMatchedCoverEffect(id: "nowPlayingCover", namespace: coverNamespace))
         .shadow(color: .black.opacity(0.5), radius: 22, y: 14)
         .padding(.horizontal, 2)
         .task(id: audiobook.coverPath) {
@@ -174,6 +207,19 @@ private struct PlayerCoverArt: View {
                 relativePath: path,
                 maxPixelSize: pixels
             )?.image
+        }
+    }
+}
+
+private struct PlayerMatchedCoverEffect: ViewModifier {
+    let id: String
+    let namespace: Namespace.ID?
+
+    func body(content: Content) -> some View {
+        if let namespace {
+            content.matchedGeometryEffect(id: id, in: namespace)
+        } else {
+            content
         }
     }
 }
@@ -363,6 +409,7 @@ private struct PlayerTransport: View {
                 Image(systemName: "gobackward.15").font(.system(size: 33))
                     .foregroundStyle(C.text)
             }
+            .hoverEffect(.highlight)
             Button { player.togglePlayPause() } label: {
                 ZStack {
                     Circle().fill(C.mint).frame(width: 84, height: 84)
@@ -371,11 +418,13 @@ private struct PlayerTransport: View {
                         .font(.system(size: 32, weight: .bold)).foregroundStyle(C.onMint)
                 }
             }
+            .hoverEffect(.highlight)
             .keyboardShortcut(.space, modifiers: [])
             Button { player.skip(30) } label: {
                 Image(systemName: "goforward.30").font(.system(size: 33))
                     .foregroundStyle(C.text)
             }
+            .hoverEffect(.highlight)
         }
     }
 }

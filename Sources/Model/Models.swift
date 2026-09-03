@@ -48,6 +48,10 @@ final class Audiobook {
     /// sync). Drives last-writer-wins for cross-device progress sync (Phase 5).
     /// Optional with a nil default — additive, CloudKit-safe lightweight migration.
     var progressUpdatedAt: Date?
+    /// Shelf progress cache (0...1). Updated when position is persisted or merged
+    /// from sync so tile bodies never sort `orderedTracks` on the hot path.
+    /// Nil on older rows until the next save — `shelfFractionComplete` falls back once.
+    var cachedFractionComplete: Double?
     /// SmartSpeech (silence-trimming) per-book tier override, as `SmartSpeechSettings.Preset.rawValue`
     /// ("default"/"more"/"aggressive"). `nil` → inherit the global default tier. Resolve via
     /// `effectiveSmartSpeechTier`. Additive optional → lightweight, CloudKit-safe migration.
@@ -82,6 +86,7 @@ final class Audiobook {
         lastOffsetSeconds: Double = 0,
         totalDuration: Double = 0,
         progressUpdatedAt: Date? = nil,
+        cachedFractionComplete: Double? = nil,
         smartSpeechTier: String? = nil,
         smartSpeechUnavailable: Bool? = nil,
         smartSpeechSavedSeconds: Double? = nil,
@@ -98,6 +103,7 @@ final class Audiobook {
         self.lastOffsetSeconds = lastOffsetSeconds
         self.totalDuration = totalDuration
         self.progressUpdatedAt = progressUpdatedAt
+        self.cachedFractionComplete = cachedFractionComplete
         self.smartSpeechTier = smartSpeechTier
         self.smartSpeechUnavailable = smartSpeechUnavailable
         self.smartSpeechSavedSeconds = smartSpeechSavedSeconds
@@ -129,6 +135,17 @@ final class Audiobook {
         let total = totalDuration > 0 ? totalDuration : orderedTracks.reduce(0) { $0 + $1.duration }
         guard total > 0 else { return 0 }
         return min(1, max(0, playedSeconds / total))
+    }
+
+    /// Shelf hot path — prefer the persisted cache; recompute once when missing.
+    var shelfFractionComplete: Double {
+        if let cachedFractionComplete { return cachedFractionComplete }
+        return fractionComplete
+    }
+
+    /// Recompute and store shelf fraction after a position write or remote merge.
+    func refreshCachedFractionComplete() {
+        cachedFractionComplete = fractionComplete
     }
 }
 

@@ -446,17 +446,26 @@ actor RhapsodeServerClient {
         try throwIfNeeded(resp, data: data)
     }
 
-    func getLifetime() async throws -> (saved: Double, played: Double) {
+    func getLifetime() async throws -> (saved: Double, played: Double, updatedAt: Date) {
         struct Full: Decodable {
             let savedSeconds: Double
             let playedSeconds: Double
+            let updatedAt: String
             enum CodingKeys: String, CodingKey {
                 case savedSeconds = "saved_seconds"
                 case playedSeconds = "played_seconds"
+                case updatedAt = "updated_at"
             }
         }
         let f = try await getJSON(path: "/v1/stats/lifetime", as: Full.self)
-        return (f.savedSeconds, f.playedSeconds)
+        let iso = ISO8601DateFormatter()
+        iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let isoBasic = ISO8601DateFormatter()
+        isoBasic.formatOptions = [.withInternetDateTime]
+        let updated = iso.date(from: f.updatedAt)
+            ?? isoBasic.date(from: f.updatedAt)
+            ?? Date.distantPast
+        return (f.savedSeconds, f.playedSeconds, updated)
     }
 
     // MARK: - HTTP helpers

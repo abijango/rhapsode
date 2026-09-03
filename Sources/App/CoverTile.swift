@@ -99,7 +99,7 @@ struct CoverTile: View {
 
             if let progress, !isRemote {
                 HStack(spacing: isRegular ? DS.Spacing.sm : DS.Spacing.xs) {
-                    LinearProgressBar(fraction: progress, height: isRegular ? 20 : 4, animated: false)
+                    LinearProgressBar(fraction: progress, height: isRegular ? 8 : 4, animated: false)
                     Text(Self.progressLabel(progress))
                         .font((isRegular ? Font.headline : Font.caption2).monospacedDigit())
                         .foregroundStyle(progress >= 0.995 ? DS.Palette.accent : .secondary)

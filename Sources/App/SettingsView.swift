@@ -7,6 +7,44 @@ import UIKit
 
 // MARK: - Root (sparse index — matches iOS Settings hierarchy)
 
+private struct SettingsIndexRow: View {
+    let title: String
+    let systemImage: String
+    let tint: Color
+    var status: String? = nil
+    var badge: Int? = nil
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: systemImage)
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(.white)
+                .frame(width: 28, height: 28)
+                .background(tint, in: RoundedRectangle(cornerRadius: 6.5, style: .continuous))
+
+            Text(title)
+
+            Spacer(minLength: 8)
+
+            if let badge, badge > 0 {
+                Text("\(badge)")
+                    .font(.caption.weight(.semibold).monospacedDigit())
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 2)
+                    .background(DS.Palette.accent, in: Capsule())
+            }
+
+            if let status {
+                Text(status)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+        }
+    }
+}
+
 /// App settings root. Keeps the top level scannable: one row per area with a
 /// status subtitle; dense controls live one level down (HIG: hierarchical lists,
 /// essential info first, secondary detail on drill-down).
@@ -22,7 +60,6 @@ struct SettingsView: View {
     var body: some View {
         NavigationStack {
             Form {
-                // Frequent, low-density controls stay on the root.
                 Section {
                     Picker("Theme", selection: $appearanceRaw) {
                         ForEach(AppAppearance.allCases) { Text($0.label).tag($0.rawValue) }
@@ -36,9 +73,10 @@ struct SettingsView: View {
                     NavigationLink {
                         LibrarySourceSettingsView()
                     } label: {
-                        settingsRow(
+                        SettingsIndexRow(
                             title: "Library Sources",
                             systemImage: "externaldrive.connected.to.line.below",
+                            tint: .blue,
                             status: librarySourceStatus
                         )
                     }
@@ -46,19 +84,12 @@ struct SettingsView: View {
                     NavigationLink {
                         DownloadsView()
                     } label: {
-                        HStack {
-                            Label("Downloads", systemImage: "arrow.down.circle")
-                            Spacer()
-                            let count = DownloadQueueGrouper.attentionCount(from: downloadItems)
-                            if count > 0 {
-                                Text("\(count)")
-                                    .font(.caption.weight(.semibold).monospacedDigit())
-                                    .foregroundStyle(.white)
-                                    .padding(.horizontal, 7)
-                                    .padding(.vertical, 2)
-                                    .background(DS.Palette.accent, in: Capsule())
-                            }
-                        }
+                        SettingsIndexRow(
+                            title: "Downloads",
+                            systemImage: "arrow.down.circle",
+                            tint: .teal,
+                            badge: downloadAttentionBadge
+                        )
                     }
                 } header: {
                     Text("Library")
@@ -70,9 +101,10 @@ struct SettingsView: View {
                     NavigationLink {
                         SmartSpeechSettingsView()
                     } label: {
-                        settingsRow(
+                        SettingsIndexRow(
                             title: SmartSpeechBranding.featureName,
                             systemImage: "waveform",
+                            tint: DS.Palette.Reclaim.mint,
                             status: smartSpeechEnabled ? "On" : "Off"
                         )
                     }
@@ -84,18 +116,20 @@ struct SettingsView: View {
                     NavigationLink {
                         ProgressSyncSettingsView()
                     } label: {
-                        settingsRow(
+                        SettingsIndexRow(
                             title: "Progress Sync",
                             systemImage: "arrow.triangle.2.circlepath.icloud",
+                            tint: .purple,
                             status: progressSyncStatus
                         )
                     }
                     NavigationLink {
                         KOSyncSettingsView()
                     } label: {
-                        settingsRow(
+                        SettingsIndexRow(
                             title: "KOReader Sync",
                             systemImage: "arrow.triangle.2.circlepath",
+                            tint: .orange,
                             status: KOSyncSettings.isConfigured ? "On" : "Off"
                         )
                     }
@@ -107,7 +141,6 @@ struct SettingsView: View {
             }
             .navigationTitle("Settings")
             .task { smartSpeechEnabled = SmartSpeechPreferences.isEnabled }
-            // Re-read when returning from a child so status labels stay fresh.
             .onAppear { smartSpeechEnabled = SmartSpeechPreferences.isEnabled }
         }
     }
@@ -128,15 +161,9 @@ struct SettingsView: View {
         return "Dropbox"
     }
 
-    private func settingsRow(title: String, systemImage: String, status: String) -> some View {
-        HStack {
-            Label(title, systemImage: systemImage)
-            Spacer()
-            Text(status)
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-        }
+    private var downloadAttentionBadge: Int? {
+        let count = DownloadQueueGrouper.attentionCount(from: downloadItems)
+        return count > 0 ? count : nil
     }
 }
 

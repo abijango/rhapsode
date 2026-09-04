@@ -119,11 +119,13 @@ struct ContinueCard: View {
     enum Status: String {
         case playing = "PLAYING"
         case paused = "PAUSED"
+        case reading = "READING"
     }
 
     let title: String
     var coverPath: String?
     let status: Status
+    var kind: FolderKind = .audiobooks
 
     @Environment(\.displayScale) private var displayScale
     @State private var image: UIImage?
@@ -157,14 +159,14 @@ struct ContinueCard: View {
     private var cover: some View {
         RoundedRectangle(cornerRadius: DS.Radius.cover)
             .fill(DS.Palette.coverPlaceholder)
-            .aspectRatio(1, contentMode: .fit)
+            .aspectRatio(DS.Shelf.placeholderCoverAspect(for: kind), contentMode: .fit)
             .overlay {
                 if let image {
                     Image(uiImage: image)
                         .resizable()
                         .scaledToFill()
                 } else {
-                    Image(systemName: "headphones")
+                    Image(systemName: kind == .audiobooks ? "headphones" : "book.closed")
                         .font(.title2)
                         .foregroundStyle(.secondary)
                 }
@@ -185,11 +187,25 @@ struct LibraryListRow: View {
     var subtitle: String?
     var coverPath: String?
     var appearance: Appearance = .local
+    var kind: FolderKind = .audiobooks
 
     @Environment(\.displayScale) private var displayScale
     @State private var image: UIImage?
 
     private var isRemote: Bool { appearance == .remote }
+
+    private static let coverHeight: CGFloat = 56
+    private static let coverWidthMin: CGFloat = 36
+    private static let coverWidthMax: CGFloat = 56
+
+    private var coverWidth: CGFloat {
+        let aspect = DS.Shelf.placeholderCoverAspect(for: kind)
+        return min(max(Self.coverHeight * aspect, Self.coverWidthMin), Self.coverWidthMax)
+    }
+
+    private var placeholderIcon: String {
+        kind == .audiobooks ? "headphones" : "book.closed"
+    }
 
     var body: some View {
         HStack(spacing: DS.Spacing.md) {
@@ -215,7 +231,7 @@ struct LibraryListRow: View {
         .task(id: coverPath) {
             image = nil
             guard let coverPath else { return }
-            let maxPixels = Self.coverSize * displayScale * 2
+            let maxPixels = max(coverWidth, Self.coverHeight) * displayScale * 2
             if let loaded = await CoverImageLoader.Cache.shared.load(
                 relativePath: coverPath,
                 maxPixelSize: maxPixels
@@ -225,20 +241,18 @@ struct LibraryListRow: View {
         }
     }
 
-    private static let coverSize: CGFloat = 56
-
     private var cover: some View {
         RoundedRectangle(cornerRadius: DS.Radius.cover)
             .fill(DS.Palette.coverPlaceholder)
-            .frame(width: Self.coverSize, height: Self.coverSize)
+            .frame(width: coverWidth, height: Self.coverHeight)
             .overlay {
                 if let image {
                     Image(uiImage: image)
                         .resizable()
                         .scaledToFill()
-                        .frame(width: Self.coverSize, height: Self.coverSize)
+                        .frame(width: coverWidth, height: Self.coverHeight)
                 } else {
-                    Image(systemName: isRemote ? "icloud.and.arrow.down" : "headphones")
+                    Image(systemName: isRemote ? "icloud.and.arrow.down" : placeholderIcon)
                         .font(.body)
                         .foregroundStyle(.secondary)
                 }

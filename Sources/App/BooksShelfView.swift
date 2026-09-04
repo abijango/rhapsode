@@ -29,10 +29,14 @@ struct BooksShelfView: View {
         LibraryShelf.continueEbooks(books).filter(passesFilters)
     }
 
+    private var pinnedContinue: [Book] {
+        Array(continueBooks.prefix(4))
+    }
+
     private var libraryBooks: [Book] {
-        let continueIDs = Set(continueBooks.map(\.id))
+        let pinnedIDs = Set(pinnedContinue.map(\.id))
         return books.filter { book in
-            passesFilters(book) && !continueIDs.contains(book.id)
+            passesFilters(book) && !pinnedIDs.contains(book.id)
         }
     }
 
@@ -78,14 +82,29 @@ struct BooksShelfView: View {
                 } else if !hasVisibleContent {
                     emptyFiltered
                 } else {
-                    CoverGrid {
-                        shelfHeader
-                    } content: {
-                        ForEach(libraryBooks) { book in
-                            ebookLink(book)
-                        }
-                        ForEach(remoteOnly) { entry in
-                            remoteTile(entry)
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 0) {
+                            CollectionCircleBar(
+                                collections: collections,
+                                selectedID: $selectedCollectionID,
+                                onManage: { showManageCollections = true }
+                            )
+                            VStack(alignment: .leading, spacing: 0) {
+                                if !pinnedContinue.isEmpty {
+                                    ShelfSectionHeader(title: "Continue")
+                                    continueGrid
+                                }
+                                if (!libraryBooks.isEmpty || !remoteOnly.isEmpty) && !pinnedContinue.isEmpty {
+                                    ShelfSectionHeader(title: "Library")
+                                }
+                                ForEach(libraryBooks) { book in
+                                    ebookLink(book)
+                                }
+                                ForEach(remoteOnly) { entry in
+                                    remoteRow(entry)
+                                }
+                            }
+                            .padding(.horizontal, DS.Spacing.md)
                         }
                     }
                 }
@@ -184,22 +203,21 @@ struct BooksShelfView: View {
         }
     }
 
+    private var continueColumns: [GridItem] {
+        [
+            GridItem(.flexible(), spacing: DS.Shelf.spacing),
+            GridItem(.flexible(), spacing: DS.Shelf.spacing),
+        ]
+    }
+
     @ViewBuilder
-    private var shelfHeader: some View {
-        CollectionFilterBar(
-            collections: collections,
-            selectedID: $selectedCollectionID,
-            onManage: { showManageCollections = true }
-        )
-        if !continueBooks.isEmpty {
-            ShelfSectionHeader(title: "Continue")
-            ContinueShelfRow(items: continueBooks) { book in
-                ebookLink(book)
+    private var continueGrid: some View {
+        LazyVGrid(columns: continueColumns, spacing: DS.Shelf.spacing) {
+            ForEach(pinnedContinue) { book in
+                ebookLink(book, style: .continue)
             }
         }
-        if (!libraryBooks.isEmpty || !remoteOnly.isEmpty) && !continueBooks.isEmpty {
-            ShelfSectionHeader(title: "Library")
-        }
+        .padding(.bottom, DS.Spacing.xs)
     }
 
     @discardableResult
@@ -233,19 +251,18 @@ struct BooksShelfView: View {
         sync.isDownloadingRemoteEntry(entry.id)
     }
 
-    private func remoteTile(_ entry: RemoteCatalogEntry) -> some View {
+    private func remoteRow(_ entry: RemoteCatalogEntry) -> some View {
         let downloading = isDownloading(entry)
         return Button {
             guard !downloading else { return }
             Task { await sync.downloadRemote(entry) }
         } label: {
-            CoverTile(
+            LibraryListRow(
                 title: entry.title,
                 subtitle: downloading
                     ? "Downloading…"
                     : (entry.author ?? "On NAS · tap to download"),
                 coverPath: sync.remoteCoverPath(for: entry.id),
-                progress: nil,
                 appearance: .remote,
                 kind: .books
             )
@@ -269,18 +286,32 @@ struct BooksShelfView: View {
         }
     }
 
-    private func ebookLink(_ book: Book) -> some View {
+    private enum EbookLinkStyle {
+        case `continue`
+        case library
+    }
+
+    private func ebookLink(_ book: Book, style: EbookLinkStyle = .library) -> some View {
         NavigationLink {
             ReaderView(book: book)
                 .onAppear { Self.warmWebKitIfNeeded() }
         } label: {
-            CoverTile(
-                title: book.title,
-                subtitle: book.author,
-                coverPath: book.coverPath,
-                progress: book.fractionComplete,
-                kind: .books
-            )
+            switch style {
+            case .continue:
+                ContinueCard(
+                    title: book.title,
+                    coverPath: book.coverPath,
+                    status: .reading,
+                    kind: .books
+                )
+            case .library:
+                LibraryListRow(
+                    title: book.title,
+                    subtitle: book.author,
+                    coverPath: book.coverPath,
+                    kind: .books
+                )
+            }
         }
         .tint(.primary)
         .contextMenu {

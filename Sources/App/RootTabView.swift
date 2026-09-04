@@ -17,6 +17,40 @@ enum RootLayoutMode: Equatable {
     }
 }
 
+enum RootPlayerIntent {
+    case browsing
+    case showing(Audiobook)
+
+    var book: Audiobook? {
+        switch self {
+        case .browsing: nil
+        case .showing(let book): book
+        }
+    }
+}
+
+enum RootPlayerSurface: Equatable {
+    case none, cover, detail
+}
+
+enum RootPlayerPresentation {
+    static func surface(intent: RootPlayerIntent, layout: RootLayoutMode) -> RootPlayerSurface {
+        switch intent {
+        case .browsing:
+            return .none
+        case .showing:
+            switch layout {
+            case .tabs: return .cover
+            case .split: return .detail
+            }
+        }
+    }
+
+    static func showsMiniPlayer(hasPlayingBook: Bool, surface: RootPlayerSurface) -> Bool {
+        hasPlayingBook && surface == .none
+    }
+}
+
 // MARK: - Sidebar item
 
 /// Sidebar destinations in the split-view layout.
@@ -42,9 +76,9 @@ private enum SidebarItem: Int, CaseIterable, Identifiable {
 
 /// Top-level shell: Audiobooks / E-books / Settings.
 ///
-/// - **Compact** (iPhone, Slide Over): `TabView` — preserves the original UX.
-/// - **Regular** (iPad): `NavigationSplitView` with a sidebar of sections and a
-///   detail column that hosts the selected shelf or settings screen.
+/// - **Compact** (iPhone, Slide Over): `TabView`. The rich player is a cover.
+/// - **Regular** (iPad, Mac): `NavigationSplitView`. The rich player overlays
+///   the audiobooks shelf so the sidebar and shelf state stay.
 struct RootTabView: View {
     @Environment(SyncManager.self) private var sync
     @Environment(AudiobookPlayer.self) private var audioPlayer
@@ -55,11 +89,25 @@ struct RootTabView: View {
     @State private var tabSelection  = Self.initialTabSelection
     // Regular path — sidebar selection
     @State private var sidebarItem: SidebarItem? = .audiobooks
-    /// Full-screen Now Playing opened from the mini player or a shelf tile.
-    @State private var showExpandedPlayer = false
-    @State private var expandedAudiobook: Audiobook?
-    @State private var hideAccessoryForExpanded = false
+    @State private var playerIntent: RootPlayerIntent = .browsing
     @Namespace private var playerCoverNamespace
+
+    private var layout: RootLayoutMode { RootLayoutMode.resolve(hSizeClass) }
+    private var surface: RootPlayerSurface {
+        RootPlayerPresentation.surface(intent: playerIntent, layout: layout)
+    }
+    /// Cover binding is compact-only. Ignore a false write while the split
+    /// branch is mounted so a size-class flip does not drop `.showing`.
+    private var coverPresented: Binding<Bool> {
+        Binding(
+            get: { surface == .cover },
+            set: { presented in
+                if !presented, layout == .tabs {
+                    playerIntent = .browsing
+                }
+            }
+        )
+    }
 
     private static var initialTabSelection: Int {
         #if DEBUG
@@ -78,11 +126,12 @@ struct RootTabView: View {
 
     var body: some View {
         Group {
-            switch RootLayoutMode.resolve(hSizeClass) {
+            switch layout {
             case .tabs:  compactTabs
             case .split: regularSplit
             }
         }
+        .focusedValue(\.audiobookPlayer, audioPlayer.book != nil ? audioPlayer : nil)
         .environment(\.expandAudiobookPlayer, expandPlayer(for:))
         // Foreground auto-detect: start the watcher + quiet catalogue refresh after
         // the shelf paints so Continue stays tappable. Stop watching when backgrounded.
@@ -119,23 +168,13 @@ struct RootTabView: View {
                 }
             }
         }
-        .onChange(of: showExpandedPlayer) { _, expanded in
-            if expanded {
-                Task { @MainActor in
-                    try? await Task.sleep(for: .milliseconds(320))
-                    hideAccessoryForExpanded = true
-                }
-            } else {
-                hideAccessoryForExpanded = false
-                expandedAudiobook = nil
-            }
-        }
     }
 
     private func expandPlayer(for book: Audiobook) {
-        expandedAudiobook = book
-        hideAccessoryForExpanded = false
-        showExpandedPlayer = true
+        playerIntent = .showing(book)
+        if layout == .split {
+            sidebarItem = .audiobooks
+        }
     }
 
     #if targetEnvironment(macCatalyst)
@@ -146,9 +185,11 @@ struct RootTabView: View {
     /// `sizeRestrictions` can be nil earlier (see the delayed retry at the call site).
     static func configureCatalystWindow() {
         for ws in UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene }) {
-            guard let r = ws.sizeRestrictions else { continue }
-            r.minimumSize = CGSize(width: 600, height: 480)
-            r.maximumSize = CGSize(width: 10_000, height: 10_000)
+            if let r = ws.sizeRestrictions {
+                r.minimumSize = CGSize(width: 600, height: 480)
+                r.maximumSize = CGSize(width: 10_000, height: 10_000)
+            }
+            ws.titlebar?.titleVisibility = .hidden
         }
     }
     #endif
@@ -178,8 +219,8 @@ struct RootTabView: View {
         .tabViewBottomAccessory {
             nowPlayingAccessory
         }
-        .fullScreenCover(isPresented: $showExpandedPlayer) {
-            if let book = expandedAudiobook ?? audioPlayer.book {
+        .fullScreenCover(isPresented: coverPresented) {
+            if let book = playerIntent.book ?? audioPlayer.book {
                 ExpandedNowPlayingView(book: book, coverNamespace: playerCoverNamespace)
             }
         }
@@ -206,10 +247,22 @@ struct RootTabView: View {
                     .badge(sidebarBadge(for: item))
                     .tag(item)
             }
-            .navigationTitle("Rhapsode")
+            .navigationTitle("")
         } detail: {
             switch sidebarItem ?? .audiobooks {
-            case .audiobooks: AudiobooksShelfView()
+            case .audiobooks:
+                ZStack {
+                    AudiobooksShelfView(showsShelfChrome: surface != .detail)
+                        .opacity(surface == .detail ? 0 : 1)
+                        .allowsHitTesting(surface != .detail)
+                        .accessibilityHidden(surface == .detail)
+                    if surface == .detail, let book = playerIntent.book {
+                        SplitNowPlayingView(book: book, coverNamespace: playerCoverNamespace) {
+                            playerIntent = .browsing
+                        }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    }
+                }
             case .ebooks:     BooksShelfView()
             case .stats:      NerdStatsView()
             case .settings:   SettingsView()
@@ -218,16 +271,19 @@ struct RootTabView: View {
         .safeAreaInset(edge: .bottom, spacing: 0) {
             nowPlayingAccessory
         }
-        .fullScreenCover(isPresented: $showExpandedPlayer) {
-            if let book = expandedAudiobook ?? audioPlayer.book {
-                ExpandedNowPlayingView(book: book, coverNamespace: playerCoverNamespace)
+        .onChange(of: sidebarItem) { _, new in
+            if new != .audiobooks, case .showing = playerIntent {
+                playerIntent = .browsing
             }
         }
     }
 
     @ViewBuilder
     private var nowPlayingAccessory: some View {
-        if audioPlayer.book != nil, !hideAccessoryForExpanded {
+        if RootPlayerPresentation.showsMiniPlayer(
+            hasPlayingBook: audioPlayer.book != nil,
+            surface: surface
+        ) {
             NowPlayingAccessory(coverNamespace: playerCoverNamespace) {
                 if let book = audioPlayer.book {
                     expandPlayer(for: book)

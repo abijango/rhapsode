@@ -8,7 +8,8 @@ private struct ExpandAudiobookPlayerKey: EnvironmentKey {
 }
 
 extension EnvironmentValues {
-    /// Opens the Music-style full-screen player for the given audiobook.
+    /// Opens the rich player for the given audiobook.
+    /// Compact width uses a full-screen cover; regular width uses the split detail column.
     var expandAudiobookPlayer: ((Audiobook) -> Void)? {
         get { self[ExpandAudiobookPlayerKey.self] }
         set { self[ExpandAudiobookPlayerKey.self] = newValue }
@@ -129,6 +130,26 @@ struct ExpandedNowPlayingView: View {
                     }
                 }
         }
+    }
+}
+
+struct SplitNowPlayingView: View {
+    let book: Audiobook
+    var coverNamespace: Namespace.ID? = nil
+    var onClose: () -> Void
+
+    var body: some View {
+        NavigationStack {
+            PlayerView(audiobook: book, coverNamespace: coverNamespace)
+                .navigationTitle("")
+                .toolbar {
+                    ToolbarItem(placement: .topBarLeading) {
+                        Button("Library", systemImage: "chevron.backward", action: onClose)
+                            .hoverEffect(.highlight)
+                    }
+                }
+        }
+        .background(DS.Palette.Reclaim.bg1.ignoresSafeArea())
     }
 }
 

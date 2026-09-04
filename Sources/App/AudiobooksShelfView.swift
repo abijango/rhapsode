@@ -9,6 +9,7 @@ struct AudiobooksShelfView: View {
     @Query(sort: \Audiobook.title) private var audiobooks: [Audiobook]
     @Query(sort: \LibraryCollection.name) private var allCollections: [LibraryCollection]
     @Environment(\.expandAudiobookPlayer) private var expandAudiobookPlayer
+    var showsShelfChrome = true
     @State private var searchText = ""
     @State private var selectedCollectionID: UUID?
     @State private var showManageCollections = false
@@ -96,38 +97,37 @@ struct AudiobooksShelfView: View {
                     LibraryScanBanner(label: scanningLabel)
                 }
             }
-            .navigationTitle("Audiobooks")
+            .navigationTitle(showsShelfChrome ? "Audiobooks" : "")
             .navigationBarTitleDisplayMode(.inline)
-            .searchable(
-                text: $searchText,
-                placement: .navigationBarDrawer(displayMode: .always),
-                prompt: "Title or author"
-            )
+            .toolbar(showsShelfChrome ? .visible : .hidden, for: .automatic)
+            .modifier(ShelfSearchModifier(text: $searchText, enabled: showsShelfChrome))
             .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    if sync.usesSelectiveCatalog {
-                        Menu {
-                            Button("Refresh catalogue", systemImage: "arrow.clockwise") {
-                                Task { await sync.refreshCatalog() }
-                            }
-                            if sync.usesServerBackend {
-                                Button("Reindex library", systemImage: "externaldrive.badge.icloud") {
-                                    Task { await sync.reindexLibrary(full: false) }
+                if showsShelfChrome {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        if sync.usesSelectiveCatalog {
+                            Menu {
+                                Button("Refresh catalogue", systemImage: "arrow.clockwise") {
+                                    Task { await sync.refreshCatalog() }
                                 }
-                                Button("Full rebuild…", systemImage: "arrow.triangle.2.circlepath") {
-                                    Task { await sync.reindexLibrary(full: true) }
+                                if sync.usesServerBackend {
+                                    Button("Reindex library", systemImage: "externaldrive.badge.icloud") {
+                                        Task { await sync.reindexLibrary(full: false) }
+                                    }
+                                    Button("Full rebuild…", systemImage: "arrow.triangle.2.circlepath") {
+                                        Task { await sync.reindexLibrary(full: true) }
+                                    }
                                 }
+                            } label: {
+                                Label("Library", systemImage: "arrow.clockwise")
                             }
-                        } label: {
-                            Label("Library", systemImage: "arrow.clockwise")
+                            .badge(libraryMenuBadge)
+                            .disabled(sync.isScanning)
+                        } else {
+                            Button("Scan now", systemImage: "arrow.clockwise") {
+                                Task { await sync.scanNow() }
+                            }
+                            .disabled(sync.isScanning)
                         }
-                        .badge(libraryMenuBadge)
-                        .disabled(sync.isScanning)
-                    } else {
-                        Button("Scan now", systemImage: "arrow.clockwise") {
-                            Task { await sync.scanNow() }
-                        }
-                        .disabled(sync.isScanning)
                     }
                 }
             }
@@ -287,6 +287,23 @@ struct AudiobooksShelfView: View {
                 LibraryStore(context: modelContext).deleteAudiobook(book)
                 sync.invalidateOnDeviceCatalogCache()
             }
+        }
+    }
+}
+
+private struct ShelfSearchModifier: ViewModifier {
+    @Binding var text: String
+    var enabled: Bool
+
+    func body(content: Content) -> some View {
+        if enabled {
+            content.searchable(
+                text: $text,
+                placement: .navigationBarDrawer(displayMode: .always),
+                prompt: "Title or author"
+            )
+        } else {
+            content
         }
     }
 }

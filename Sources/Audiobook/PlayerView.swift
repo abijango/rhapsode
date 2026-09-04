@@ -32,8 +32,11 @@ struct PlayerView: View {
 
     var body: some View {
         GeometryReader { geo in
-            let contentWidth = geo.size.width - 40
-            let side = min(contentWidth, hSizeClass == .regular ? 520 : contentWidth)
+            let contentWidth = max(geo.size.width - 40, 0)
+            let reservedChrome: CGFloat = 280
+            let maxByHeight = max(geo.size.height - reservedChrome, 120)
+            let widthCap = hSizeClass == .regular ? 520 : contentWidth
+            let side = min(contentWidth, widthCap, maxByHeight)
             VStack(spacing: 0) {
                 coverPager(side: side)
                 dots.padding(.top, 14)
@@ -48,14 +51,12 @@ struct PlayerView: View {
             .padding(.horizontal, 20)
             .padding(.bottom, 10)
         }
-        .background(LinearGradient(colors: [C.bg1, C.bg2], startPoint: .top, endPoint: .bottom)
-            .ignoresSafeArea())
+        .background(LinearGradient(colors: [C.bg1, C.bg2], startPoint: .top, endPoint: .bottom))
         .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
         .toolbarBackground(C.bg1, for: .navigationBar)
         .toolbarBackground(.visible, for: .navigationBar)
-        // Full-screen now-playing: hide the bottom tab bar while the player is pushed.
-        // Swipe back (interactive pop) returns to the shelf, where the tabs live.
+        // Hide the tab bar while the compact full-screen cover is up.
         .toolbar(.hidden, for: .tabBar)
         .tint(C.mint)
         .sheet(isPresented: $showSmartSpeech) {

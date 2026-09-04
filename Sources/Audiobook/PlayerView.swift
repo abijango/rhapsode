@@ -2,22 +2,27 @@ import SwiftData
 import SwiftUI
 import UIKit
 
-/// The "Reclaimed" full-screen player: a dominant cover that swipes to Chapters then This-book stats,
-/// a single book-domain thick progress bar, a lowered transport, and a slim SmartSpeech · AirPlay ·
-/// More dock. Reclaim palette (trait-adaptive Ink & Mint); Hanken display + IBM Plex Mono data.
-/// Playback lives in the app-lifetime `AudiobookPlayer` (injected), so it continues as the user navigates away.
+private enum PlayerPresentedSheet: Identifiable, Hashable {
+    case chapters
+    case thisBookStats
+    case smartSpeech
+    var id: Self { self }
+}
+
 struct PlayerView: View {
     let audiobook: Audiobook
-    /// DEBUG preview: skip the `onAppear` load so a mock player's injected state survives (for
-    /// screenshotting the chrome without real audio).
     var previewMode = false
     var coverNamespace: Namespace.ID? = nil
 
-    init(audiobook: Audiobook, previewMode: Bool = false, initialPage: Int = 0, coverNamespace: Namespace.ID? = nil) {
+    init(audiobook: Audiobook, previewMode: Bool = false, coverNamespace: Namespace.ID? = nil) {
+        self.init(audiobook: audiobook, previewMode: previewMode, previewSheet: nil, coverNamespace: coverNamespace)
+    }
+
+    private init(audiobook: Audiobook, previewMode: Bool, previewSheet: PlayerPresentedSheet?, coverNamespace: Namespace.ID?) {
         self.audiobook = audiobook
         self.previewMode = previewMode
         self.coverNamespace = coverNamespace
-        _coverPage = State(initialValue: initialPage)
+        _presentedSheet = State(initialValue: previewSheet)
     }
 
     @Environment(\.modelContext) private var modelContext
@@ -25,8 +30,7 @@ struct PlayerView: View {
     @Environment(\.horizontalSizeClass) private var hSizeClass
     @Environment(AudiobookPlayer.self) private var player
 
-    @State private var coverPage = 0
-    @State private var showSmartSpeech = false
+    @State private var presentedSheet: PlayerPresentedSheet?
 
     private var C: DS.Palette.Reclaim.Type { DS.Palette.Reclaim.self }
 
@@ -38,9 +42,8 @@ struct PlayerView: View {
             let widthCap = hSizeClass == .regular ? 520 : contentWidth
             let side = min(contentWidth, widthCap, maxByHeight)
             VStack(spacing: 0) {
-                coverPager(side: side)
-                dots.padding(.top, 14)
-                PlayerMetaBlock(audiobook: audiobook, savedSeconds: savedSeconds)
+                PlayerCoverArt(audiobook: audiobook, side: side, coverNamespace: coverNamespace)
+                PlayerMetaBlock(audiobook: audiobook, onPresentChapters: { presentedSheet = .chapters })
                     .padding(.top, 14)
                 Spacer(minLength: 16)
                 PlayerTransport()
@@ -56,11 +59,19 @@ struct PlayerView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbarBackground(C.bg1, for: .navigationBar)
         .toolbarBackground(.visible, for: .navigationBar)
-        // Hide the tab bar while the compact full-screen cover is up.
         .toolbar(.hidden, for: .tabBar)
         .tint(C.mint)
-        .sheet(isPresented: $showSmartSpeech) {
-            SmartSpeechSheet(book: audiobook, player: player)
+        .sheet(item: $presentedSheet) { sheet in
+            switch sheet {
+            case .chapters:
+                PlayerChaptersSheet()
+                    .environment(player)
+            case .thisBookStats:
+                PlayerThisBookStatsSheet(audiobook: audiobook)
+                    .environment(player)
+            case .smartSpeech:
+                SmartSpeechSheet(book: audiobook, player: player)
+            }
         }
         .onAppear { if !previewMode { player.load(audiobook, context: modelContext) } }
         .onDisappear {
@@ -72,39 +83,10 @@ struct PlayerView: View {
         .focusedValue(\.audiobookPlayer, player)
     }
 
-    // MARK: Cover pager (cover → chapters → this-book stats)
-
-    private func coverPager(side: CGFloat) -> some View {
-        TabView(selection: $coverPage) {
-            PlayerCoverArt(audiobook: audiobook, side: side, coverNamespace: coverNamespace).tag(0)
-            PlayerChaptersPanel(side: side).tag(1)
-            PlayerThisBookPanel(audiobook: audiobook, side: side).tag(2)
-        }
-        .tabViewStyle(.page(indexDisplayMode: .never))
-        .frame(height: side)
-    }
-
-    // MARK: Page dots (tappable — the Mac Catalyst swipe fallback)
-
-    private var dots: some View {
-        HStack(spacing: 6) {
-            ForEach(0..<3, id: \.self) { i in
-                Capsule()
-                    .fill(i == coverPage ? C.mint : C.muted.opacity(0.4))
-                    .frame(width: i == coverPage ? 18 : 6, height: 6)
-                    .onTapGesture { withAnimation { coverPage = i } }
-            }
-        }
-    }
-
-    private var savedSeconds: Double { audiobook.smartSpeechSavedSeconds ?? 0 }
-
-    // MARK: Dock (SmartSpeech · AirPlay · More)
-
     private var dock: some View {
         GlassEffectContainer {
             HStack(spacing: 30) {
-                Button { showSmartSpeech = true } label: {
+                Button { presentedSheet = .smartSpeech } label: {
                     Image(systemName: "speedometer").font(.system(size: 21))
                         .foregroundStyle(C.muted)
                 }
@@ -118,9 +100,9 @@ struct PlayerView: View {
                 sleepTimerControl
 
                 Menu {
-                    Button { withAnimation { coverPage = 1 } } label: { Label("Chapters", systemImage: "list.bullet") }
-                    Button { withAnimation { coverPage = 2 } } label: { Label("This-book stats", systemImage: "chart.bar.xaxis") }
-                    Button { showSmartSpeech = true } label: { Label("SmartSpeech", systemImage: "speedometer") }
+                    Button { presentedSheet = .chapters } label: { Label("Chapters", systemImage: "list.bullet") }
+                    Button { presentedSheet = .thisBookStats } label: { Label("This-book stats", systemImage: "chart.bar.xaxis") }
+                    Button { presentedSheet = .smartSpeech } label: { Label("SmartSpeech", systemImage: "speedometer") }
                     sleepTimerMenu
                 } label: {
                     Image(systemName: "ellipsis").font(.system(size: 21, weight: .semibold))
@@ -158,24 +140,18 @@ struct PlayerView: View {
         }
     }
 
-    // MARK: Formatting
-
-    /// "M:SS" time formatter for chapter durations.
     static func fmt(_ seconds: Double) -> String {
         guard seconds.isFinite else { return "0:00" }
         let s = Int(seconds)
         return String(format: "%d:%02d", s / 60, s % 60)
     }
 
-    /// "H:MM:SS" for long book positions, "M:SS" under an hour.
     static func fmtClock(_ seconds: Double) -> String {
         guard seconds.isFinite, seconds >= 0 else { return "0:00" }
         let t = Int(seconds), h = t / 3600, m = (t % 3600) / 60, s = t % 60
         return h > 0 ? String(format: "%d:%02d:%02d", h, m, s) : String(format: "%d:%02d", m, s)
     }
 }
-
-// MARK: - Player subviews (narrow @Observable tracking)
 
 private struct PlayerCoverArt: View {
     let audiobook: Audiobook
@@ -225,19 +201,21 @@ private struct PlayerMatchedCoverEffect: ViewModifier {
     }
 }
 
-private struct PlayerChaptersPanel: View {
-    let side: CGFloat
+private struct PlayerChaptersSheet: View {
+    @Environment(\.dismiss) private var dismiss
     @Environment(AudiobookPlayer.self) private var player
 
     private var C: DS.Palette.Reclaim.Type { DS.Palette.Reclaim.self }
 
     var body: some View {
-        PlayerPanelSurface(side: side) {
-            Text("Chapters").font(BrandFont.display(18, .bold)).foregroundStyle(C.text)
+        NavigationStack {
             ScrollView {
                 LazyVStack(spacing: 0) {
                     ForEach(Array(player.tracks.enumerated()), id: \.element.id) { i, track in
-                        Button { withAnimation { player.jump(toTrack: i) } } label: {
+                        Button {
+                            player.jump(toTrack: i)
+                            dismiss()
+                        } label: {
                             HStack(spacing: 10) {
                                 Text(String(format: "%02d", i + 1))
                                     .font(ReceiptFont.mono(11, .medium))
@@ -249,19 +227,31 @@ private struct PlayerChaptersPanel: View {
                                     .foregroundStyle(C.muted)
                             }
                             .padding(.vertical, 10)
+                            .padding(.horizontal, 20)
                             .overlay(alignment: .bottom) { Rectangle().fill(C.hairline).frame(height: 1) }
                         }
                         .buttonStyle(.plain)
                     }
                 }
             }
+            .background(LinearGradient(colors: [C.bg1, C.bg2], startPoint: .top, endPoint: .bottom).ignoresSafeArea())
+            .navigationTitle("Chapters")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbarBackground(C.bg1, for: .navigationBar)
+            .toolbarBackground(.visible, for: .navigationBar)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }.foregroundStyle(C.mint)
+                }
+            }
         }
+        .presentationDragIndicator(.visible)
     }
 }
 
-private struct PlayerThisBookPanel: View {
+private struct PlayerThisBookStatsSheet: View {
     let audiobook: Audiobook
-    let side: CGFloat
+    @Environment(\.dismiss) private var dismiss
     @Environment(AudiobookPlayer.self) private var player
 
     private var C: DS.Palette.Reclaim.Type { DS.Palette.Reclaim.self }
@@ -270,36 +260,36 @@ private struct PlayerThisBookPanel: View {
         let played = audiobook.listenedSeconds ?? 0
         let saved = audiobook.smartSpeechSavedSeconds ?? 0
         let pct = played > 0 ? Int((saved / played * 100).rounded()) : 0
-        PlayerPanelSurface(side: side) {
-            Text("This book").font(BrandFont.display(18, .bold)).foregroundStyle(C.text)
-            Text(NerdStatsView.hms(saved)).font(BrandFont.display(30, .heavy))
-                .foregroundStyle(C.mintBright).padding(.top, 8)
-            Text("RECLAIMED · \(pct)%").font(ReceiptFont.mono(10)).kerning(1.5)
-                .foregroundStyle(C.muted).padding(.top, 6)
-            VStack(spacing: 0) {
-                PlayerKVRow(label: "Listened", value: NerdStatsView.hms(played))
-                PlayerKVRow(label: "Silence saved", value: "−\(NerdStatsView.hms(saved))", color: C.mint)
-                PlayerKVRow(label: "% saved", value: "\(pct)%")
-                PlayerKVRow(label: "Speed", value: String(format: "%g×", player.rate))
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 0) {
+                    Text(NerdStatsView.hms(saved)).font(BrandFont.display(30, .heavy))
+                        .foregroundStyle(C.mintBright).padding(.top, 8)
+                    Text("RECLAIMED · \(pct)%").font(ReceiptFont.mono(10)).kerning(1.5)
+                        .foregroundStyle(C.muted).padding(.top, 6)
+                    VStack(spacing: 0) {
+                        PlayerKVRow(label: "Listened", value: NerdStatsView.hms(played))
+                        PlayerKVRow(label: "Silence saved", value: "−\(NerdStatsView.hms(saved))", color: C.mint)
+                        PlayerKVRow(label: "% saved", value: "\(pct)%")
+                        PlayerKVRow(label: "Speed", value: String(format: "%g×", player.rate))
+                    }
+                    .padding(.top, 16)
+                }
+                .padding(20)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .padding(.top, 16)
-            Spacer(minLength: 0)
+            .background(LinearGradient(colors: [C.bg1, C.bg2], startPoint: .top, endPoint: .bottom).ignoresSafeArea())
+            .navigationTitle("This book")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbarBackground(C.bg1, for: .navigationBar)
+            .toolbarBackground(.visible, for: .navigationBar)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }.foregroundStyle(C.mint)
+                }
+            }
         }
-    }
-}
-
-private struct PlayerPanelSurface<Content: View>: View {
-    let side: CGFloat
-    @ViewBuilder var content: Content
-
-    private var C: DS.Palette.Reclaim.Type { DS.Palette.Reclaim.self }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0, content: { content })
-            .padding(18)
-            .frame(width: side, height: side, alignment: .topLeading)
-            .background(C.surface, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-            .padding(.horizontal, 2)
+        .presentationDragIndicator(.visible)
     }
 }
 
@@ -320,45 +310,67 @@ private struct PlayerKVRow: View {
     }
 }
 
-/// Title + chapter line + scrubber + elapsed times — isolated so playback ticks don't
-/// re-render the cover pager, transport, or dock.
 private struct PlayerMetaBlock: View {
     let audiobook: Audiobook
-    let savedSeconds: Double
+    let onPresentChapters: () -> Void
     @Environment(AudiobookPlayer.self) private var player
     @State private var scrubbing = false
     @State private var scrubFraction: Double = 0
 
     private var C: DS.Palette.Reclaim.Type { DS.Palette.Reclaim.self }
 
+    private var canSkipToNextSegment: Bool {
+        player.segmentCount > 1 && player.currentIndex < player.tracks.count - 1
+    }
+
     var body: some View {
         VStack(spacing: 0) {
-            Text(player.currentTrack?.title ?? audiobook.title)
-                .font(BrandFont.display(22, .bold)).foregroundStyle(C.text)
-                .lineLimit(1).frame(maxWidth: .infinity, alignment: .leading)
-            Text(chapterLine)
+            Text("AUDIOBOOK")
                 .font(ReceiptFont.mono(11)).kerning(1).foregroundStyle(C.muted)
                 .lineLimit(1).frame(maxWidth: .infinity, alignment: .leading)
+            Text(audiobook.title)
+                .font(BrandFont.display(22, .bold)).foregroundStyle(C.text)
+                .lineLimit(1).frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.top, 7)
-
-            if savedSeconds >= 1 {
-                Text("◆ \(NerdStatsView.hms(savedSeconds)) reclaimed")
-                    .font(ReceiptFont.mono(11, .semibold)).foregroundStyle(C.mint)
-                    .frame(maxWidth: .infinity, alignment: .trailing)
-                    .padding(.top, 12)
-            } else {
-                Color.clear.frame(height: 1).padding(.top, 12)
+            if player.segmentCount > 1 {
+                Text("\(player.segmentNoun.uppercased()) \(player.currentSegmentNumber)")
+                    .font(ReceiptFont.mono(11)).kerning(1).foregroundStyle(C.muted)
+                    .lineLimit(1).frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.top, 7)
             }
 
-            ThickScrubber(
-                fraction: scrubbing ? scrubFraction : player.bookProgress,
-                onChanged: { scrubbing = true; scrubFraction = $0 },
-                onEnded: { f in
-                    scrubbing = false
-                    player.seekInBook(to: f * player.totalDuration)
+            HStack(spacing: 14) {
+                Button(action: onPresentChapters) {
+                    Image(systemName: "list.bullet")
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundStyle(C.muted)
+                        .frame(width: 28, height: 28)
                 }
-            )
-            .padding(.top, 8)
+                .buttonStyle(.plain)
+                .hoverEffect(.highlight)
+                .accessibilityLabel("Chapters")
+
+                ThinScrubber(
+                    fraction: scrubbing ? scrubFraction : player.bookProgress,
+                    onChanged: { scrubbing = true; scrubFraction = $0 },
+                    onEnded: { f in
+                        scrubbing = false
+                        player.seekInBook(to: f * player.totalDuration)
+                    }
+                )
+
+                Button { player.jump(toTrack: player.currentIndex + 1) } label: {
+                    Image(systemName: "forward.end.fill")
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundStyle(canSkipToNextSegment ? C.muted : C.muted.opacity(0.35))
+                        .frame(width: 28, height: 28)
+                }
+                .buttonStyle(.plain)
+                .hoverEffect(.highlight)
+                .disabled(!canSkipToNextSegment)
+                .accessibilityLabel("Next chapter")
+            }
+            .padding(.top, 12)
 
             PlayerElapsedTimes(
                 scrubbing: scrubbing,
@@ -367,17 +379,8 @@ private struct PlayerMetaBlock: View {
             .padding(.top, 10)
         }
     }
-
-    private var chapterLine: String {
-        let name = (player.currentTrack?.title ?? audiobook.author ?? "").uppercased()
-        if player.segmentCount > 1 {
-            return "\(player.segmentNoun.uppercased()) \(player.currentSegmentNumber) · \(name)"
-        }
-        return name
-    }
 }
 
-/// Clock labels only — further narrows observation to position/duration fields.
 private struct PlayerElapsedTimes: View {
     let scrubbing: Bool
     let scrubFraction: Double
@@ -430,9 +433,7 @@ private struct PlayerTransport: View {
     }
 }
 
-/// A thick, book-domain scrub bar (round knob) matching the "Reclaimed" look. Reports scrub fraction
-/// live while dragging and the final fraction on release; the caller maps it to a book-domain seek.
-private struct ThickScrubber: View {
+private struct ThinScrubber: View {
     let fraction: Double
     let onChanged: (Double) -> Void
     let onEnded: (Double) -> Void
@@ -441,14 +442,13 @@ private struct ThickScrubber: View {
         GeometryReader { geo in
             let w = geo.size.width
             let f = min(1, max(0, fraction))
-            let knobX = f * max(w - 22, 0)
             ZStack(alignment: .leading) {
                 Capsule().fill(DS.Palette.Reclaim.track)
-                Capsule().fill(DS.Palette.Reclaim.mint).frame(width: knobX + 11)
-                Circle().fill(DS.Palette.Reclaim.knob).frame(width: 22, height: 22)
-                    .shadow(color: .black.opacity(0.3), radius: 3, y: 1)
-                    .offset(x: knobX)
+                Capsule().fill(DS.Palette.Reclaim.mint)
+                    .frame(width: max(0, w * f))
             }
+            .frame(height: 4)
+            .frame(maxHeight: .infinity)
             .contentShape(Rectangle())
             .gesture(
                 DragGesture(minimumDistance: 0)
@@ -456,7 +456,7 @@ private struct ThickScrubber: View {
                     .onEnded { v in onEnded(min(1, max(0, v.location.x / max(w, 1)))) }
             )
         }
-        .frame(height: 22)
+        .frame(height: 28)
         .accessibilityElement()
         .accessibilityLabel("Book progress")
         .accessibilityValue("\(Int(min(1, max(0, fraction)) * 100)) percent")
@@ -464,7 +464,12 @@ private struct ThickScrubber: View {
 }
 
 #if DEBUG
-/// DEBUG-only harness to screenshot the player chrome without real audio (launch arg `-previewplayer`).
+fileprivate extension PlayerView {
+    static func preview(audiobook: Audiobook, sheet: PlayerPresentedSheet? = nil) -> PlayerView {
+        PlayerView(audiobook: audiobook, previewMode: true, previewSheet: sheet, coverNamespace: nil)
+    }
+}
+
 struct PlayerPreviewHarness: View {
     var body: some View {
         let book = Audiobook(title: "Harry Potter and the Prisoner of Azkaban (Full-Cast Edition)",
@@ -489,17 +494,62 @@ struct PlayerPreviewHarness: View {
             if args.contains("-smartspeech") {
                 SmartSpeechSheet(book: book, player: player)
             } else {
-                let page = args.contains("-page2") ? 2 : (args.contains("-page1") ? 1 : 0)
-                // Wrap in a TabView to mirror the real context and prove the player hides the tab bar.
+                let previewSheet: PlayerPresentedSheet? = args.contains("-page2") ? .thisBookStats
+                    : (args.contains("-page1") ? .chapters : nil)
                 TabView {
                     NavigationStack {
-                        PlayerView(audiobook: book, previewMode: true, initialPage: page)
+                        PlayerView.preview(audiobook: book, sheet: previewSheet)
                             .environment(player)
                     }
                     .tabItem { Label("Audiobooks", systemImage: "headphones") }
                     Text("E-books").tabItem { Label("E-books", systemImage: "books.vertical") }
                 }
             }
+        }
+    }
+}
+
+#Preview("Now Playing") {
+    PlayerNowPlayingPreviewHost()
+}
+
+private struct PlayerNowPlayingPreviewHost: View {
+    private let book: Audiobook = {
+        let book = Audiobook(title: "Harry Potter and the Prisoner of Azkaban (Full-Cast Edition)",
+                             sourcePath: "preview")
+        book.author = "J. K. Rowling"
+        book.listenedSeconds = 11_520
+        book.smartSpeechSavedSeconds = 1_470
+        book.totalDuration = 40_000
+        return book
+    }()
+
+    private let tracks = [
+        AudiobookTrack(title: "Opening Credits", fileRelPath: "a", duration: 64, order: 0),
+        AudiobookTrack(title: "Owl Post", fileRelPath: "b", duration: 1_468, order: 1),
+        AudiobookTrack(title: "Aunt Marge’s Big Mistake", fileRelPath: "c", duration: 1_514, order: 2),
+        AudiobookTrack(title: "The Knight Bus", fileRelPath: "d", duration: 1_634, order: 3),
+        AudiobookTrack(title: "The Dementor", fileRelPath: "e", duration: 2_477, order: 4),
+        AudiobookTrack(title: "Talons and Tea Leaves", fileRelPath: "f", duration: 2_517, order: 5),
+    ]
+
+    @State private var player = AudiobookPlayer()
+    @State private var sync: SyncManager = {
+        let schema = Schema(AppSchema.models)
+        let config = ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)
+        let container = try! ModelContainer(for: schema, configurations: config)
+        return SyncManager(source: MockLibrarySource(), context: container.mainContext)
+    }()
+
+    var body: some View {
+        NavigationStack {
+            PlayerView.preview(audiobook: book)
+                .environment(player)
+                .environment(sync)
+        }
+        .onAppear {
+            player.rate = 1.5
+            player.debugMockPresent(book: book, tracks: tracks, currentIndex: 4, offsetInTrack: 900, isPlaying: false)
         }
     }
 }

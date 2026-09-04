@@ -6,6 +6,7 @@ import SwiftUI
 struct BooksShelfView: View {
     @Environment(\.modelContext) private var modelContext
     @Environment(\.openSettings) private var openSettings
+    @Environment(\.openDownloads) private var openDownloads
     @Environment(SyncManager.self) private var sync
     @Query(sort: \Book.title) private var books: [Book]
     @Query(sort: \LibraryCollection.name) private var allCollections: [LibraryCollection]
@@ -70,6 +71,10 @@ struct BooksShelfView: View {
         sync.newRemoteCount(kind: .books)
     }
 
+    private var downloadsBadge: Int {
+        sync.downloadingRemoteEntryIDs.count
+    }
+
     var body: some View {
         NavigationStack {
             Group {
@@ -127,7 +132,8 @@ struct BooksShelfView: View {
                         openSettings?()
                     }
                 }
-                ToolbarItem(placement: .topBarTrailing) {
+                ToolbarItemGroup(placement: .topBarTrailing) {
+                    downloadsToolbarButton
                     if sync.usesSelectiveCatalog {
                         Menu {
                             Button("Refresh catalogue", systemImage: "arrow.clockwise") {
@@ -188,6 +194,13 @@ struct BooksShelfView: View {
             .background(DS.Palette.shelfBackground)
         }
         .onAppear { sync.markRemoteCatalogSeen(kind: .books) }
+    }
+
+    private var downloadsToolbarButton: some View {
+        Button("Downloads", systemImage: "arrow.down.circle") {
+            openDownloads?()
+        }
+        .badge(downloadsBadge)
     }
 
     @ViewBuilder

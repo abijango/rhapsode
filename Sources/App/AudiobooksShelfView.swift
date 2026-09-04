@@ -10,6 +10,7 @@ struct AudiobooksShelfView: View {
     @Query(sort: \LibraryCollection.name) private var allCollections: [LibraryCollection]
     @Environment(\.expandAudiobookPlayer) private var expandAudiobookPlayer
     @Environment(\.openSettings) private var openSettings
+    @Environment(\.openDownloads) private var openDownloads
     @Environment(AudiobookPlayer.self) private var player
     var showsShelfChrome = true
     @State private var searchText = ""
@@ -74,6 +75,10 @@ struct AudiobooksShelfView: View {
         sync.newRemoteCount(kind: .audiobooks)
     }
 
+    private var downloadsBadge: Int {
+        sync.downloadingRemoteEntryIDs.count
+    }
+
     var body: some View {
         NavigationStack {
             Group {
@@ -129,7 +134,8 @@ struct AudiobooksShelfView: View {
                             openSettings?()
                         }
                     }
-                    ToolbarItem(placement: .topBarTrailing) {
+                    ToolbarItemGroup(placement: .topBarTrailing) {
+                        downloadsToolbarButton
                         if sync.usesSelectiveCatalog {
                             Menu {
                                 Button("Refresh catalogue", systemImage: "arrow.clockwise") {
@@ -191,6 +197,13 @@ struct AudiobooksShelfView: View {
             .background(DS.Palette.shelfBackground)
         }
         .onAppear { sync.markRemoteCatalogSeen(kind: .audiobooks) }
+    }
+
+    private var downloadsToolbarButton: some View {
+        Button("Downloads", systemImage: "arrow.down.circle") {
+            openDownloads?()
+        }
+        .badge(downloadsBadge)
     }
 
     @ViewBuilder

@@ -93,12 +93,19 @@ struct RootTabView: View {
     @State private var tabSelection: CompactRootTab = Self.initialTabSelection
     @State private var sidebarItem: SidebarItem? = .audiobooks
     @State private var settingsPresented = Self.initialSettingsPresented
+    @State private var downloadsPresented = false
     @State private var playerIntent: RootPlayerIntent = .browsing
     @Namespace private var playerCoverNamespace
 
     private var layout: RootLayoutMode { RootLayoutMode.resolve(hSizeClass) }
     private var surface: RootPlayerSurface {
         RootPlayerPresentation.surface(intent: playerIntent, layout: layout)
+    }
+    private var showsMiniPlayer: Bool {
+        RootPlayerPresentation.showsMiniPlayer(
+            hasPlayingBook: audioPlayer.book != nil,
+            surface: surface
+        )
     }
     /// Cover binding is compact-only. Ignore a false write while the split
     /// branch is mounted so a size-class flip does not drop `.showing`.
@@ -150,6 +157,17 @@ struct RootTabView: View {
         .focusedValue(\.audiobookPlayer, audioPlayer.book != nil ? audioPlayer : nil)
         .environment(\.expandAudiobookPlayer, expandPlayer(for:))
         .environment(\.openSettings, openSettings)
+        .environment(\.openDownloads, openDownloads)
+        .sheet(isPresented: $downloadsPresented) {
+            NavigationStack {
+                DownloadsView()
+                    .toolbar {
+                        ToolbarItem(placement: .confirmationAction) {
+                            Button("Done") { downloadsPresented = false }
+                        }
+                    }
+            }
+        }
         // Foreground auto-detect: start the watcher + quiet catalogue refresh after
         // the shelf paints so Continue stays tappable. Stop watching when backgrounded.
         .onChange(of: scenePhase, initial: true) { _, phase in
@@ -202,6 +220,10 @@ struct RootTabView: View {
         }
     }
 
+    private func openDownloads() {
+        downloadsPresented = true
+    }
+
     #if targetEnvironment(macCatalyst)
     /// Make the Mac Catalyst window freely resizable. On Catalyst the window is a
     /// `UIWindowScene` whose `sizeRestrictions` govern resizing (SwiftUI's
@@ -222,6 +244,31 @@ struct RootTabView: View {
     // MARK: Compact (iPhone)
 
     private var compactTabs: some View {
+        accessoryAttachedTabs
+            .sheet(isPresented: $settingsPresented) {
+                SettingsView(showsCloseButton: true)
+            }
+            .fullScreenCover(isPresented: coverPresented) {
+                if let book = playerIntent.book ?? audioPlayer.book {
+                    ExpandedNowPlayingView(book: book, coverNamespace: playerCoverNamespace)
+                }
+            }
+    }
+
+    @ViewBuilder
+    private var accessoryAttachedTabs: some View {
+        if #available(iOS 26.1, *) {
+            compactTabView.tabViewBottomAccessory(isEnabled: showsMiniPlayer) {
+                miniPlayerAccessory
+            }
+        } else if showsMiniPlayer {
+            compactTabView.tabViewBottomAccessory { miniPlayerAccessory }
+        } else {
+            compactTabView
+        }
+    }
+
+    private var compactTabView: some View {
         TabView(selection: $tabSelection) {
             AudiobooksShelfView()
                 .tabItem { Label("Audiobooks", systemImage: "headphones") }
@@ -232,17 +279,6 @@ struct RootTabView: View {
                 .tabItem { Label("E-books", systemImage: "books.vertical") }
                 .badge(sync.newRemoteCount(kind: .books))
                 .tag(CompactRootTab.ebooks)
-        }
-        .tabViewBottomAccessory {
-            nowPlayingAccessory
-        }
-        .sheet(isPresented: $settingsPresented) {
-            SettingsView(showsCloseButton: true)
-        }
-        .fullScreenCover(isPresented: coverPresented) {
-            if let book = playerIntent.book ?? audioPlayer.book {
-                ExpandedNowPlayingView(book: book, coverNamespace: playerCoverNamespace)
-            }
         }
     }
 
@@ -300,14 +336,15 @@ struct RootTabView: View {
 
     @ViewBuilder
     private var nowPlayingAccessory: some View {
-        if RootPlayerPresentation.showsMiniPlayer(
-            hasPlayingBook: audioPlayer.book != nil,
-            surface: surface
-        ) {
-            NowPlayingAccessory(coverNamespace: playerCoverNamespace) {
-                if let book = audioPlayer.book {
-                    expandPlayer(for: book)
-                }
+        if showsMiniPlayer {
+            miniPlayerAccessory
+        }
+    }
+
+    private var miniPlayerAccessory: some View {
+        NowPlayingAccessory(coverNamespace: playerCoverNamespace) {
+            if let book = audioPlayer.book {
+                expandPlayer(for: book)
             }
         }
     }

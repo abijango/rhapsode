@@ -27,6 +27,17 @@ extension EnvironmentValues {
     }
 }
 
+private struct OpenDownloadsKey: EnvironmentKey {
+    nonisolated(unsafe) static var defaultValue: (() -> Void)? = nil
+}
+
+extension EnvironmentValues {
+    var openDownloads: (() -> Void)? {
+        get { self[OpenDownloadsKey.self] }
+        set { self[OpenDownloadsKey.self] = newValue }
+    }
+}
+
 // MARK: - Mini player
 
 /// Compact Now Playing chrome: cover, title, play/pause (and skip when there's room).
@@ -56,16 +67,15 @@ struct NowPlayingAccessory: View {
                                     namespace: coverNamespace
                                 )
                                 VStack(alignment: .leading, spacing: 2) {
+                                    Text("AUDIOBOOK")
+                                        .font(ReceiptFont.mono(compact ? 9 : 10))
+                                        .kerning(1)
+                                        .foregroundStyle(C.muted)
+                                        .lineLimit(1)
                                     Text(book.title)
                                         .font(BrandFont.display(compact ? 14 : 15, .semibold))
                                         .foregroundStyle(C.text)
                                         .lineLimit(1)
-                                    if !compact, let author = book.author, !author.isEmpty {
-                                        Text(author)
-                                            .font(BrandFont.display(12, .medium))
-                                            .foregroundStyle(C.muted)
-                                            .lineLimit(1)
-                                    }
                                 }
                                 .frame(maxWidth: .infinity, alignment: .leading)
                             }
@@ -79,11 +89,16 @@ struct NowPlayingAccessory: View {
                         Button {
                             player.togglePlayPause()
                         } label: {
-                            Image(systemName: player.isPlaying ? "pause.fill" : "play.fill")
-                                .font(.body.weight(.semibold))
-                                .foregroundStyle(C.mint)
-                                .frame(width: 36, height: 36)
-                                .contentShape(Rectangle())
+                            ZStack {
+                                Circle()
+                                    .fill(C.mint)
+                                    .frame(width: compact ? 28 : 32, height: compact ? 28 : 32)
+                                Image(systemName: player.isPlaying ? "pause.fill" : "play.fill")
+                                    .font(.system(size: compact ? 12 : 14, weight: .bold))
+                                    .foregroundStyle(C.onMint)
+                            }
+                            .frame(width: 36, height: 36)
+                            .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
                         .hoverEffect(.highlight)

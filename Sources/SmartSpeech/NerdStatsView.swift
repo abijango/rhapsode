@@ -2,7 +2,7 @@ import SwiftData
 import SwiftUI
 import UIKit
 
-/// "Nerd Stats" — a top-level destination (between E-books and Settings). Audiobook "Reclaimed"
+/// "Nerd Stats" — audiobook "Reclaimed"
 /// stats (silence trimmed) plus an e-book "Reading" section (foreground time + progress). Ink & Mint
 /// for audiobooks; warm sepia accent for e-books. Hanken Grotesk display + IBM Plex Mono data.
 ///
@@ -10,6 +10,8 @@ import UIKit
 /// collapsed while trimming was active. Lifetime totals live in `SmartSpeechStats` (UserDefaults), polled
 /// ~1×/s so the hero ticks up live; the per-book rows come from SwiftData.
 struct NerdStatsView: View {
+    var embedsNavigationStack = true
+
     @Query(sort: \Audiobook.title) private var books: [Audiobook]
     @Query(sort: \Book.title) private var ebooks: [Book]
     @Environment(\.modelContext) private var modelContext
@@ -48,51 +50,57 @@ struct NerdStatsView: View {
     }
 
     var body: some View {
-        NavigationStack {
-            ScrollView {
-                Group {
-                    if !hasAudiobookStats && !hasEbookStats { empty } else { content }
-                }
-                .frame(maxWidth: 620)
-                .frame(maxWidth: .infinity)
-                .padding(.horizontal, DS.Spacing.lg)
-                .padding(.vertical, DS.Spacing.md)
+        if embedsNavigationStack {
+            NavigationStack { statsRoot }
+        } else {
+            statsRoot
+        }
+    }
+
+    private var statsRoot: some View {
+        ScrollView {
+            Group {
+                if !hasAudiobookStats && !hasEbookStats { empty } else { content }
             }
-            .background(background)
-            .navigationTitle("Nerd Stats")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbarBackground(DS.Palette.Reclaim.bg1, for: .navigationBar)
-            .toolbarBackground(.visible, for: .navigationBar)
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Menu {
-                        Button { backUpNow() } label: {
-                            Label("Back up stats now", systemImage: "icloud.and.arrow.up")
-                        }
-                        Button { showRecalcConfirm = true } label: {
-                            Label("Recalculate from library", systemImage: "arrow.triangle.2.circlepath")
-                        }
-                    } label: {
-                        Image(systemName: "ellipsis.circle").tint(DS.Palette.Reclaim.mint)
+            .frame(maxWidth: 620)
+            .frame(maxWidth: .infinity)
+            .padding(.horizontal, DS.Spacing.lg)
+            .padding(.vertical, DS.Spacing.md)
+        }
+        .background(background)
+        .navigationTitle("Nerd Stats")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbarBackground(DS.Palette.Reclaim.bg1, for: .navigationBar)
+        .toolbarBackground(.visible, for: .navigationBar)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Menu {
+                    Button { backUpNow() } label: {
+                        Label("Back up stats now", systemImage: "icloud.and.arrow.up")
                     }
+                    Button { showRecalcConfirm = true } label: {
+                        Label("Recalculate from library", systemImage: "arrow.triangle.2.circlepath")
+                    }
+                } label: {
+                    Image(systemName: "ellipsis.circle").tint(DS.Palette.Reclaim.mint)
                 }
             }
-            .confirmationDialog("Recalculate lifetime stats?", isPresented: $showRecalcConfirm, titleVisibility: .visible) {
-                Button("Recalculate", role: .destructive) { recalcStats() }
-                Button("Cancel", role: .cancel) {}
-            } message: {
-                Text("Sets the lifetime reclaimed/listened totals to the sum across your current books, then backs them up. Use this if the total looks wrong.")
-            }
-            .alert("Stats", isPresented: Binding(get: { noticeText != nil }, set: { if !$0 { noticeText = nil } })) {
-                Button("OK", role: .cancel) {}
-            } message: { Text(noticeText ?? "") }
-            .task(id: scenePhase) {
-                guard scenePhase == .active else { return }
-                while !Task.isCancelled {
-                    totalPlayed = SmartSpeechStats.totalPlayedSeconds
-                    totalSaved = SmartSpeechStats.totalSavedSeconds
-                    try? await Task.sleep(for: .seconds(1))
-                }
+        }
+        .confirmationDialog("Recalculate lifetime stats?", isPresented: $showRecalcConfirm, titleVisibility: .visible) {
+            Button("Recalculate", role: .destructive) { recalcStats() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Sets the lifetime reclaimed/listened totals to the sum across your current books, then backs them up. Use this if the total looks wrong.")
+        }
+        .alert("Stats", isPresented: Binding(get: { noticeText != nil }, set: { if !$0 { noticeText = nil } })) {
+            Button("OK", role: .cancel) {}
+        } message: { Text(noticeText ?? "") }
+        .task(id: scenePhase) {
+            guard scenePhase == .active else { return }
+            while !Task.isCancelled {
+                totalPlayed = SmartSpeechStats.totalPlayedSeconds
+                totalSaved = SmartSpeechStats.totalSavedSeconds
+                try? await Task.sleep(for: .seconds(1))
             }
         }
     }

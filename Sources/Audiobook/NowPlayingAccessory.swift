@@ -16,6 +16,17 @@ extension EnvironmentValues {
     }
 }
 
+private struct OpenSettingsKey: EnvironmentKey {
+    nonisolated(unsafe) static var defaultValue: (() -> Void)? = nil
+}
+
+extension EnvironmentValues {
+    var openSettings: (() -> Void)? {
+        get { self[OpenSettingsKey.self] }
+        set { self[OpenSettingsKey.self] = newValue }
+    }
+}
+
 // MARK: - Mini player
 
 /// Compact Now Playing chrome: cover, title, play/pause (and skip when there's room).

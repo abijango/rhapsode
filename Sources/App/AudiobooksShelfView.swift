@@ -9,6 +9,7 @@ struct AudiobooksShelfView: View {
     @Query(sort: \Audiobook.title) private var audiobooks: [Audiobook]
     @Query(sort: \LibraryCollection.name) private var allCollections: [LibraryCollection]
     @Environment(\.expandAudiobookPlayer) private var expandAudiobookPlayer
+    @Environment(\.openSettings) private var openSettings
     @Environment(AudiobookPlayer.self) private var player
     var showsShelfChrome = true
     @State private var searchText = ""
@@ -123,6 +124,11 @@ struct AudiobooksShelfView: View {
             .modifier(ShelfSearchModifier(text: $searchText, enabled: showsShelfChrome))
             .toolbar {
                 if showsShelfChrome {
+                    ToolbarItem(placement: .topBarLeading) {
+                        Button("Settings", systemImage: "gearshape") {
+                            openSettings?()
+                        }
+                    }
                     ToolbarItem(placement: .topBarTrailing) {
                         if sync.usesSelectiveCatalog {
                             Menu {

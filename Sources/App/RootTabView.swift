@@ -33,6 +33,11 @@ enum RootPlayerSurface: Equatable {
     case none, cover, detail
 }
 
+enum CompactRootTab: Int, Hashable {
+    case audiobooks = 0
+    case ebooks = 1
+}
+
 enum RootPlayerPresentation {
     static func surface(intent: RootPlayerIntent, layout: RootLayoutMode) -> RootPlayerSurface {
         switch intent {
@@ -74,7 +79,7 @@ private enum SidebarItem: Int, CaseIterable, Identifiable {
 
 // MARK: - RootTabView
 
-/// Top-level shell: Audiobooks / E-books / Settings.
+/// Top-level shell: Audiobooks and E-books on phone; four sidebar items on iPad.
 ///
 /// - **Compact** (iPhone, Slide Over): `TabView`. The rich player is a cover.
 /// - **Regular** (iPad, Mac): `NavigationSplitView`. The rich player overlays
@@ -85,10 +90,9 @@ struct RootTabView: View {
     @Environment(\.scenePhase)            private var scenePhase
     @Environment(\.horizontalSizeClass)   private var hSizeClass
 
-    // Compact path — tab index
-    @State private var tabSelection  = Self.initialTabSelection
-    // Regular path — sidebar selection
+    @State private var tabSelection: CompactRootTab = Self.initialTabSelection
     @State private var sidebarItem: SidebarItem? = .audiobooks
+    @State private var settingsPresented = Self.initialSettingsPresented
     @State private var playerIntent: RootPlayerIntent = .browsing
     @Namespace private var playerCoverNamespace
 
@@ -103,25 +107,37 @@ struct RootTabView: View {
             get: { surface == .cover },
             set: { presented in
                 if !presented, layout == .tabs {
+                    tabSelection = .audiobooks
                     playerIntent = .browsing
                 }
             }
         )
     }
 
-    private static var initialTabSelection: Int {
+    private static var initialTabSelection: CompactRootTab {
         #if DEBUG
         if let i = CommandLine.arguments.firstIndex(of: "-tab"),
            i + 1 < CommandLine.arguments.count {
             switch CommandLine.arguments[i + 1] {
-            case "ebooks":   return 1
-            case "stats":    return 2
-            case "settings": return 3
-            default:         return 0
+            case "ebooks": return .ebooks
+            default:       return .audiobooks
             }
         }
         #endif
-        return 0
+        return .audiobooks
+    }
+
+    private static var initialSettingsPresented: Bool {
+        #if DEBUG
+        if let i = CommandLine.arguments.firstIndex(of: "-tab"),
+           i + 1 < CommandLine.arguments.count {
+            switch CommandLine.arguments[i + 1] {
+            case "settings", "stats": return true
+            default:                  return false
+            }
+        }
+        #endif
+        return false
     }
 
     var body: some View {
@@ -133,6 +149,7 @@ struct RootTabView: View {
         }
         .focusedValue(\.audiobookPlayer, audioPlayer.book != nil ? audioPlayer : nil)
         .environment(\.expandAudiobookPlayer, expandPlayer(for:))
+        .environment(\.openSettings, openSettings)
         // Foreground auto-detect: start the watcher + quiet catalogue refresh after
         // the shelf paints so Continue stays tappable. Stop watching when backgrounded.
         .onChange(of: scenePhase, initial: true) { _, phase in
@@ -177,6 +194,14 @@ struct RootTabView: View {
         }
     }
 
+    private func openSettings() {
+        if layout == .tabs {
+            settingsPresented = true
+        } else {
+            sidebarItem = .settings
+        }
+    }
+
     #if targetEnvironment(macCatalyst)
     /// Make the Mac Catalyst window freely resizable. On Catalyst the window is a
     /// `UIWindowScene` whose `sizeRestrictions` govern resizing (SwiftUI's
@@ -201,23 +226,18 @@ struct RootTabView: View {
             AudiobooksShelfView()
                 .tabItem { Label("Audiobooks", systemImage: "headphones") }
                 .badge(sync.newRemoteCount(kind: .audiobooks))
-                .tag(0)
+                .tag(CompactRootTab.audiobooks)
 
             BooksShelfView()
                 .tabItem { Label("E-books", systemImage: "books.vertical") }
                 .badge(sync.newRemoteCount(kind: .books))
-                .tag(1)
-
-            NerdStatsView()
-                .tabItem { Label("Nerd Stats", systemImage: "chart.bar") }
-                .tag(2)
-
-            SettingsView()
-                .tabItem { Label("Settings", systemImage: "gearshape") }
-                .tag(3)
+                .tag(CompactRootTab.ebooks)
         }
         .tabViewBottomAccessory {
             nowPlayingAccessory
+        }
+        .sheet(isPresented: $settingsPresented) {
+            SettingsView(showsCloseButton: true)
         }
         .fullScreenCover(isPresented: coverPresented) {
             if let book = playerIntent.book ?? audioPlayer.book {

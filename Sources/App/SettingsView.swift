@@ -49,11 +49,13 @@ private struct SettingsIndexRow: View {
 /// status subtitle; dense controls live one level down (HIG: hierarchical lists,
 /// essential info first, secondary detail on drill-down).
 struct SettingsView: View {
+    @Environment(\.dismiss) private var dismiss
     @Environment(SyncManager.self) private var sync
     @Query(sort: \DownloadItem.remoteEntryID) private var downloadItems: [DownloadItem]
 
     @AppStorage(AppAppearance.storageKey) private var appearanceRaw = AppAppearance.system.rawValue
     @State private var smartSpeechEnabled = SmartSpeechPreferences.isEnabled
+    var showsCloseButton = false
 
     private let dropboxKeychain = KeychainTokenStore()
 
@@ -108,6 +110,16 @@ struct SettingsView: View {
                             status: smartSpeechEnabled ? "On" : "Off"
                         )
                     }
+
+                    NavigationLink {
+                        NerdStatsView(embedsNavigationStack: false)
+                    } label: {
+                        SettingsIndexRow(
+                            title: "Nerd Stats",
+                            systemImage: "chart.bar",
+                            tint: .indigo
+                        )
+                    }
                 } header: {
                     Text("Playback")
                 }
@@ -140,6 +152,13 @@ struct SettingsView: View {
                 }
             }
             .navigationTitle("Settings")
+            .toolbar {
+                if showsCloseButton {
+                    ToolbarItem(placement: .topBarLeading) {
+                        Button("Close") { dismiss() }
+                    }
+                }
+            }
             .task { smartSpeechEnabled = SmartSpeechPreferences.isEnabled }
             .onAppear { smartSpeechEnabled = SmartSpeechPreferences.isEnabled }
         }

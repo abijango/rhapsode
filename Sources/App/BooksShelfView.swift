@@ -5,6 +5,7 @@ import SwiftUI
 /// catalogue entries appear greyed until the user taps to download.
 struct BooksShelfView: View {
     @Environment(\.modelContext) private var modelContext
+    @Environment(\.openSettings) private var openSettings
     @Environment(SyncManager.self) private var sync
     @Query(sort: \Book.title) private var books: [Book]
     @Query(sort: \LibraryCollection.name) private var allCollections: [LibraryCollection]
@@ -102,6 +103,11 @@ struct BooksShelfView: View {
                 prompt: "Title or author"
             )
             .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("Settings", systemImage: "gearshape") {
+                        openSettings?()
+                    }
+                }
                 ToolbarItem(placement: .topBarTrailing) {
                     if sync.usesSelectiveCatalog {
                         Menu {

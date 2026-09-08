@@ -59,7 +59,8 @@ enum LiveSilencePrescan {
     /// Runs off the main actor (it decodes and does DSP) — call from a detached task.
     static func analyze(url: URL,
                         cutPoints: [TimeInterval],
-                        preset: SmartSpeechSettings.Preset) throws -> LiveSilencePrescanResult {
+                        preset: SmartSpeechSettings.Preset,
+                        isCancelled: @escaping @Sendable () -> Bool = { false }) throws -> LiveSilencePrescanResult {
         let probe: AVAudioFile
         do { probe = try AVAudioFile(forReading: url) }
         catch { throw AudioIOError.undecodable(underlying: error) }
@@ -80,6 +81,7 @@ enum LiveSilencePrescan {
         var windowProfiles: [(start: TimeInterval, profile: LoudnessProfile)] = []
         windowProfiles.reserveCapacity(windows.count)
         for w in windows {
+            if isCancelled() { throw CancellationError() }
             try autoreleasepool {
                 let buffer = try AudioIO.decode(url, startSeconds: w.start, durationSeconds: w.end - w.start,
                                                 maxSeconds: maxChunkSeconds + 5)

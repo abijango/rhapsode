@@ -36,6 +36,7 @@ enum RootPlayerSurface: Equatable {
 enum CompactRootTab: Int, Hashable {
     case audiobooks = 0
     case ebooks = 1
+    case stats = 2
 }
 
 enum RootPlayerPresentation {
@@ -79,7 +80,7 @@ private enum SidebarItem: Int, CaseIterable, Identifiable {
 
 // MARK: - RootTabView
 
-/// Top-level shell: Audiobooks and E-books on phone; four sidebar items on iPad.
+/// Top-level shell: Audiobooks, E-books, and Nerd Stats on phone; four sidebar items on iPad.
 ///
 /// - **Compact** (iPhone, Slide Over): `TabView`. The rich player is a cover.
 /// - **Regular** (iPad, Mac): `NavigationSplitView`. The rich player overlays
@@ -127,6 +128,7 @@ struct RootTabView: View {
            i + 1 < CommandLine.arguments.count {
             switch CommandLine.arguments[i + 1] {
             case "ebooks": return .ebooks
+            case "stats":  return .stats
             default:       return .audiobooks
             }
         }
@@ -139,8 +141,8 @@ struct RootTabView: View {
         if let i = CommandLine.arguments.firstIndex(of: "-tab"),
            i + 1 < CommandLine.arguments.count {
             switch CommandLine.arguments[i + 1] {
-            case "settings", "stats": return true
-            default:                  return false
+            case "settings": return true
+            default:         return false
             }
         }
         #endif
@@ -171,6 +173,10 @@ struct RootTabView: View {
         // Foreground auto-detect: start the watcher + quiet catalogue refresh after
         // the shelf paints so Continue stays tappable. Stop watching when backgrounded.
         .onChange(of: scenePhase, initial: true) { _, phase in
+            if phase == .active || phase == .background {
+                DiagnosticLog.info("scene \(phase)", category: .app)
+            }
+            audioPlayer.handleAppActive(phase == .active)
             if phase == .active {
                 // The headless self-test drives its own SyncManagers over the shared context;
                 // starting the live watcher/scan here would race its store mutations. Skip it.
@@ -279,6 +285,10 @@ struct RootTabView: View {
                 .tabItem { Label("E-books", systemImage: "books.vertical") }
                 .badge(sync.newRemoteCount(kind: .books))
                 .tag(CompactRootTab.ebooks)
+
+            NerdStatsView()
+                .tabItem { Label("Nerd Stats", systemImage: "chart.bar") }
+                .tag(CompactRootTab.stats)
         }
     }
 

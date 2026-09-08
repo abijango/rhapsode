@@ -28,6 +28,8 @@ final class AudiobookPlayer {
     private(set) var isPlaying = false
     /// Session-only sleep timer end; nil when off or expired.
     private(set) var sleepTimerEnd: Date?
+    /// Current AVAudioSession output, e.g. "BATMAN'S AIRPODS PRO" — shown above the player dock.
+    private(set) var outputRouteName = AudiobookPlayer.liveOutputRouteName()
     var rate: Float = 1.0 { didSet { backend.rate = rate; updateNowPlaying() } }
 
     private let backend = LiveAudioBackend()
@@ -47,8 +49,12 @@ final class AudiobookPlayer {
     /// Per-file cache of analyze-ahead prescan results (Fix A). Seeded by a detached prescan on
     /// first load of a file; the global floor is passed into `backend.load` on any later load.
     private var prescanByURL: [URL: LiveSilencePrescanResult] = [:]
-    /// In-flight prescan for the current load; cancelled when the file/book changes.
+    /// In-flight prescan for the current load; cancelled when the file/book changes
+    /// or when the app backgrounds (lock-screen playback cannot afford a second
+    /// full-file decode alongside the live producer).
     private var prescanTask: Task<Void, Never>?
+    /// Restarted when the scene becomes active if the current file still needs a scan.
+    private var prescanPending: (url: URL, cuts: [TimeInterval], preset: SmartSpeechSettings.Preset)?
     private var sleepTimerTask: Task<Void, Never>?
 
     // AVAudioSession event handling. AVPlayer handled these implicitly; the AVAudioEngine-based
@@ -112,6 +118,7 @@ final class AudiobookPlayer {
     init() {
         backend.onTick = { [weak self] in self?.tick() }
         backend.onReachedEnd = { [weak self] in self?.handleItemEnd() }
+        backend.onEngineInvalidated = { [weak self] in self?.reloadAfterEngineInvalidation() }
 
         let nc = NotificationCenter.default
         // AVAudioSession posts on an arbitrary thread. Extract the primitive (Sendable) payload in
@@ -194,7 +201,74 @@ final class AudiobookPlayer {
     private func applyPrescanResult(_ result: LiveSilencePrescanResult, for url: URL) {
         guard loadedURL == url else { return }
         prescanByURL[url] = result
+        prescanPending = nil
         backend.applyPrescan(result)
+    }
+
+    /// Scene-phase hook from `RootTabView`. Locking the phone must not keep a
+    /// whole-file decode running next to live playback — that is the MetricKit
+    /// cpuException in the diagnostic log (48s CPU in 51s).
+    func handleAppActive(_ active: Bool) {
+        backend.setAppForegrounded(active)
+        if active {
+            resumePrescanIfNeeded()
+        } else {
+            suspendPrescanForBackground()
+        }
+    }
+
+    private func startPrescan(url: URL, cuts: [TimeInterval],
+                              preset: SmartSpeechSettings.Preset, bookID: UUID) {
+        prescanPending = (url, cuts, preset)
+        prescanTask?.cancel()
+        DiagnosticLog.info("prescan start \(url.lastPathComponent)", category: .smartspeech)
+        prescanTask = Task.detached(priority: .utility) { [weak self] in
+            let result: LiveSilencePrescanResult?
+            do {
+                result = try LiveSilencePrescan.analyze(
+                    url: url, cutPoints: cuts, preset: preset,
+                    isCancelled: { Task.isCancelled }
+                )
+            } catch {
+                result = nil
+            }
+            guard !Task.isCancelled, let result else { return }
+            await MainActor.run {
+                guard let self, self.loadedURL == url, self.book?.id == bookID else { return }
+                DiagnosticLog.info(
+                    "prescan done regions=\(result.regionCount) floor=\(String(format: "%.1f", result.globalFloorDb))",
+                    category: .smartspeech
+                )
+                self.applyPrescanResult(result, for: url)
+            }
+        }
+    }
+
+    private func suspendPrescanForBackground() {
+        guard prescanTask != nil else { return }
+        DiagnosticLog.info("prescan pause (background)", category: .smartspeech)
+        prescanTask?.cancel()
+        prescanTask = nil
+    }
+
+    private func resumePrescanIfNeeded() {
+        guard let pending = prescanPending, let book,
+              loadedURL == pending.url, prescanByURL[pending.url] == nil,
+              prescanTask == nil else { return }
+        startPrescan(url: pending.url, cuts: pending.cuts, preset: pending.preset, bookID: book.id)
+    }
+
+    private func reloadAfterEngineInvalidation() {
+        guard loadedURL != nil, currentTrack != nil else { return }
+        let sourceNow: Double = isSingleFile ? bookTime : offsetInTrack
+        let wasPlaying = isPlaying
+        loadedURL = nil
+        if isSingleFile {
+            loadCurrentItem(seekTo: max(0, sourceNow - (prefixSums.indices.contains(currentIndex) ? prefixSums[currentIndex] : 0)))
+        } else {
+            loadCurrentItem(seekTo: sourceNow)
+        }
+        if wasPlaying { play() }
     }
 
     /// WP8 — smart resume flag. Set `true` on `pause()` and on initial `load()`, cleared by any
@@ -264,6 +338,7 @@ final class AudiobookPlayer {
         prescanTask?.cancel()
         prescanTask = nil
 
+        DiagnosticLog.info("load “\(book.title)” track=\(currentIndex) offset=\(String(format: "%.1f", offsetInTrack))", category: .playback)
         configureAudioSession()   // before any backend use (engine needs an active session)
         configureRemoteCommands()
         loadCurrentItem(seekTo: offsetInTrack)
@@ -278,10 +353,14 @@ final class AudiobookPlayer {
     /// Persist position and stop. Called when switching to a different book (from `load`),
     /// not on every view disappearance.
     func teardown() {
+        if let title = book?.title {
+            DiagnosticLog.info("teardown “\(title)”", category: .playback)
+        }
         persist(force: true)
         cancelSleepTimer()
         prescanTask?.cancel()
         prescanTask = nil
+        prescanPending = nil
         isPlaying = false
         backend.stop()
         loadedURL = nil
@@ -304,6 +383,7 @@ final class AudiobookPlayer {
         backend.rate = rate
         backend.play()
         isPlaying = true
+        DiagnosticLog.info("play “\(book?.title ?? "?")”", category: .playback)
         updateNowPlaying()
     }
 
@@ -439,17 +519,9 @@ final class AudiobookPlayer {
             if let cached { backend.applyPrescan(cached) }
             // Analyze-ahead once per file when no cache yet (regions + global floor/speech).
             if trimEnabled, cached == nil {
-                prescanTask?.cancel()
-                let bookID = book.id
-                prescanTask = Task.detached { [weak self] in
-                    guard let r = try? LiveSilencePrescan.analyze(url: url, cutPoints: cuts, preset: preset)
-                    else { return }
-                    guard !Task.isCancelled else { return }
-                    await MainActor.run {
-                        guard let self, self.loadedURL == url, self.book?.id == bookID else { return }
-                        self.applyPrescanResult(r, for: url)
-                    }
-                }
+                startPrescan(url: url, cuts: cuts, preset: preset, bookID: book.id)
+            } else {
+                prescanPending = nil
             }
         } else {
             // Same file already loaded (e.g. single-file chapter change) — just reposition.
@@ -481,6 +553,7 @@ final class AudiobookPlayer {
         // Force a reload with the new trim setting at the preserved position.
         prescanTask?.cancel()
         prescanTask = nil
+        prescanPending = nil
         loadedURL = nil
         if isSingleFile {
             loadCurrentItem(seekTo: max(0, sourceNow - prefixSums[currentIndex]))
@@ -541,9 +614,20 @@ final class AudiobookPlayer {
     }
 
     private func handleRouteChange(reasonRaw: UInt) {
+        refreshOutputRoute()
         guard let reason = AVAudioSession.RouteChangeReason(rawValue: reasonRaw) else { return }
         // Headphones/route unplugged mid-play: pause rather than blast audio out the speaker.
         if reason == .oldDeviceUnavailable, isPlaying { pause() }
+    }
+
+    func refreshOutputRoute() {
+        outputRouteName = Self.liveOutputRouteName()
+    }
+
+    static func liveOutputRouteName() -> String {
+        let outputs = AVAudioSession.sharedInstance().currentRoute.outputs
+        if outputs.isEmpty { return "SPEAKER" }
+        return outputs.map(\.portName).joined(separator: " + ").uppercased()
     }
 
     // MARK: Tick (driven by the backend's display loop)
@@ -686,6 +770,7 @@ final class AudiobookPlayer {
         let session = AVAudioSession.sharedInstance()
         try? session.setCategory(.playback, mode: .spokenAudio)
         try? session.setActive(true)
+        refreshOutputRoute()
     }
 
     private func configureRemoteCommands() {

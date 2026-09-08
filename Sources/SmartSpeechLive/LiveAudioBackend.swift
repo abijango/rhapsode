@@ -31,9 +31,12 @@ final class LiveAudioBackend {
         }
     }
 
-    private let engine = AVAudioEngine()
-    private let playerNode = AVAudioPlayerNode()
-    private let timePitch = AVAudioUnitTimePitch()
+    /// Fired when media services reset and the graph must be rebuilt by the owner.
+    var onEngineInvalidated: (@MainActor () -> Void)?
+
+    private var engine = AVAudioEngine()
+    private var playerNode = AVAudioPlayerNode()
+    private var timePitch = AVAudioUnitTimePitch()
     private var producer: LiveTrimProducer?
     private var attached = false
     private var connectedFormat: AVAudioFormat?
@@ -47,6 +50,13 @@ final class LiveAudioBackend {
     private var reachedEndFired = false
     private var displayTask: Task<Void, Never>?
     private var configObserver: NSObjectProtocol?
+    private var mediaResetObserver: NSObjectProtocol?
+    private var isHandlingConfigChange = false
+    /// Last trustworthy source position — config-change handlers must not read the
+    /// node clock after the engine has already stopped.
+    private var lastKnownSource: TimeInterval = 0
+    private var lastGoodOutput: TimeInterval = 0
+    private var displayIntervalMs: UInt64 = 250
 
     // MARK: Load
 
@@ -55,10 +65,20 @@ final class LiveAudioBackend {
     func load(url: URL, sourceDuration: TimeInterval, cutPoints: [TimeInterval],
               startSource: TimeInterval, trimEnabled: Bool, preset: SmartSpeechSettings.Preset,
               globalFloorDb: Double?) {
-        installConfigObserverIfNeeded()
+        installObserversIfNeeded()
+        displayTask?.cancel(); displayTask = nil
+        isPlaying = false
         producer?.shutdown()
         producer = nil
-        guard let file = try? AVAudioFile(forReading: url) else { onReachedEnd?(); return }
+        lastKnownSource = max(0, min(startSource, sourceDuration))
+        lastGoodOutput = 0
+        prescanRegions = nil
+        globalSpeechDb = nil
+        guard let file = try? AVAudioFile(forReading: url) else {
+            DiagnosticLog.error("audio file open failed \(url.lastPathComponent)", category: .playback)
+            onReachedEnd?()
+            return
+        }
         let format = file.processingFormat
 
         let needsReconnect = connectedFormat == nil
@@ -85,6 +105,7 @@ final class LiveAudioBackend {
         self.trimEnabled = trimEnabled
         self.sourceDuration = sourceDuration
         self.sessionSourceStart = max(0, min(startSource, sourceDuration))
+        self.lastKnownSource = self.sessionSourceStart
         self.globalFloorDb = globalFloorDb
         self.reachedEndFired = false
 
@@ -123,7 +144,13 @@ final class LiveAudioBackend {
 
     func play() {
         guard producer != nil else { return }
-        do { try engine.start() } catch { return }
+        try? AVAudioSession.sharedInstance().setActive(true)
+        do {
+            try engine.start()
+        } catch {
+            DiagnosticLog.error("audio engine start failed: \(error.localizedDescription)", category: .playback)
+            return
+        }
         producer?.resume()
         isPlaying = true
         startDisplayLoop()
@@ -140,14 +167,26 @@ final class LiveAudioBackend {
         guard producer != nil else { return }
         let clamped = max(0, min(s, sourceDuration))
         sessionSourceStart = clamped
+        lastKnownSource = clamped
+        lastGoodOutput = 0
         reachedEndFired = false
-        if isPlaying { try? engine.start() }
+        if isPlaying {
+            try? AVAudioSession.sharedInstance().setActive(true)
+            try? engine.start()
+        }
         producer?.beginSession(fromSource: clamped, resumePlaying: isPlaying)
     }
 
     func setGlobalFloor(_ db: Double) {
         globalFloorDb = db
         producer?.setGlobalFloor(db)
+    }
+
+    /// Foreground: 4 Hz Now Playing ticks + live RMS fallback. Background / lock
+    /// screen: 1 Hz ticks and no live RMS (the pre-scan is also paused by the owner).
+    func setAppForegrounded(_ foreground: Bool) {
+        displayIntervalMs = foreground ? 250 : 1000
+        producer?.setLiveDetectionEnabled(foreground)
     }
 
     func stop() {
@@ -161,18 +200,32 @@ final class LiveAudioBackend {
 
     /// Output seconds consumed this session (session-relative; resets on load/seek).
     var currentOutput: TimeInterval {
-        guard let nodeTime = playerNode.lastRenderTime,
-              let pt = playerNode.playerTime(forNodeTime: nodeTime) else { return 0 }
-        return Double(pt.sampleTime) / pt.sampleRate
+        let raw: TimeInterval?
+        if let nodeTime = playerNode.lastRenderTime,
+           let pt = playerNode.playerTime(forNodeTime: nodeTime) {
+            raw = Double(pt.sampleTime) / pt.sampleRate
+        } else {
+            raw = nil
+        }
+        let scheduled = producer?.snapshot().scheduledOutput ?? lastGoodOutput
+        let played = LivePlaybackClock.sessionPlayed(
+            rawSeconds: raw, scheduledOutput: scheduled, lastGood: lastGoodOutput
+        )
+        lastGoodOutput = played
+        return played
     }
 
     /// Absolute source-domain position within the current file.
     var currentSource: TimeInterval {
         let out = currentOutput
+        let value: TimeInterval
         if trimEnabled, let snap = producer?.snapshot(), !snap.map.points.isEmpty {
-            return min(max(0, snap.map.toSource(out)), sourceDuration)
+            value = min(max(0, snap.map.toSource(out)), sourceDuration)
+        } else {
+            value = min(sessionSourceStart + out, sourceDuration)
         }
-        return min(sessionSourceStart + out, sourceDuration)
+        lastKnownSource = value
+        return value
     }
 
     /// Seconds of output audio buffered ahead of the playhead (diagnostics).
@@ -183,37 +236,104 @@ final class LiveAudioBackend {
 
     // MARK: Internals
 
-    private func installConfigObserverIfNeeded() {
-        guard configObserver == nil else { return }
-        configObserver = NotificationCenter.default.addObserver(
-            forName: .AVAudioEngineConfigurationChange,
-            object: engine,
-            queue: .main
-        ) { [weak self] _ in
-            Task { @MainActor in self?.handleEngineConfigurationChange() }
+    private func installObserversIfNeeded() {
+        if configObserver == nil {
+            configObserver = NotificationCenter.default.addObserver(
+                forName: .AVAudioEngineConfigurationChange,
+                object: engine,
+                queue: nil
+            ) { [weak self] _ in
+                Task { @MainActor in self?.handleEngineConfigurationChange() }
+            }
+        }
+        if mediaResetObserver == nil {
+            mediaResetObserver = NotificationCenter.default.addObserver(
+                forName: AVAudioSession.mediaServicesWereResetNotification,
+                object: AVAudioSession.sharedInstance(),
+                queue: nil
+            ) { [weak self] _ in
+                Task { @MainActor in self?.handleMediaServicesReset() }
+            }
         }
     }
 
     private func handleEngineConfigurationChange() {
+        guard !isHandlingConfigChange else { return }
         guard producer != nil, let format = connectedFormat, attached else { return }
-        let wasPlaying = isPlaying
-        let src = currentSource
+        isHandlingConfigChange = true
 
-        if engine.isRunning { engine.stop() }
-        engine.disconnectNodeOutput(playerNode)
-        engine.disconnectNodeOutput(timePitch)
+        let wasPlaying = isPlaying
+        let src = lastKnownSource
+        DiagnosticLog.info(
+            "engine config change running=\(engine.isRunning) playing=\(wasPlaying) src=\(String(format: "%.1f", src))",
+            category: .playback
+        )
+
+        // Drain in-flight scheduleBuffer before touching the graph.
+        producer?.pauseForGraphChange()
+
+        if engine.isRunning {
+            // Still running — do not stop/reconnect. That retriggers this
+            // notification and used to reset the session clock (CPU runaway).
+            if wasPlaying { producer?.resume() }
+            releaseConfigChangeGuard()
+            return
+        }
+
         engine.connect(playerNode, to: timePitch, format: format)
         engine.connect(timePitch, to: engine.mainMixerNode, format: format)
         engine.prepare()
 
         if wasPlaying {
-            try? engine.start()
+            try? AVAudioSession.sharedInstance().setActive(true)
+            do {
+                try engine.start()
+            } catch {
+                DiagnosticLog.error("engine restart after config change failed: \(error.localizedDescription)", category: .playback)
+                releaseConfigChangeGuard()
+                return
+            }
+            lastGoodOutput = 0
+            reachedEndFired = false
             producer?.beginSession(fromSource: src, resumePlaying: true)
             isPlaying = true
             startDisplayLoop()
         } else {
+            lastGoodOutput = 0
             producer?.beginSession(fromSource: src, resumePlaying: false)
         }
+        releaseConfigChangeGuard()
+    }
+
+    /// Config-change notifications are delivered asynchronously; hold the guard
+    /// briefly so our own reconnect/start is not handled as a fresh change.
+    private func releaseConfigChangeGuard() {
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(400))
+            isHandlingConfigChange = false
+        }
+    }
+
+    private func handleMediaServicesReset() {
+        DiagnosticLog.error("media services reset — rebuilding graph", category: .playback)
+        let wasPlaying = isPlaying
+        producer?.shutdown()
+        producer = nil
+        if engine.isRunning { engine.stop() }
+        if let configObserver {
+            NotificationCenter.default.removeObserver(configObserver)
+            self.configObserver = nil
+        }
+        engine = AVAudioEngine()
+        playerNode = AVAudioPlayerNode()
+        timePitch = AVAudioUnitTimePitch()
+        timePitch.rate = max(0.5, min(rate, 3.0))
+        timePitch.bypass = (rate == 1.0)
+        attached = false
+        connectedFormat = nil
+        isPlaying = wasPlaying
+        installObserversIfNeeded()
+        onEngineInvalidated?()
     }
 
     private func startDisplayLoop() {
@@ -223,7 +343,7 @@ final class LiveAudioBackend {
                 guard let self, self.isPlaying else { break }
                 self.onTick?()
                 self.checkEnd()
-                try? await Task.sleep(for: .milliseconds(250))
+                try? await Task.sleep(for: .milliseconds(self.displayIntervalMs))
             }
         }
     }

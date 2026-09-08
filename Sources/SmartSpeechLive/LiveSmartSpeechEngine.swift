@@ -122,8 +122,11 @@ final class LiveSmartSpeechEngine {
 
     private func runPrescan(src: LiveSmartSpeechSource) {
         let preset = src.preset
-        Task.detached(priority: .userInitiated) {
-            let result = try? LiveSilencePrescan.analyze(url: src.url, cutPoints: src.cutPoints, preset: preset)
+        Task.detached(priority: .utility) {
+            let result = try? LiveSilencePrescan.analyze(
+                url: src.url, cutPoints: src.cutPoints, preset: preset,
+                isCancelled: { Task.isCancelled }
+            )
             await MainActor.run { [weak self] in
                 guard let self, let result else { return }
                 self.projectedByTier = result.projectedSavedByTier

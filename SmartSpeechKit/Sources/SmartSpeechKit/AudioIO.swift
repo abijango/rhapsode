@@ -40,29 +40,40 @@ public enum AudioIO {
                               durationSeconds: Double? = nil,
                               maxSeconds: Double = 3600) throws -> AVAudioPCMBuffer {
         if let file = try? AVAudioFile(forReading: url) {
-            let format = file.processingFormat          // standard float32, deinterleaved
-            let sampleRate = format.sampleRate
-            let startFrame = AVAudioFramePosition(max(0, startSeconds) * sampleRate)
-            guard startFrame < file.length else {
-                throw AudioIOError.startBeyondEnd(start: startSeconds, length: Double(file.length) / sampleRate)
-            }
-            let available = file.length - startFrame
-            let wanted = durationSeconds.map { AVAudioFramePosition(max(0, $0) * sampleRate) } ?? available
-            let frames = min(wanted, available)
-            let duration = Double(frames) / sampleRate
-            guard duration <= maxSeconds else {
-                throw AudioIOError.tooLong(seconds: duration, limit: maxSeconds)
-            }
-            guard frames > 0, let buffer = AVAudioPCMBuffer(
-                pcmFormat: format,
-                frameCapacity: AVAudioFrameCount(frames)
-            ) else { throw AudioIOError.allocationFailed }
-            file.framePosition = startFrame
-            try file.read(into: buffer, frameCount: AVAudioFrameCount(frames))
-            return buffer
+            return try decode(file, startSeconds: startSeconds,
+                              durationSeconds: durationSeconds, maxSeconds: maxSeconds)
         }
         return try decodeWithAssetReader(url, startSeconds: startSeconds,
                                          durationSeconds: durationSeconds, maxSeconds: maxSeconds)
+    }
+
+    /// Decode a window from an already-open file. The live producer keeps one
+    /// `AVAudioFile` on its queue so lock-screen playback does not reopen the
+    /// file for every chunk (expensive, and it fails if data protection engages).
+    public static func decode(_ file: AVAudioFile,
+                              startSeconds: Double = 0,
+                              durationSeconds: Double? = nil,
+                              maxSeconds: Double = 3600) throws -> AVAudioPCMBuffer {
+        let format = file.processingFormat          // standard float32, deinterleaved
+        let sampleRate = format.sampleRate
+        let startFrame = AVAudioFramePosition(max(0, startSeconds) * sampleRate)
+        guard startFrame < file.length else {
+            throw AudioIOError.startBeyondEnd(start: startSeconds, length: Double(file.length) / sampleRate)
+        }
+        let available = file.length - startFrame
+        let wanted = durationSeconds.map { AVAudioFramePosition(max(0, $0) * sampleRate) } ?? available
+        let frames = min(wanted, available)
+        let duration = Double(frames) / sampleRate
+        guard duration <= maxSeconds else {
+            throw AudioIOError.tooLong(seconds: duration, limit: maxSeconds)
+        }
+        guard frames > 0, let buffer = AVAudioPCMBuffer(
+            pcmFormat: format,
+            frameCapacity: AVAudioFrameCount(frames)
+        ) else { throw AudioIOError.allocationFailed }
+        file.framePosition = startFrame
+        try file.read(into: buffer, frameCount: AVAudioFrameCount(frames))
+        return buffer
     }
 
     /// Average all channels into a single `[Float]` for analysis.

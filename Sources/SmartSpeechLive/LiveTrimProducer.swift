@@ -58,9 +58,23 @@ final class LiveTrimProducer: @unchecked Sendable {
     /// completion-handler-driven refill, which deadlocked `stop()` against the node's completion
     /// queue (see file header).
     private let pollSeconds = 0.25
+    /// Hard cap so one pump cannot decode the rest of a 20-hour book if the
+    /// player-node clock is briefly stale (lock-screen config change).
+    private let maxChunksPerPump = 2
 
     /// Optional decode/render failure callback (invoked on the producer queue).
     var onError: ((Error) -> Void)?
+
+    /// Kept-open decode handle — producer queue only. Reopened after a failed read.
+    private var openFile: AVAudioFile?
+    /// Last accepted session-relative playhead. Reset in `beginSession`.
+    private var lastGoodPlayed: TimeInterval = 0
+    /// False while the engine graph is being rebuilt; `scheduleBuffer`/`play` are skipped.
+    private var graphLive = true
+    /// Per-chunk RMS when the pre-scan has not finished. Disabled in the background
+    /// so lock-screen playback does not run a second decode/analysis pipeline.
+    private var allowLiveDetect = true
+    private var didLogStaleClock = false
 
     init(url: URL, cutPoints: [TimeInterval], sourceDuration: TimeInterval,
          sampleRate: Double, playerNode: AVAudioPlayerNode,
@@ -99,6 +113,9 @@ final class LiveTrimProducer: @unchecked Sendable {
             let gen = self.generation
             self.cursor = max(0, min(sourceStart, self.sourceDuration))
             self.scheduledOutput = 0
+            self.lastGoodPlayed = 0
+            self.didLogStaleClock = false
+            self.graphLive = true
             self.mapBuilder = SmartSpeechTimelineMapBuilder()
             self.cachedMap = SmartSpeechTimelineMap(points: [], sourceDuration: self.cursor, trimmedDuration: 0)
             self.finishedDecoding = false
@@ -118,6 +135,7 @@ final class LiveTrimProducer: @unchecked Sendable {
             guard let self else { return }
             self.lock.lock()
             self.allowRefill = true
+            self.graphLive = true
             let gen = self.generation
             self.lock.unlock()
             self.playerNode.play()
@@ -174,12 +192,35 @@ final class LiveTrimProducer: @unchecked Sendable {
         lock.lock(); playbackRate = max(0.5, min(rate, 3.0)); lock.unlock()
     }
 
+    /// Allow per-chunk RMS only when the UI is foregrounded. Lock-screen playback
+    /// waits for the pre-scan (or plays the chunk untrimmed).
+    func setLiveDetectionEnabled(_ enabled: Bool) {
+        lock.lock(); allowLiveDetect = enabled; lock.unlock()
+    }
+
+    /// Drain in-flight decode/schedule so the owner can stop or reconnect the engine
+    /// without racing `scheduleBuffer` (AudioToolbox SIGTRAP on a torn-down graph).
+    func pauseForGraphChange() {
+        queue.sync {
+            self.lock.lock()
+            self.generation += 1
+            self.allowRefill = false
+            self.graphLive = false
+            self.lock.unlock()
+        }
+    }
+
     /// Synchronous teardown: drains the queue (so no `scheduleBuffer` is in flight), invalidates the
     /// session, and stops the node — safe to call before stopping the engine on the main thread.
     func shutdown() {
         queue.sync {
-            self.lock.lock(); self.generation += 1; self.allowRefill = false; self.lock.unlock()
+            self.lock.lock()
+            self.generation += 1
+            self.allowRefill = false
+            self.graphLive = false
+            self.lock.unlock()
             self.playerNode.stop()
+            self.openFile = nil
         }
     }
 
@@ -210,29 +251,50 @@ final class LiveTrimProducer: @unchecked Sendable {
     /// producer queue). A generation mismatch (a newer `beginSession`) or end-of-decode stops the
     /// chain. Replaces completion-handler-driven refill to avoid the `stop()` deadlock.
     private func pump(_ gen: Int) {
+        var produced = 0
         while true {
             lock.lock()
             let stale = gen != generation
             let playing = allowRefill
+            let live = graphLive
             let played = playedOutputUnlocked()
             let ahead = scheduledOutput - played
             let done = finishedDecoding
             let target = effectiveTargetAhead
             lock.unlock()
-            if stale || !playing { return }
+            if stale || !playing || !live { return }
             if done { return }
             if ahead >= target { break }
+            if produced >= maxChunksPerPump { break }
             produceOneChunk(generation: gen)
+            produced += 1
         }
         queue.asyncAfter(deadline: .now() + pollSeconds) { [weak self] in self?.pump(gen) }
     }
 
     /// Player output seconds already consumed this session. Must be called with `lock` held only for
-    /// the `scheduledOutput` read; player time is independently thread-safe.
+    /// the `scheduledOutput` / `lastGoodPlayed` read; player time is independently thread-safe.
     private func playedOutputUnlocked() -> TimeInterval {
-        guard let nodeTime = playerNode.lastRenderTime,
-              let playerTime = playerNode.playerTime(forNodeTime: nodeTime) else { return 0 }
-        return Double(playerTime.sampleTime) / playerTime.sampleRate
+        let raw: TimeInterval?
+        if let nodeTime = playerNode.lastRenderTime,
+           let playerTime = playerNode.playerTime(forNodeTime: nodeTime) {
+            raw = Double(playerTime.sampleTime) / playerTime.sampleRate
+        } else {
+            raw = nil
+        }
+        let played = LivePlaybackClock.sessionPlayed(
+            rawSeconds: raw, scheduledOutput: scheduledOutput, lastGood: lastGoodPlayed
+        )
+        if let raw, raw.isFinite, raw > scheduledOutput + LivePlaybackClock.scheduledSlack,
+           !didLogStaleClock {
+            didLogStaleClock = true
+            DiagnosticLog.info(
+                "ignored stale player time \(String(format: "%.1f", raw))s scheduled=\(String(format: "%.1f", scheduledOutput))s",
+                category: .playback
+            )
+        }
+        lastGoodPlayed = played
+        return played
     }
 
     /// End of the current decode window containing `cursor` (respects cut points + chunk cap).
@@ -250,6 +312,8 @@ final class LiveTrimProducer: @unchecked Sendable {
         lock.lock()
         let start = cursor
         let trimming = trimEnabled
+        let liveDetect = allowLiveDetect
+        let live = graphLive
         let tierSettings = settings
         let trimmedBase = scheduledOutput
         let floor = globalFloorDb
@@ -257,6 +321,7 @@ final class LiveTrimProducer: @unchecked Sendable {
         let allRegions = precomputedRegions
         lock.unlock()
 
+        guard live else { return }
         guard start < sourceDuration else {
             lock.lock(); finishedDecoding = true; lock.unlock()
             return
@@ -264,12 +329,11 @@ final class LiveTrimProducer: @unchecked Sendable {
         let end = chunkEnd(for: start)
 
         do {
-            let decoded = try AudioIO.decode(url, startSeconds: start, durationSeconds: end - start,
-                                             maxSeconds: chunkSeconds + 5)
+            let decoded = try decodeChunk(start: start, end: end)
             let regions: [SilenceRegion]
             if trimming, let allRegions {
                 regions = sliceRegions(allRegions, chunkStart: start, chunkEnd: end)
-            } else if trimming {
+            } else if trimming, liveDetect {
                 regions = detectRegions(decoded, settings: tierSettings, floorDb: floor, speechDb: speech)
             } else {
                 regions = []
@@ -278,7 +342,7 @@ final class LiveTrimProducer: @unchecked Sendable {
                 .renderMapped(buffer: decoded, regions: regions)
 
             lock.lock()
-            if gen != generation { lock.unlock(); return }
+            if gen != generation || !graphLive { lock.unlock(); return }
             let outSeconds = Double(rendered.buffer.frameLength) / sampleRate
             mapBuilder.append(segments: rendered.segments, sampleRate: sampleRate,
                               sourceBase: start, trimmedBase: trimmedBase)
@@ -291,8 +355,30 @@ final class LiveTrimProducer: @unchecked Sendable {
             playerNode.scheduleBuffer(rendered.buffer, completionHandler: nil)
         } catch {
             lock.lock(); finishedDecoding = true; lock.unlock()
+            DiagnosticLog.error("produce chunk failed: \(error)", category: .playback)
             onError?(error)
         }
+    }
+
+    /// Decode one window, reusing the open file. A failed read drops the handle and retries once
+    /// (the file can go invalid after a media-services reset).
+    private func decodeChunk(start: TimeInterval, end: TimeInterval) throws -> AVAudioPCMBuffer {
+        let duration = end - start
+        do {
+            return try AudioIO.decode(fileForDecode(), startSeconds: start,
+                                      durationSeconds: duration, maxSeconds: chunkSeconds + 5)
+        } catch {
+            openFile = nil
+            return try AudioIO.decode(fileForDecode(), startSeconds: start,
+                                      durationSeconds: duration, maxSeconds: chunkSeconds + 5)
+        }
+    }
+
+    private func fileForDecode() throws -> AVAudioFile {
+        if let openFile { return openFile }
+        let file = try AVAudioFile(forReading: url)
+        openFile = file
+        return file
     }
 
     /// Slice absolute-source regions overlapping `[chunkStart, chunkEnd)` into chunk-local seconds.

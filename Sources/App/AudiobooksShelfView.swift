@@ -17,6 +17,7 @@ struct AudiobooksShelfView: View {
     @State private var selectedCollectionID: UUID?
     @State private var showManageCollections = false
     @State private var assignAudiobook: Audiobook?
+    @State private var matchAudiobook: Audiobook?
 
     private var collections: [LibraryCollection] {
         allCollections.filter { $0.kind == .audiobooks }
@@ -194,6 +195,7 @@ struct AudiobooksShelfView: View {
                     }
                 )
             }
+            .sheet(item: $matchAudiobook) { HardcoverMatchSheet(book: $0) }
             .background(DS.Palette.shelfBackground)
         }
         .onAppear { sync.markRemoteCatalogSeen(kind: .audiobooks) }
@@ -337,6 +339,15 @@ struct AudiobooksShelfView: View {
         .contextMenu {
             Button("Add to Collection…", systemImage: "folder.badge.plus") {
                 assignAudiobook = book
+            }
+            if HardcoverSettings.isActive {
+                Button(book.hardcoverEditionId == nil ? "Match on Hardcover…" : "Change Hardcover match…",
+                       systemImage: "books.vertical") {
+                    matchAudiobook = book
+                }
+                if let url = book.hardcoverURL {
+                    Link("Open on Hardcover", destination: url)
+                }
             }
             Button("Delete", systemImage: "trash", role: .destructive) {
                 LibraryStore(context: modelContext).deleteAudiobook(book)

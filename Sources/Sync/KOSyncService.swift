@@ -28,9 +28,7 @@ enum KOSyncService {
             try? context?.save()
             return hash
         } catch {
-            #if DEBUG
-            print("RHAPSODE-KOSYNC: hash failed \(error)")
-            #endif
+            DiagnosticLog.error("hash failed \(error)", category: .sync)
             return nil
         }
     }
@@ -145,13 +143,9 @@ enum KOSyncService {
                 progress: progress,
                 percentage: fraction
             )
-            #if DEBUG
-            print("RHAPSODE-KOSYNC: pushed \(hash.prefix(8))… p=\(String(format: "%.3f", fraction))")
-            #endif
+            DiagnosticLog.info("pushed \(hash.prefix(8))… p=\(String(format: "%.3f", fraction))", category: .sync)
         } catch {
-            #if DEBUG
-            print("RHAPSODE-KOSYNC: push failed \(error)")
-            #endif
+            DiagnosticLog.error("push failed \(error)", category: .sync)
         }
     }
 

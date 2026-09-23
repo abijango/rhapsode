@@ -75,6 +75,35 @@ final class Audiobook {
     var myListenedSeconds: Double?
     /// This device's contribution to `smartSpeechSavedSeconds`.
     var mySmartSpeechSavedSeconds: Double?
+    /// Narrator(s), when the file's metadata names them. Secondary matching signal for
+    /// Hardcover — the primary one is runtime. Nil on everything imported before this existed.
+    var narrator: String?
+
+    // MARK: Hardcover.app linkage
+    //
+    // Four ids rather than one because the write chain on Hardcover's side is
+    // `user_book` (the library row) → `user_book_read` (one read-through) → PATCH that row by
+    // id on each pause. All additive optionals → lightweight, CloudKit-safe migration.
+
+    /// Hardcover `books.id`. Kept so a lost `user_book` can be re-resolved without re-searching.
+    var hardcoverBookId: Int?
+    /// Hardcover `editions.id` — THE match. Progress is reported against this edition, so this
+    /// is what separates the full-cast recording from the paperback.
+    var hardcoverEditionId: Int?
+    /// Hardcover `user_books.id` — this book's row in the user's library.
+    var hardcoverUserBookId: Int?
+    /// Hardcover `user_book_reads.id` — the read-through row patched on every pause.
+    var hardcoverUserBookReadId: Int?
+    /// The matched edition's `audio_seconds`. Progress is scaled into this edition's runtime,
+    /// which is rarely identical to the local file's.
+    var hardcoverEditionSeconds: Int?
+    /// Book slug, for the "open on Hardcover" deep link.
+    var hardcoverSlug: String?
+    /// `HardcoverMatchState.rawValue`. `"skipped"` is the sticky "not on Hardcover" opt-out.
+    var hardcoverMatchState: String?
+    /// Last edition-domain second count successfully pushed — gates redundant pushes.
+    var hardcoverLastPushedSeconds: Int?
+    var hardcoverLastPushedAt: Date?
     /// User-defined collections (tags) for filtering the shelf. Per-shelf scope via `LibraryCollection.kind`.
     @Relationship(deleteRule: .nullify)
     var collections: [LibraryCollection]
@@ -97,6 +126,7 @@ final class Audiobook {
         listenedSeconds: Double? = nil,
         myListenedSeconds: Double? = nil,
         mySmartSpeechSavedSeconds: Double? = nil,
+        narrator: String? = nil,
         collections: [LibraryCollection] = []
     ) {
         self.id = id
@@ -116,6 +146,7 @@ final class Audiobook {
         self.listenedSeconds = listenedSeconds
         self.myListenedSeconds = myListenedSeconds
         self.mySmartSpeechSavedSeconds = mySmartSpeechSavedSeconds
+        self.narrator = narrator
         self.collections = collections
     }
 
@@ -143,6 +174,42 @@ final class Audiobook {
         let total = totalDuration > 0 ? totalDuration : orderedTracks.reduce(0) { $0 + $1.duration }
         guard total > 0 else { return 0 }
         return min(1, max(0, playedSeconds / total))
+    }
+
+    // MARK: Hardcover helpers
+
+    var hardcoverState: HardcoverMatchState {
+        get { HardcoverMatchState(stored: hardcoverMatchState) }
+        set { hardcoverMatchState = newValue.rawValue }
+    }
+
+    /// Resolved library + read-through ids, or nil when the book still needs resolving.
+    var hardcoverLink: HardcoverLink? {
+        guard let userBookId = hardcoverUserBookId,
+              let readId = hardcoverUserBookReadId else { return nil }
+        return HardcoverLink(userBookId: userBookId, userBookReadId: readId)
+    }
+
+    /// Public edition page for the match, if any.
+    var hardcoverURL: URL? {
+        guard let editionId = hardcoverEditionId else { return nil }
+        guard let slug = hardcoverSlug else {
+            return URL(string: "https://hardcover.app/editions/\(editionId)")
+        }
+        return URL(string: "https://hardcover.app/books/\(slug)/editions/\(editionId)")
+    }
+
+    /// Clear every Hardcover field — used by "unmatch" and when the account is disconnected.
+    func clearHardcoverMatch() {
+        hardcoverBookId = nil
+        hardcoverEditionId = nil
+        hardcoverUserBookId = nil
+        hardcoverUserBookReadId = nil
+        hardcoverEditionSeconds = nil
+        hardcoverSlug = nil
+        hardcoverMatchState = nil
+        hardcoverLastPushedSeconds = nil
+        hardcoverLastPushedAt = nil
     }
 
     /// Shelf hot path — prefer the persisted cache; recompute once when missing.

@@ -5,10 +5,9 @@ import UIKit
 /// EPUB reader hosted on **foliate-js** (single WKWebView).
 ///
 /// Immersive iPhone UX (Apple Books–style):
-/// - Tab bar + nav chrome hidden while reading
-/// - Center tap toggles chrome (title, TOC, fonts)
+/// - Back, contents, and font settings stay on the nav bar until the book is open
+/// - After open, the bar auto-hides; a center tap brings it back
 /// - Edge taps turn pages (inset so system edge-swipe can pop back to the shelf)
-/// - Safe margins so text doesn’t kiss the screen edges
 struct ReaderView: View {
     let book: Book
     @Environment(\.modelContext) private var modelContext
@@ -18,10 +17,9 @@ struct ReaderView: View {
     @State private var showSettings = false
     @State private var showTOC = false
     @State private var pushDebounce = PushDebounce()
-    @State private var kosyncDebounce = PushDebounce()
-    @State private var kosyncConflict: KOSyncConflict?
-    /// Top chrome (nav bar + tools). Hidden for immersion; center-tap reveals.
-    @State private var chromeVisible = false
+    /// Top chrome (nav bar + tools). Starts visible so Back and Reading settings are findable.
+    /// Center tap toggles after the book is open.
+    @State private var chromeVisible = true
     @State private var chromeHideTask: Task<Void, Never>?
 
     var body: some View {
@@ -64,7 +62,7 @@ struct ReaderView: View {
         .navigationBarTitleDisplayMode(.inline)
         // Full-screen reading: hide bottom tabs (same pattern as PlayerView).
         .toolbar(.hidden, for: .tabBar)
-        .toolbar(chromeVisible ? .visible : .hidden, for: .navigationBar)
+        .toolbar((chromeVisible || !reader.isOpen) ? .visible : .hidden, for: .navigationBar)
         .toolbar {
             ToolbarItemGroup(placement: .topBarTrailing) {
                 Button("Contents", systemImage: "list.bullet") {
@@ -85,15 +83,9 @@ struct ReaderView: View {
         .task {
             reader.prepareWebViewIfNeeded()
             reader.onChromeToggle = { toggleChrome() }
-            // Merge remote position before paint. Network already has a 20s timeout.
-            let pull = await KOSyncService.pullAndApply(
-                book: book, reader: nil, context: modelContext
-            )
-            if case .conflict(let localF, let remote) = pull {
-                kosyncConflict = KOSyncConflict(localFraction: localF, remote: remote)
-            }
             await reader.open(book, context: modelContext)
             reader.startReadingSession()
+            showChrome()
             sync.activeReader = reader
             sync.activeReaderBookID = book.id
             let key = book.fileRelPath
@@ -103,12 +95,6 @@ struct ReaderView: View {
                     try? await Task.sleep(for: .seconds(4))
                     guard !Task.isCancelled else { return }
                     await sync.pushBookProgress(relPath: key)
-                }
-                kosyncDebounce.task?.cancel()
-                kosyncDebounce.task = Task {
-                    try? await Task.sleep(for: .seconds(6))
-                    guard !Task.isCancelled else { return }
-                    await KOSyncService.push(book: book, context: modelContext)
                 }
             }
             while !Task.isCancelled {
@@ -128,7 +114,6 @@ struct ReaderView: View {
                 let key = book.fileRelPath
                 Task {
                     await sync.pushBookProgress(relPath: key)
-                    await KOSyncService.push(book: book, context: modelContext)
                 }
             @unknown default:
                 break
@@ -138,42 +123,17 @@ struct ReaderView: View {
             chromeHideTask?.cancel()
             reader.cancelOpen()
             pushDebounce.task?.cancel()
-            kosyncDebounce.task?.cancel()
             reader.flushPendingSave()
             reader.endReadingSession()
             let key = book.fileRelPath
             Task {
                 await sync.pushBookProgress(relPath: key)
-                await KOSyncService.push(book: book, context: modelContext)
             }
             if sync.activeReaderBookID == book.id {
                 sync.activeReader = nil
                 sync.activeReaderBookID = nil
             }
             reader.destroy()
-        }
-        .alert("Reading Position Conflict", isPresented: Binding(
-            get: { kosyncConflict != nil },
-            set: { if !$0 { kosyncConflict = nil } }
-        )) {
-            Button("Keep this device") {
-                kosyncConflict = nil
-                Task { await KOSyncService.push(book: book, context: modelContext) }
-            }
-            Button("Use other device") {
-                if let remote = kosyncConflict?.remote {
-                    KOSyncService.apply(
-                        remote: remote, to: book, reader: reader, context: modelContext
-                    )
-                }
-                kosyncConflict = nil
-            }
-        } message: {
-            if let c = kosyncConflict {
-                let localPct = Int((c.localFraction * 100).rounded())
-                let remotePct = Int(((c.remote.fraction ?? 0) * 100).rounded())
-                Text("This device is at \(localPct)%; another device is at \(remotePct)%. Which position do you want?")
-            }
         }
         .sheet(isPresented: $showSettings, onDismiss: { scheduleChromeAutoHide() }) {
             ReaderSettingsSheet(settings: $reader.settings)
@@ -222,11 +182,6 @@ struct ReaderView: View {
 
 @MainActor private final class PushDebounce {
     var task: Task<Void, Never>?
-}
-
-private struct KOSyncConflict {
-    var localFraction: Double
-    var remote: KOSyncProgress
 }
 
 // MARK: - WKWebView host + keyboard

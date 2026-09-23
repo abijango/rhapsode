@@ -1,3 +1,4 @@
+import SwiftData
 import SwiftUI
 #if targetEnvironment(macCatalyst)
 import UIKit
@@ -88,6 +89,9 @@ private enum SidebarItem: Int, CaseIterable, Identifiable {
 struct RootTabView: View {
     @Environment(SyncManager.self) private var sync
     @Environment(AudiobookPlayer.self) private var audioPlayer
+    @Environment(HardcoverSyncService.self) private var hardcover
+    @Environment(\.modelContext)          private var modelContext
+    @Query private var allAudiobooks: [Audiobook]
     @Environment(\.scenePhase)            private var scenePhase
     @Environment(\.horizontalSizeClass)   private var hSizeClass
 
@@ -156,6 +160,9 @@ struct RootTabView: View {
             case .split: regularSplit
             }
         }
+        .task { restoreNowPlaying() }
+        .task { await hardcover.matchLibraryIfNeeded(allAudiobooks) }
+        .sheet(item: hardcoverFinishBinding) { HardcoverFinishSheet(book: $0) }
         .focusedValue(\.audiobookPlayer, audioPlayer.book != nil ? audioPlayer : nil)
         .environment(\.expandAudiobookPlayer, expandPlayer(for:))
         .environment(\.openSettings, openSettings)
@@ -206,9 +213,47 @@ struct RootTabView: View {
                     // WP-B: persist live position before suspension (including force-quit via
                     // inactive). `savePosition()` triggers the wired onProgressChanged push.
                     audioPlayer.savePosition()
+                    // Pausing and immediately locking the phone is how a listening session
+                    // normally ends, so a Hardcover push still inside its coalesce window
+                    // has to go out now rather than be lost to suspension.
+                    Task { await hardcover.flushNow() }
                 }
             }
         }
+    }
+
+    /// The finish prompt lives at the root because a book is usually finished with the player
+    /// off screen — paused from the lock screen, or from the mini-player pill.
+    private var hardcoverFinishBinding: Binding<Audiobook?> {
+        Binding(
+            get: { hardcover.finishCandidate },
+            set: { hardcover.finishCandidate = $0 }
+        )
+    }
+
+    /// Cold launch: put the last-played book back in the player so the mini-player pill is
+    /// there, paused and ready, instead of the user having to re-enter the book. Display-only —
+    /// `restore` deliberately does not touch the audio session (see `AudiobookPlayer.restore`).
+    private func restoreNowPlaying() {
+        guard audioPlayer.book == nil else { return }   // already playing; nothing to restore
+
+        let stored = UserDefaults.standard.string(forKey: AudiobookPlayer.lastPlayedBookKey)
+            .flatMap(UUID.init(uuidString:))
+        let all = (try? modelContext.fetch(FetchDescriptor<Audiobook>())) ?? []
+        // Prefer the explicitly remembered book: `progressUpdatedAt` (what Continue sorts on)
+        // can be moved by a cross-device merge for a book this device never opened.
+        let candidate = stored.flatMap { id in all.first { $0.id == id } }
+            ?? LibraryShelf.continueAudiobooks(all).first
+        guard let book = candidate else { return }
+
+        // The file can be gone (evicted, or deleted on another device): restoring would give
+        // a pill that fails on play. Drop the key so we fall back to Continue next launch.
+        guard let url = try? ContainerPaths.url(forRelativePath: book.sourcePath),
+              FileManager.default.fileExists(atPath: url.path) else {
+            UserDefaults.standard.removeObject(forKey: AudiobookPlayer.lastPlayedBookKey)
+            return
+        }
+        audioPlayer.restore(book, context: modelContext)
     }
 
     private func expandPlayer(for book: Audiobook) {

@@ -15,6 +15,9 @@ struct RhapsodeApp: App {
     /// App-lifetime audiobook player so playback survives navigation (tab switches,
     /// returning to the shelf) instead of being torn down with the player view.
     @State private var audioPlayer: AudiobookPlayer
+    /// Hardcover.app progress tracking. Separate from `SyncManager`: it's one-way outbound to a
+    /// third party keyed to a remote edition, not cross-device position sync.
+    @State private var hardcover: HardcoverSyncService
     /// Global light/dark preference (Settings → Appearance). Applied at the root below.
     @AppStorage(AppAppearance.storageKey) private var appearanceRaw = AppAppearance.system.rawValue
 
@@ -24,6 +27,7 @@ struct RhapsodeApp: App {
         _ = try? FileManager.default.url(
             for: .applicationSupportDirectory, in: .userDomainMask,
             appropriateFor: nil, create: true)
+        DiagnosticLog.bootstrap()
 
         let container: ModelContainer
         let schema = Schema(AppSchema.models)
@@ -40,7 +44,7 @@ struct RhapsodeApp: App {
             if defaults.bool(forKey: Self.didResetStoreKey) {
                 fatalError("ModelContainer failed to open after a prior store reset: \(error)")
             }
-            NSLog("⚠️ Rhapsode: ModelContainer failed to open — backing up store and RECREATING (local library/progress reset). Error: %@", String(describing: error))
+            DiagnosticLog.error("ModelContainer failed to open — backing up store and recreating. \(error)")
             Self.backupStoreFiles(at: config.url)
             defaults.set(true, forKey: Self.didResetStoreKey)
             for suffix in ["", "-wal", "-shm"] {
@@ -78,6 +82,16 @@ struct RhapsodeApp: App {
         player.onProgressChanged = { [syncManager] key in
             Task { await syncManager.pushAudiobookProgress(sourcePath: key) }
         }
+        // Hardcover pushes only when playback STOPS — see `onPlaybackStopped`. Wired before the
+        // player goes into @State, same reasoning as the callback above.
+        let hardcoverService = HardcoverSyncService()
+        hardcoverService.attach(context: container.mainContext)
+        player.onPlaybackStopped = { [hardcoverService] book, progress, endedNaturally, isSwitch in
+            hardcoverService.playbackStopped(book, progress: progress,
+                                             endedNaturally: endedNaturally,
+                                             isBookSwitch: isSwitch)
+        }
+        _hardcover = State(initialValue: hardcoverService)
         _audioPlayer = State(initialValue: player)
         // WP-C: let SyncManager reconcile the live player when a newer remote position is
         // merged (auto-jump + prevents the player's cached position clobbering the merge).
@@ -98,6 +112,7 @@ struct RhapsodeApp: App {
                     RootTabView()
                         .environment(sync)
                         .environment(audioPlayer)
+                        .environment(hardcover)
                         .task {
                             if PhaseZeroSelfTest.isRequested {
                                 await PhaseZeroSelfTest.run(context: modelContainer.mainContext)
@@ -114,6 +129,7 @@ struct RhapsodeApp: App {
                 RootTabView()
                     .environment(sync)
                     .environment(audioPlayer)
+                    .environment(hardcover)
                 #endif
             }
             .preferredColorScheme((AppAppearance(rawValue: appearanceRaw) ?? .system).colorScheme)
@@ -162,7 +178,7 @@ struct RhapsodeApp: App {
             let dst = backupDir.appendingPathComponent(storeURL.lastPathComponent + suffix + ".bak")
             try? FileManager.default.copyItem(at: src, to: dst)
         }
-        NSLog("⚠️ Rhapsode: SwiftData store backed up to %@", backupDir.path)
+        DiagnosticLog.error("SwiftData store backed up to \(backupDir.path)")
     }
 
     /// Shared backend wiring for foreground `SyncManager` and `BackgroundRefresh`.
@@ -178,6 +194,7 @@ struct RhapsodeApp: App {
         let progressDropbox: DropboxSource? = dropboxConnected ? dropbox : nil
 
         if SmbConfig.shouldUseSmb {
+            DiagnosticLog.info("library source SMB", category: .sync)
             return SyncManager(
                 source: SmbLibrarySource(),
                 context: container.mainContext,
@@ -185,6 +202,7 @@ struct RhapsodeApp: App {
                 progressDropbox: progressDropbox)
         }
         if RhapsodeServerConfig.shouldUseServer {
+            DiagnosticLog.info("library source rhapsode-server", category: .sync)
             let client = RhapsodeServerClient()
             return SyncManager(
                 source: RhapsodeServerSource(client: client),
@@ -192,6 +210,7 @@ struct RhapsodeApp: App {
                 progress: progress,
                 progressDropbox: progressDropbox)
         }
+        DiagnosticLog.info("library source Dropbox progress=\(dropboxConnected)", category: .sync)
         return SyncManager(
             source: dropbox,
             context: container.mainContext,

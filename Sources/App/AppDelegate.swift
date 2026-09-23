@@ -44,4 +44,8 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         }
         BackgroundDownloader.shared.backgroundSessionCompletionHandler = completionHandler
     }
+
+    func applicationDidReceiveMemoryWarning(_ application: UIApplication) {
+        DiagnosticLog.error("memory warning")
+    }
 }

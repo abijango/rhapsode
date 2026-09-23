@@ -155,6 +155,21 @@ targets:
         # OAuth token. Resolves Keychain -34018 (errSecMissingEntitlement) errors.
         CODE_SIGN_ENTITLEMENTS: SupportingFiles/Rhapsode.entitlements
 
+  # Unit tests for pure app-side logic (Hardcover edition matching + progress scaling).
+  # Hosted in the app because the types under test live in the app target, not a package.
+  RhapsodeTests:
+    type: bundle.unit-test
+    platform: iOS
+    deploymentTarget: "26.0"
+    sources:
+      - path: Tests/RhapsodeTests
+    dependencies:
+      - target: Rhapsode
+    settings:
+      base:
+        # No checked-in Info.plist for the test bundle — let the toolchain synthesize one.
+        GENERATE_INFOPLIST_FILE: "YES"
+
 # Generate a SHARED Rhapsode scheme so it survives `xcodegen generate` (Xcode was only
 # autocreating a user scheme, which a regenerate wiped — breaking `xcodebuild -scheme Rhapsode`).
 schemes:
@@ -162,6 +177,10 @@ schemes:
     build:
       targets:
         Rhapsode: all
+    test:
+      config: Debug
+      targets:
+        - RhapsodeTests
     run:
       config: Debug
     profile:

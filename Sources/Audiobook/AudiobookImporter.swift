@@ -29,6 +29,7 @@ struct AudiobookImporter {
         let sourceRel = try relPath(url)
         let title = (try? await commonString(asset, .commonKeyTitle)) ?? url.deletingPathExtension().lastPathComponent
         let author = try? await commonString(asset, .commonKeyArtist)
+        let narrator = try? await narratorName(asset)
         let coverPath = try await extractCover(asset: asset, folder: nil, baseName: title)
 
         let groups = try await chapterGroups(asset)
@@ -46,7 +47,8 @@ struct AudiobookImporter {
         }
         let total = tracks.reduce(0) { $0 + $1.duration }
         let book = Audiobook(title: title, author: author, coverPath: coverPath,
-                             sourcePath: sourceRel, tracks: tracks, totalDuration: total)
+                             sourcePath: sourceRel, tracks: tracks, totalDuration: total,
+                             narrator: narrator)
         return book
     }
 
@@ -86,10 +88,13 @@ struct AudiobookImporter {
         let author = parsed.first?.artist
         // Cover: embedded in first track, else cover.jpg / folder.jpg in the directory.
         let cover = try await extractCover(asset: mp3s.first.map(AVURLAsset.init), folder: folder, baseName: title)
+        var narrator: String?
+        if let first = mp3s.first { narrator = try? await narratorName(AVURLAsset(url: first)) }
 
         let total = tracks.reduce(0) { $0 + $1.duration }
         let book = Audiobook(title: title, author: author, coverPath: cover,
-                             sourcePath: try relPath(folder), tracks: tracks, totalDuration: total)
+                             sourcePath: try relPath(folder), tracks: tracks, totalDuration: total,
+                             narrator: narrator)
         return book
     }
 
@@ -118,6 +123,28 @@ struct AudiobookImporter {
         let matches = AVMetadataItem.metadataItems(from: items, withKey: key, keySpace: .common)
         guard let item = matches.first else { return nil }
         return try await item.load(.stringValue)
+    }
+
+    /// Narrator, where the file names one. Audiobook publishers are inconsistent about this:
+    /// iTunes-style M4Bs use the performer/composer atoms, ID3 tags use TPE2/TCOM/TPE3. Take the
+    /// first that isn't just a repeat of the author — a narrator field echoing the author tells
+    /// us nothing and would only add noise to matching.
+    private static func narratorName(_ asset: AVAsset) async throws -> String? {
+        let items = try await asset.load(.metadata)
+        let identifiers: [AVMetadataIdentifier] = [
+            .iTunesMetadataPerformer, .iTunesMetadataComposer,
+            .id3MetadataBand, .id3MetadataComposer, .id3MetadataConductor,
+        ]
+        let commonItems = (try? await asset.load(.commonMetadata)) ?? []
+        let author = try? await metadataString(commonItems, .commonKeyArtist)
+        for id in identifiers {
+            guard let item = AVMetadataItem.metadataItems(from: items, filteredByIdentifier: id).first,
+                  let value = try? await item.load(.stringValue) else { continue }
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty, trimmed.caseInsensitiveCompare(author ?? "") != .orderedSame else { continue }
+            return trimmed
+        }
+        return nil
     }
 
     private static func trackNumber(_ asset: AVAsset) async throws -> Int? {

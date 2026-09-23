@@ -110,16 +110,6 @@ struct SettingsView: View {
                             status: smartSpeechEnabled ? "On" : "Off"
                         )
                     }
-
-                    NavigationLink {
-                        NerdStatsView(embedsNavigationStack: false)
-                    } label: {
-                        SettingsIndexRow(
-                            title: "Nerd Stats",
-                            systemImage: "chart.bar",
-                            tint: .indigo
-                        )
-                    }
                 } header: {
                     Text("Playback")
                 }
@@ -136,19 +126,37 @@ struct SettingsView: View {
                         )
                     }
                     NavigationLink {
-                        KOSyncSettingsView()
+                        HardcoverSettingsView()
                     } label: {
                         SettingsIndexRow(
-                            title: "KOReader Sync",
-                            systemImage: "arrow.triangle.2.circlepath",
+                            title: "Hardcover",
+                            systemImage: "books.vertical",
                             tint: .orange,
-                            status: KOSyncSettings.isConfigured ? "On" : "Off"
+                            status: hardcoverStatus
                         )
                     }
                 } header: {
                     Text("Reading")
                 } footer: {
-                    Text("Audiobook resume and stats use Dropbox. Ebook position uses KOReader when it is on.")
+                    Text("Resume positions, Nerd Stats, and collections use Dropbox Progress Sync. "
+                         + "Hardcover tracks your audiobooks publicly, pushed when you pause.")
+                }
+
+                Section {
+                    NavigationLink {
+                        DiagnosticsSettingsView()
+                    } label: {
+                        SettingsIndexRow(
+                            title: "Diagnostics",
+                            systemImage: "text.alignleft",
+                            tint: .gray,
+                            status: DiagnosticLog.hasPendingCrash ? "Crash saved" : nil
+                        )
+                    }
+                } header: {
+                    Text("Support")
+                } footer: {
+                    Text("On-device logs stay on this phone. Share them from Diagnostics after a crash.")
                 }
             }
             .navigationTitle("Settings")
@@ -171,6 +179,11 @@ struct SettingsView: View {
         if SmbConfig.isConfigured { return "SMB (off)" }
         if RhapsodeServerConfig.isConfigured { return "Server (off)" }
         return "Not set"
+    }
+
+    private var hardcoverStatus: String {
+        guard HardcoverSettings.isActive else { return "Off" }
+        return HardcoverSettings.username.map { "@\($0)" } ?? "On"
     }
 
     private var progressSyncStatus: String {

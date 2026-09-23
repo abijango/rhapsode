@@ -109,16 +109,11 @@ enum KOSyncSettings {
         set { UserDefaults.standard.set(newValue, forKey: deviceIDKey) }
     }
 
-    /// Ready to talk to a server (enabled + URL + username + userkey).
-    static var isConfigured: Bool {
-        isEnabled
-            && !serverURL.isEmpty
-            && !username.isEmpty
-            && !(userkey ?? "").isEmpty
-    }
+    /// Parked. Restore by returning the credential checks. Saved Keychain values stay put.
+    static var isConfigured: Bool { false }
 
-    /// When configured, ebook reading position syncs via KOReader instead of Dropbox/SMB/server.
-    static var isEbookProgressAuthority: Bool { isConfigured }
+    /// Parked. Ebook positions use Dropbox Progress Sync like audiobooks.
+    static var isEbookProgressAuthority: Bool { false }
 
     static func setPassword(_ password: String) {
         // KOReader hashes the password with MD5 for X-Auth-Key.

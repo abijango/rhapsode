@@ -10,7 +10,7 @@ The reason it exists is SmartSpeech. Rhapsode cuts the dead air out of narration
 
 ## What it does
 
-Four destinations: **Audiobooks**, **E-books**, **Nerd Stats**, and **Settings**. On iPhone you get tabs and a mini player, and the player covers the screen. On iPad and Mac you get a sidebar, and the player overlays the audiobooks column.
+Four destinations: **Audiobooks**, **E-books**, **Nerd Stats**, and **Settings**. On iPhone the first three are tabs (Settings is the gear on the shelves). On iPad and Mac you get a sidebar, and the player overlays the audiobooks column.
 
 Audiobooks are single-file M4B or MP3 folders, both behind one `(trackIndex, offset)` model. You get play and pause, scrubbing, skip back 15 seconds and forward 30 seconds, and speed from 0.8x to 3.0x. There is a chapter list, a sleep timer, AirPlay, and lock-screen and Control Center controls. Books resume where you left them.
 
@@ -32,7 +32,7 @@ Progress runs through Dropbox `/.rhapsode-sync` whenever a Dropbox token exists,
 
 Two merge rules, and they differ on purpose. Resume position is last-writer-wins, because only one device can be right about where you are. Listened time and saved time are summed across every device, so lifetime and per-book totals are true sums.
 
-Configure **Settings → KOReader Sync** and KOReader owns ebook positions. Dropbox then stops writing them.
+Ebook positions use the same Dropbox progress files as audiobooks.
 
 Rhapsode imports an existing NAS `rhapsode-sync` folder once, when SMB is configured and the share is reachable. After that it never writes the share for progress.
 

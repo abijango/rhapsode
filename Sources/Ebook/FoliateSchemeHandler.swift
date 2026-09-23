@@ -156,9 +156,7 @@ final class FoliateSchemeHandler: NSObject, WKURLSchemeHandler {
         let attrs = try? FileManager.default.attributesOfItem(atPath: bookFileURL.path)
         let size = (attrs?[.size] as? NSNumber)?.int64Value ?? 0
         let mime = "application/epub+zip"
-        #if DEBUG
-        print("RHAPSODE-FOLIATE: serve book \(bookFileURL.lastPathComponent) size=\(size)")
-        #endif
+        DiagnosticLog.info("serve book \(bookFileURL.lastPathComponent) size=\(size)", category: .reader)
 
         if size > Self.streamThreshold {
             try streamFile(

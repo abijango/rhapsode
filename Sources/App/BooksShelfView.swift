@@ -193,7 +193,10 @@ struct BooksShelfView: View {
             }
             .background(DS.Palette.shelfBackground)
         }
-        .onAppear { sync.markRemoteCatalogSeen(kind: .books) }
+        .onAppear {
+            sync.markRemoteCatalogSeen(kind: .books)
+            FoliateWebReader.warmProcessPool()
+        }
     }
 
     private var downloadsToolbarButton: some View {
@@ -307,7 +310,6 @@ struct BooksShelfView: View {
     private func ebookLink(_ book: Book, style: EbookLinkStyle = .library) -> some View {
         NavigationLink {
             ReaderView(book: book)
-                .onAppear { Self.warmWebKitIfNeeded() }
         } label: {
             switch style {
             case .continue:
@@ -338,12 +340,4 @@ struct BooksShelfView: View {
         }
     }
 
-    /// Defer WebKit pool warm until the user actually opens a reader (not shelf appear).
-    private static var webKitWarmed = false
-
-    private static func warmWebKitIfNeeded() {
-        guard !webKitWarmed else { return }
-        webKitWarmed = true
-        FoliateWebReader.warmProcessPool()
-    }
 }

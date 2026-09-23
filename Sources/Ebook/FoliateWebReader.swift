@@ -566,9 +566,7 @@ final class FoliateWebReader: NSObject, ActiveEbookReader {
     }
 
     nonisolated static func log(_ message: String) {
-        #if DEBUG
-        print("RHAPSODE-FOLIATE: \(message)")
-        #endif
+        DiagnosticLog.info(message, category: .reader)
     }
 }
 

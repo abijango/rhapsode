@@ -19,8 +19,21 @@ enum DiagnosticLog {
     private static let rotatedName = "rhapsode.log.1"
     private static let crashMarkerName = "crash-pending"
     private static let pendingCrashDefaultsKey = "diagnosticPendingCrash"
+    private static let logDayDefaultsKey = "diagnosticLogDay"
+    private static let archiveDirName = "Archive"
+    private static let bundleName = "rhapsode-logs.zip"
     /// Soft cap per file. Current + rotated ≈ 2.5 MB of recent history.
     private static let maxFileBytes = 1_250_000
+    /// Compressed day archives kept before deletion.
+    private static let archiveRetentionDays = 14
+
+    /// `yyyy-MM-dd` in the device's timezone — a "day" should mean the user's day.
+    nonisolated(unsafe) private static let dayStamp: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd"
+        f.locale = Locale(identifier: "en_US_POSIX")
+        return f
+    }()
 
     private static let queue = DispatchQueue(label: "com.naufalmir.rhapsode.diagnostic-log")
     nonisolated(unsafe) private static let iso: ISO8601DateFormatter = {
@@ -66,7 +79,9 @@ enum DiagnosticLog {
             try? FileManager.default.removeItem(at: markerURL)
             openCrashMarkerFD(markerURL)
 
+            rollDayIfNeededUnlocked()
             openCurrentFileUnlocked()
+            pruneArchivesUnlocked()
             if !leftover.isEmpty {
                 writeUnlocked("\(iso.string(from: Date())) FAULT app  previous launch: \(leftover)\n")
             }
@@ -159,20 +174,70 @@ enum DiagnosticLog {
         }
     }
 
+    /// Start today's log over. Archives are kept — use `clearArchives()` for those.
     static func clear() {
         queue.sync {
             try? fileHandle?.close()
             fileHandle = nil
             guard let dir = try? logsDirectory() else { return }
-            for name in [currentName, rotatedName, "rhapsode-diagnostics.txt"] {
+            for name in [currentName, rotatedName, "rhapsode-diagnostics.txt", bundleName] {
                 try? FileManager.default.removeItem(
                     at: dir.appendingPathComponent(name, isDirectory: false)
                 )
             }
             openCurrentFileUnlocked()
+            // Clearing means "today starts now" — don't let the next write think it missed a
+            // day boundary and archive the handful of lines we just started.
+            UserDefaults.standard.set(dayStamp.string(from: Date()), forKey: logDayDefaultsKey)
             UserDefaults.standard.set(false, forKey: pendingCrashDefaultsKey)
         }
         info("log cleared", category: .app)
+    }
+
+    /// Delete every archived day. Today's log is untouched.
+    static func clearArchives() {
+        queue.sync {
+            guard let archiveDir = try? archivesDirectory() else { return }
+            try? FileManager.default.removeItem(at: archiveDir)
+        }
+        info("log archives cleared", category: .app)
+    }
+
+    /// Archived days, newest first, with their on-disk sizes.
+    static func archives() -> [(name: String, bytes: Int)] {
+        queue.sync {
+            guard let archiveDir = try? archivesDirectory(),
+                  let entries = try? FileManager.default.contentsOfDirectory(
+                    at: archiveDir, includingPropertiesForKeys: [.fileSizeKey]
+                  ) else { return [] }
+            return entries
+                .map { url in
+                    let size = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
+                    return (url.lastPathComponent, size)
+                }
+                .sorted { $0.name > $1.name }
+        }
+    }
+
+    /// One zip containing today's log plus every archived day — for "send me everything".
+    static func exportArchiveBundle() -> URL? {
+        _ = exportFile()   // refresh the readable snapshot so the bundle includes it
+        return queue.sync {
+            guard let dir = try? logsDirectory() else { return nil }
+            let destination = dir.deletingLastPathComponent()
+                .appendingPathComponent(bundleName, isDirectory: false)
+            try? FileManager.default.removeItem(at: destination)
+            var coordinatorError: NSError?
+            var produced: URL?
+            NSFileCoordinator().coordinate(
+                readingItemAt: dir, options: [.forUploading], error: &coordinatorError
+            ) { zipped in
+                if (try? FileManager.default.copyItem(at: zipped, to: destination)) != nil {
+                    produced = destination
+                }
+            }
+            return produced
+        }
     }
 
     /// NSException path — Foundation is allowed here (unlike a signal handler).
@@ -252,6 +317,8 @@ enum DiagnosticLog {
 
     private static func writeUnlocked(_ line: String) {
         guard let data = line.data(using: .utf8) else { return }
+        // A session left running overnight must roll too, not just a fresh launch.
+        rollDayIfNeededUnlocked()
         rotateIfNeededUnlocked(incoming: data.count)
         if fileHandle == nil { openCurrentFileUnlocked() }
         do {
@@ -260,6 +327,112 @@ enum DiagnosticLog {
         } catch {
             fileHandle = nil
         }
+    }
+
+    // MARK: - Daily archiving
+    //
+    // Size-based rotation alone kept 11 days in one file, because this app simply doesn't log
+    // much. That makes "send me a fresh log" impossible to honour. So the log also rolls on a
+    // date change: yesterday's lines move to a zipped archive and today starts empty.
+
+    /// If the last write was on an earlier day, archive the current log and start a new one.
+    private static func rollDayIfNeededUnlocked() {
+        let today = dayStamp.string(from: Date())
+        let recorded = UserDefaults.standard.string(forKey: logDayDefaultsKey)
+        defer { UserDefaults.standard.set(today, forKey: logDayDefaultsKey) }
+        guard let recorded, recorded != today else { return }
+
+        guard let dir = try? logsDirectory() else { return }
+        let current = dir.appendingPathComponent(currentName, isDirectory: false)
+        let rotated = dir.appendingPathComponent(rotatedName, isDirectory: false)
+        guard FileManager.default.fileExists(atPath: current.path) else { return }
+
+        try? fileHandle?.close()
+        fileHandle = nil
+
+        // Fold the in-day rotated half back in so a day archive is the whole day.
+        var body = (try? String(contentsOf: rotated, encoding: .utf8)) ?? ""
+        body += (try? String(contentsOf: current, encoding: .utf8)) ?? ""
+        try? FileManager.default.removeItem(at: rotated)
+        try? FileManager.default.removeItem(at: current)
+
+        guard !body.isEmpty, let archiveDir = try? archivesDirectory() else { return }
+        let plain = archiveDir.appendingPathComponent("rhapsode-\(recorded).log", isDirectory: false)
+        try? body.write(to: plain, atomically: true, encoding: .utf8)
+        // Compress and drop the plain copy — logs are text and shrink by roughly 10×.
+        if zipFileUnlocked(plain) != nil {
+            try? FileManager.default.removeItem(at: plain)
+        }
+    }
+
+    /// Zip one file next to itself as `<name>.zip`, via the file coordinator's archive
+    /// support (no third-party zip dependency). Returns the archive URL.
+    ///
+    /// The log has to be staged inside a throwaway folder first. `.forUploading` only
+    /// ARCHIVES a directory — handed a single file it hands that same file straight back,
+    /// which silently produced a plain text log wearing a `.zip` extension (verified: output
+    /// byte count identical to input). Zipping the enclosing folder is what actually
+    /// compresses.
+    @discardableResult
+    private static func zipFileUnlocked(_ url: URL) -> URL? {
+        let destination = url.deletingLastPathComponent()
+            .appendingPathComponent(url.lastPathComponent + ".zip", isDirectory: false)
+        let stagingRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let staging = stagingRoot
+            .appendingPathComponent(url.deletingPathExtension().lastPathComponent, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: stagingRoot) }
+
+        do {
+            try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)
+            try FileManager.default.copyItem(
+                at: url, to: staging.appendingPathComponent(url.lastPathComponent, isDirectory: false))
+        } catch {
+            return nil
+        }
+        try? FileManager.default.removeItem(at: destination)
+
+        var coordinatorError: NSError?
+        var produced: URL?
+        NSFileCoordinator().coordinate(
+            readingItemAt: staging, options: [.forUploading], error: &coordinatorError
+        ) { zipped in
+            // The coordinator's archive is temporary and deleted when this closure returns,
+            // so it must be copied out here, not afterwards.
+            if (try? FileManager.default.copyItem(at: zipped, to: destination)) != nil {
+                produced = destination
+            }
+        }
+        return produced
+    }
+
+    #if DEBUG
+    /// Test seam for the zip step — the one piece of archiving that fails silently.
+    static func zipForTesting(_ url: URL) -> URL? { zipFileUnlocked(url) }
+    #endif
+
+    /// Delete day archives past the retention window.
+    private static func pruneArchivesUnlocked() {
+        guard let archiveDir = try? archivesDirectory(),
+              let entries = try? FileManager.default.contentsOfDirectory(
+                at: archiveDir, includingPropertiesForKeys: [.contentModificationDateKey]
+              ) else { return }
+        let cutoff = Date().addingTimeInterval(-Double(archiveRetentionDays) * 86_400)
+        for entry in entries {
+            let modified = (try? entry.resourceValues(forKeys: [.contentModificationDateKey]))?
+                .contentModificationDate
+            if let modified, modified < cutoff {
+                try? FileManager.default.removeItem(at: entry)
+            }
+        }
+    }
+
+    private static func archivesDirectory() throws -> URL {
+        let dir = try logsDirectory().appendingPathComponent(archiveDirName, isDirectory: true)
+        if !FileManager.default.fileExists(atPath: dir.path) {
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        }
+        return dir
     }
 
     private static func rotateIfNeededUnlocked(incoming: Int) {

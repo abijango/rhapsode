@@ -46,6 +46,11 @@ final class AudiobookPlayer {
     /// The file URL currently loaded into `backend` (nil = nothing loaded). A single-file M4B loads
     /// once; chapter changes within it are seeks. A multi-file book reloads on each track change.
     private var loadedURL: URL?
+    /// True when `book` was adopted for DISPLAY ONLY (launch restore): no audio session, no
+    /// asset loaded, no now-playing claim. Cleared by `materialize()` on the first transport
+    /// action. Without this a cold launch would call `configureAudioSession()` →
+    /// `setActive(true)` and duck/stop whatever the user is already playing in another app.
+    private var needsMaterialize = false
     /// Per-file cache of analyze-ahead prescan results (Fix A). Seeded by a detached prescan on
     /// first load of a file; the global floor is passed into `backend.load` on any later load.
     private var prescanByURL: [URL: LiveSilencePrescanResult] = [:]
@@ -74,6 +79,17 @@ final class AudiobookPlayer {
     /// throttle from the ~30s local-persist throttle below); fires immediately on pause, seek,
     /// and track-jump (where `persist(force:true)` runs). Wired in `RhapsodeApp`.
     var onProgressChanged: ((_ sourcePath: String) -> Void)?
+    /// Fired when playback STOPS — `pause()` and `teardown()`, nothing else. Distinct from
+    /// `onProgressChanged` on purpose: that one also fires on ~25s ticks and on every seek and
+    /// track jump, which is fine for cheap cross-device JSON but far too chatty for a
+    /// third-party tracker on a per-minute request budget. Every way playback stops already
+    /// funnels through `pause()` — sleep timer, interruption, headphones out, end of book — so
+    /// these two call sites cover the lot. `endedNaturally` distinguishes reaching the end of
+    /// the book from a user pause. Wired in `RhapsodeApp`.
+    /// `isBookSwitch` marks the stop that comes from loading a different book, which a
+    /// listener should treat as bookkeeping rather than as the user finishing something.
+    var onPlaybackStopped: ((_ book: Audiobook, _ progress: Double,
+                             _ endedNaturally: Bool, _ isBookSwitch: Bool) -> Void)?
     /// Last time a push was attempted via `onProgressChanged`. Gates the unforced (tick) push
     /// to ~25s so background playback pushes periodically without spamming the network.
     private var lastPushAttempt = Date(timeIntervalSince1970: 0)
@@ -314,10 +330,36 @@ final class AudiobookPlayer {
         // restart playback. The player is app-lifetime (injected via environment),
         // so it keeps playing as the user navigates away (tab switch / back to the
         // shelf) and returns — re-running load() here would reset the position.
-        if self.book?.id == book.id { return }
+        if self.book?.id == book.id {
+            // ...but a book RESTORED at launch is display-only until something asks for
+            // audio, and opening the player is such a request.
+            materialize()
+            return
+        }
         // Switching to a different book: persist & stop the previous one first.
         if self.book != nil { teardown() }
 
+        adopt(book)
+        DiagnosticLog.info("load “\(book.title)” track=\(currentIndex) offset=\(String(format: "%.1f", offsetInTrack))", category: .playback)
+        materialize()
+    }
+
+    /// Adopt the last-played book at launch so the mini-player has something to show,
+    /// WITHOUT starting any audio machinery. Everything `bookProgress` needs (prefix sums +
+    /// offset) is set here, so the pill renders cover, title and progress correctly while the
+    /// audio session stays untouched — a relaunch must not interrupt another app's playback.
+    /// The first `play()`/seek materializes lazily.
+    func restore(_ book: Audiobook, context: ModelContext) {
+        guard self.book == nil else { return }   // never displace a live session
+        self.context = context
+        adopt(book)
+        needsMaterialize = true
+        DiagnosticLog.info("restore “\(book.title)” track=\(currentIndex) offset=\(String(format: "%.1f", offsetInTrack))", category: .playback)
+    }
+
+    /// State shared by `load` and `restore`: adopt the book and its persisted position.
+    /// Touches no audio machinery.
+    private func adopt(_ book: Audiobook) {
         self.book = book
         self.tracks = book.orderedTracks
         self.isSingleFile = Self.detectSingleFile(tracks)
@@ -326,6 +368,9 @@ final class AudiobookPlayer {
         self.offsetInTrack = book.lastOffsetSeconds
         // WP-A: seed the change baseline to the restored position so the first persist after
         // load() does NOT mistake "opened the book" for a user move and phantom-stamp.
+        // Load-bearing for `restore` too: `progressUpdatedAt` orders the Continue shelf AND
+        // decides the cross-device last-writer-wins merge, so a launch-time stamp would let a
+        // stale device win a merge it should lose.
         self.lastPersistedIndex = self.currentIndex
         self.lastPersistedOffset = self.offsetInTrack
 
@@ -337,13 +382,24 @@ final class AudiobookPlayer {
         pendingSavedSeconds = 0
         prescanTask?.cancel()
         prescanTask = nil
+        pendingResumeNudge = true   // WP8: initial load arms the smart-resume nudge
 
-        DiagnosticLog.info("load “\(book.title)” track=\(currentIndex) offset=\(String(format: "%.1f", offsetInTrack))", category: .playback)
+        // Remember the book for the next cold launch (see `RootTabView.restoreNowPlaying`).
+        UserDefaults.standard.set(book.id.uuidString, forKey: Self.lastPlayedBookKey)
+    }
+
+    /// Bring up the audio session and load the current asset. Idempotent — a no-op once the
+    /// session is live, so every transport entry point can call it unconditionally.
+    private func materialize() {
+        guard needsMaterialize || loadedURL == nil, book != nil else { return }
+        needsMaterialize = false
         configureAudioSession()   // before any backend use (engine needs an active session)
         configureRemoteCommands()
         loadCurrentItem(seekTo: offsetInTrack)
-        pendingResumeNudge = true   // WP8: initial load arms the smart-resume nudge
     }
+
+    /// UserDefaults key holding the `Audiobook.id` of the most recently opened book.
+    static let lastPlayedBookKey = "lastPlayedAudiobookID"
 
     /// Force-persist the current position now, WITHOUT stopping playback. Called
     /// when the player view goes away but audio should keep playing (tab switch /
@@ -357,11 +413,13 @@ final class AudiobookPlayer {
             DiagnosticLog.info("teardown “\(title)”", category: .playback)
         }
         persist(force: true)
+        if let book { onPlaybackStopped?(book, bookProgress, false, true) }
         cancelSleepTimer()
         prescanTask?.cancel()
         prescanTask = nil
         prescanPending = nil
         isPlaying = false
+        needsMaterialize = false
         backend.stop()
         loadedURL = nil
         nowPlayingCoverPath = nil
@@ -374,6 +432,7 @@ final class AudiobookPlayer {
     func togglePlayPause() { isPlaying ? pause() : play() }
 
     func play() {
+        materialize()   // a launch-restored book has no session/asset yet
         // WP8 — smart resume: nudge position back before playing, but only when the flag was armed
         // (initial load or pause). Deliberate seeks clear the flag so scrub-then-play isn't yanked back.
         if pendingResumeNudge {
@@ -388,11 +447,20 @@ final class AudiobookPlayer {
     }
 
     func pause() {
+        pause(endedNaturally: false)
+    }
+
+    /// `endedNaturally` is set only by `handleItemEnd()` on the last track, so a listener can
+    /// tell "reached the end" from "user stopped".
+    private func pause(endedNaturally: Bool) {
         isPlaying = false
         backend.pause()
+        DiagnosticLog.info("pause “\(book?.title ?? "?")”"
+                           + (endedNaturally ? " (end of book)" : ""), category: .playback)
         pendingResumeNudge = true   // WP8: arm so next play() nudges
         persist(force: true)
         updateNowPlaying()
+        if let book { onPlaybackStopped?(book, bookProgress, endedNaturally, false) }
     }
 
     /// Session-only sleep timer. Pauses playback when it fires; does not persist across launches.
@@ -454,6 +522,7 @@ final class AudiobookPlayer {
 
     /// Seek within the current track (0...trackDuration).
     func seekInTrack(to seconds: Double) {
+        materialize()   // a launch-restored book has no session/asset yet
         pendingResumeNudge = false   // WP8: deliberate seek — do not nudge on next play()
         let clamped = min(max(seconds, 0), trackDuration)
         if isSingleFile {
@@ -473,6 +542,7 @@ final class AudiobookPlayer {
     func seekInBook(to bookTime: Double) { seekWithinBook(toBookTime: bookTime) }
 
     func jump(toTrack index: Int) {
+        materialize()   // a launch-restored book has no session/asset yet
         pendingResumeNudge = false   // WP8: track jump is deliberate — do not nudge
         guard tracks.indices.contains(index) else { return }
         currentIndex = index
@@ -574,6 +644,17 @@ final class AudiobookPlayer {
     private func seekWithinBook(toBookTime t: Double) {
         pendingResumeNudge = false   // WP8: deliberate seek — do not nudge on next play()
         let clamped = min(max(t, 0), totalDuration)
+        if needsMaterialize {
+            if applyingRemote {
+                // A cross-device merge landing on a launch-restored book: move the stored
+                // position only. Materializing here would activate the audio session behind
+                // the user's back, purely because another device moved.
+                recomputeIndex(forBookTime: clamped)
+                persist(force: true)
+                return
+            }
+            materialize()   // user-driven scrub on a restored book
+        }
         if isSingleFile {
             seekSingleFile(to: clamped)
         } else {
@@ -665,7 +746,7 @@ final class AudiobookPlayer {
         if !isSingleFile && currentIndex + 1 < tracks.count {
             jump(toTrack: currentIndex + 1)
         } else {
-            pause()
+            pause(endedNaturally: true)   // reached the end of the book, not a user stop
         }
     }
 
@@ -798,6 +879,9 @@ final class AudiobookPlayer {
     }
 
     private func updateNowPlaying() {
+        // A launch-restored book is display-only: claiming the now-playing slot before the
+        // user has pressed play would push another app's audio out of the lock screen.
+        guard !needsMaterialize else { return }
         var info: [String: Any] = [:]
         info[MPMediaItemPropertyTitle] = currentTrack?.title ?? book?.title ?? ""
         info[MPMediaItemPropertyAlbumTitle] = book?.title ?? ""

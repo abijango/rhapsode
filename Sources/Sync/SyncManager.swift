@@ -706,9 +706,7 @@ final class SyncManager {
     }
 
     static func log(_ message: String) {
-        #if DEBUG
-        print("RHAPSODE-SYNC: \(message)")
-        #endif
+        DiagnosticLog.info(message, category: .sync)
     }
 
     /// Resolve a watched folder by ID, returning nil if it has been DELETED from the store.

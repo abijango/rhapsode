@@ -149,12 +149,7 @@ struct ExpandedNowPlayingView: View {
 
     var body: some View {
         NavigationStack {
-            PlayerView(audiobook: book, coverNamespace: coverNamespace)
-                .toolbar {
-                    ToolbarItem(placement: .topBarLeading) {
-                        Button("Close", systemImage: "chevron.down") { dismiss() }
-                    }
-                }
+            PlayerView(audiobook: book, coverNamespace: coverNamespace, onDismiss: { dismiss() })
         }
     }
 }

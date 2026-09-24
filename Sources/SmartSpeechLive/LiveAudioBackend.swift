@@ -51,7 +51,7 @@ final class LiveAudioBackend {
                 lastKnownSource = source
                 reachedEndFired = false
                 resetOutputClocks()
-                producer?.beginSession(fromSource: source, resumePlaying: isPlaying)
+                awaitedSession = producer?.beginSession(fromSource: source, resumePlaying: isPlaying) ?? awaitedSession
             }
         }
     }
@@ -82,6 +82,9 @@ final class LiveAudioBackend {
     /// node clock after the engine has already stopped.
     private var lastKnownSource: TimeInterval = 0
     private var lastGoodPlaybackOutput: TimeInterval = 0
+    /// Latest session requested from the producer. Its reset runs async on the producer queue, so
+    /// until it has started the node clock may still belong to the previous session.
+    private var awaitedSession = 0
     private var displayIntervalMs: UInt64 = 250
     private var adaptiveAnalysisTask: Task<SemanticAudioClassifier.AdaptivePlan, Never>?
     private var adaptiveAnalysisGeneration = 0
@@ -174,7 +177,7 @@ final class LiveAudioBackend {
         let usesRubberBand = p.snapshot().usesRubberBand
         timePitch.rate = usesRubberBand ? 1.0 : r
         timePitch.bypass = usesRubberBand || r == 1.0
-        p.beginSession(fromSource: sessionSourceStart, resumePlaying: false)
+        awaitedSession = p.beginSession(fromSource: sessionSourceStart, resumePlaying: false)
         requestAdaptiveAnalysis()
     }
 
@@ -237,7 +240,7 @@ final class LiveAudioBackend {
             try? AVAudioSession.sharedInstance().setActive(true)
             try? engine.start()
         }
-        producer?.beginSession(fromSource: clamped, resumePlaying: isPlaying)
+        awaitedSession = producer?.beginSession(fromSource: clamped, resumePlaying: isPlaying) ?? awaitedSession
         requestAdaptiveAnalysis()
     }
 
@@ -265,6 +268,10 @@ final class LiveAudioBackend {
     /// Playback-domain seconds consumed by the player node.
     private var currentPlaybackOutput: TimeInterval {
         guard attached else { return lastGoodPlaybackOutput }
+        let snapshot = producer?.snapshot()
+        // A stale raw time sampled here would become `lastGood`, which the clock never rewinds.
+        if let snapshot, snapshot.startedSession < awaitedSession { return lastGoodPlaybackOutput }
+        let scheduled = snapshot?.scheduledOutput ?? lastGoodPlaybackOutput
         let raw: TimeInterval?
         if let nodeTime = playerNode.lastRenderTime,
            let pt = playerNode.playerTime(forNodeTime: nodeTime) {
@@ -272,7 +279,6 @@ final class LiveAudioBackend {
         } else {
             raw = nil
         }
-        let scheduled = producer?.snapshot().scheduledOutput ?? lastGoodPlaybackOutput
         let played = LivePlaybackClock.sessionPlayed(
             rawSeconds: raw, scheduledOutput: scheduled, lastGood: lastGoodPlaybackOutput
         )
@@ -423,8 +429,9 @@ final class LiveAudioBackend {
             // Still running — do not stop/reconnect. That retriggers this
             // notification and used to reset the session clock (CPU runaway).
             if rebuildRubberBand {
+                sessionSourceStart = src
                 resetOutputClocks()
-                producer?.beginSession(fromSource: src, resumePlaying: wasPlaying)
+                awaitedSession = producer?.beginSession(fromSource: src, resumePlaying: wasPlaying) ?? awaitedSession
             } else if wasPlaying {
                 producer?.resume()
             }
@@ -435,6 +442,7 @@ final class LiveAudioBackend {
         engine.connect(playerNode, to: timePitch, format: format)
         engine.connect(timePitch, to: engine.mainMixerNode, format: format)
         engine.prepare()
+        sessionSourceStart = src
 
         if wasPlaying {
             try? AVAudioSession.sharedInstance().setActive(true)
@@ -452,12 +460,12 @@ final class LiveAudioBackend {
             }
             resetOutputClocks()
             reachedEndFired = false
-            producer?.beginSession(fromSource: src, resumePlaying: true)
+            awaitedSession = producer?.beginSession(fromSource: src, resumePlaying: true) ?? awaitedSession
             isPlaying = true
             startDisplayLoop()
         } else {
             resetOutputClocks()
-            producer?.beginSession(fromSource: src, resumePlaying: false)
+            awaitedSession = producer?.beginSession(fromSource: src, resumePlaying: false) ?? awaitedSession
         }
         releaseConfigChangeGuard()
     }
@@ -508,7 +516,7 @@ final class LiveAudioBackend {
         lastKnownSource = sourceStart
         resetOutputClocks()
         producer.setPlaybackRate(r)
-        producer.beginSession(fromSource: sourceStart, resumePlaying: isPlaying)
+        awaitedSession = producer.beginSession(fromSource: sourceStart, resumePlaying: isPlaying)
     }
 
     private func resetOutputClocks() {

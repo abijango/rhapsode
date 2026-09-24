@@ -57,6 +57,8 @@ final class LiveTrimProducer: @unchecked Sendable {
     private var adaptiveSpeedEnabled = false
     private var adaptivePlans = [SemanticAudioClassifier.AdaptivePlan]()
     private var generation = 0                       // bumped on seek to drop the stale poll chain
+    private var requestedSession = 0                 // last session number handed out by beginSession
+    private var startedSession = 0                   // last session whose reset has run on the queue
     private var finishedDecoding = false
     private var allowRefill = false                  // false until play/resume — limits idle prefetch
     private var playbackRate: Float = 1.0
@@ -157,7 +159,13 @@ final class LiveTrimProducer: @unchecked Sendable {
     /// Begin (or restart after a seek) a session from `sourceStart`. Stops the node, resets the
     /// session output timeline to 0 and the map to `sourceStart`-based coordinates, schedules one
     /// chunk for low seek latency, and starts playback iff `resumePlaying`. Further refill is async.
-    func beginSession(fromSource sourceStart: TimeInterval, resumePlaying: Bool) {
+    /// Returns the session number; `Snapshot.startedSession` reaches it once the reset has run.
+    @discardableResult
+    func beginSession(fromSource sourceStart: TimeInterval, resumePlaying: Bool) -> Int {
+        lock.lock()
+        requestedSession += 1
+        let session = requestedSession
+        lock.unlock()
         queue.async { [weak self] in
             guard let self else { return }
             self.flushDiagnosticSummary()
@@ -165,6 +173,7 @@ final class LiveTrimProducer: @unchecked Sendable {
             self.lock.lock()
             self.generation += 1
             let gen = self.generation
+            self.startedSession = session
             self.cursor = max(0, min(sourceStart, self.sourceDuration))
             self.scheduledOutput = 0
             self.scheduledContent = 0
@@ -199,6 +208,7 @@ final class LiveTrimProducer: @unchecked Sendable {
                 self.pump(gen)
             }
         }
+        return session
     }
 
     /// Resume from pause (no reset — the node keeps its schedule and sampleTime).
@@ -335,6 +345,7 @@ final class LiveTrimProducer: @unchecked Sendable {
         let usesRubberBand: Bool
         let decodedThroughSource: TimeInterval
         let finishedDecoding: Bool
+        let startedSession: Int
     }
 
     func snapshot() -> Snapshot {
@@ -342,7 +353,8 @@ final class LiveTrimProducer: @unchecked Sendable {
         let map = cachedMap ?? SmartSpeechTimelineMap(points: [], sourceDuration: cursor, trimmedDuration: scheduledContent)
         return Snapshot(map: map, playbackTimeMap: cachedPlaybackTimeMap,
                         scheduledOutput: scheduledOutput, usesRubberBand: sessionUsesRubberBand,
-                        decodedThroughSource: cursor, finishedDecoding: finishedDecoding)
+                        decodedThroughSource: cursor, finishedDecoding: finishedDecoding,
+                        startedSession: startedSession)
     }
 
     // MARK: - Production loop (producer queue)

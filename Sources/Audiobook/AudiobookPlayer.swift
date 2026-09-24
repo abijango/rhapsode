@@ -612,7 +612,12 @@ final class AudiobookPlayer {
         } else {
             loadCurrentItem(seekTo: sourceNow)
         }
-        if wasPlaying { play() }
+        // The reload stopped the backend, so `isPlaying` is stale; clear it or `play()`'s
+        // already-playing guard no-ops and leaves audio silent while the UI shows playing.
+        if wasPlaying {
+            isPlaying = false
+            play()
+        }
     }
 
     /// WP8 — smart resume flag. Set `true` on `pause()` and on initial `load()`, cleared by any

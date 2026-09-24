@@ -164,14 +164,19 @@ public struct PlaybackEditMap: Equatable, Codable, Sendable {
 
     /// Avoid placing a decode/render seam inside a finalized edit. This ensures an edit is rendered
     /// atomically and prevents a chunk-local renderer from seeing a removal that begins at frame 0.
+    /// Loops to a fixpoint: pushing past one edit can land inside the next (e.g. a short compressPause
+    /// immediately followed by another edit), so a single hop is not enough to guarantee a clean seam.
     public func renderEnd(from start: TimeInterval, preferredEnd: TimeInterval,
                           sourceEnd: TimeInterval) -> TimeInterval {
         guard preferredEnd < sourceEnd else { return sourceEnd }
-        if let containing = edits.first(where: {
-            $0.start < preferredEnd && $0.end > preferredEnd && $0.end > start
+        var end = preferredEnd
+        while let containing = edits.first(where: {
+            $0.start < end && $0.end > end && $0.end > start
         }) {
-            return min(containing.end, sourceEnd)
+            let next = min(containing.end, sourceEnd)
+            guard next > end else { break } // no progress — avoid looping on a degenerate edit
+            end = next
         }
-        return preferredEnd
+        return end
     }
 }

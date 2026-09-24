@@ -542,7 +542,11 @@ final class LiveTrimProducer: @unchecked Sendable {
 
     /// Select a bounded decode plan. A contiguous plan always contains source audio after a
     /// removal; an edit that cannot fit with that right handle is rendered as two short handles.
-    private func chunkPlan(for cursor: TimeInterval, editMap: PlaybackEditMap?) -> ChunkPlan {
+    /// Every returned end/rightEnd is pushed past `editMap.renderEnd` so a chunk seam never lands
+    /// inside a (possibly later) edit — landing inside one clips it with no audio left to
+    /// crossfade against, which is the hard-cut bug this guards against.
+    private func chunkPlan(for cursor: TimeInterval, editMap: PlaybackEditMap?,
+                           hasScheduledAudio: Bool) -> ChunkPlan {
         let preferredEnd = decodeWindows.first(where: { cursor >= $0.start && cursor < $0.end })?.end
             ?? decodeWindows.last(where: { cursor >= $0.start })?.end
             ?? min(cursor + chunkSeconds, sourceDuration)
@@ -555,15 +559,22 @@ final class LiveTrimProducer: @unchecked Sendable {
             return .contiguous(end: cappedEnd, preferredEnd: preferredEnd)
         }
 
-        // A session may deliberately begin in a removed interval. There is no outgoing audio to
-        // splice in that case, so the producer advances the source cursor without scheduling PCM.
         guard edit.start > cursor else {
-            return .contiguous(end: cappedEnd, preferredEnd: preferredEnd)
+            // A fresh session may begin in a removed interval: nothing has played, so the skip in
+            // `produceOneChunk` is silent. An edit that arrived over already-scheduled audio has no
+            // outgoing handle left to fade, so play the rest of it rather than butt-join past it.
+            guard !skipsContainingEdit(edit, hasScheduledAudio: hasScheduledAudio) else {
+                return .contiguous(end: cappedEnd, preferredEnd: preferredEnd)
+            }
+            return .contiguous(end: min(cappedEnd, edit.end), preferredEnd: preferredEnd)
         }
 
-        let contiguousEnd = min(edit.end + spliceHandleSeconds, sourceDuration)
+        let contiguousEnd = editMap.renderEnd(
+            from: cursor, preferredEnd: max(cappedEnd, min(edit.end + spliceHandleSeconds, sourceDuration)),
+            sourceEnd: sourceDuration
+        )
         if contiguousEnd <= cursor + maxDecodeSeconds {
-            return .contiguous(end: max(cappedEnd, contiguousEnd), preferredEnd: preferredEnd)
+            return .contiguous(end: contiguousEnd, preferredEnd: preferredEnd)
         }
 
         let leftStart = max(cursor, edit.start - spliceHandleSeconds)
@@ -571,11 +582,20 @@ final class LiveTrimProducer: @unchecked Sendable {
             return .contiguous(end: leftStart, preferredEnd: preferredEnd)
         }
 
-        let rightEnd = min(edit.end + spliceHandleSeconds, sourceDuration)
+        let rightEnd = editMap.renderEnd(
+            from: edit.end, preferredEnd: min(edit.end + spliceHandleSeconds, sourceDuration),
+            sourceEnd: sourceDuration
+        )
         guard rightEnd > edit.end else {
             return .contiguous(end: min(edit.start, cappedEnd), preferredEnd: preferredEnd)
         }
         return .boundedSplice(edit: edit, rightEnd: rightEnd, preferredEnd: preferredEnd)
+    }
+
+    /// Whether a chunk starting inside `edit` may skip straight to its end. Only safe when no audio
+    /// precedes the seam in this session, or when nothing follows it.
+    private func skipsContainingEdit(_ edit: AudioEdit, hasScheduledAudio: Bool) -> Bool {
+        !hasScheduledAudio || edit.end >= sourceDuration
     }
 
     private func produceOneChunk(generation gen: Int, lowAhead: Bool) {
@@ -589,6 +609,7 @@ final class LiveTrimProducer: @unchecked Sendable {
         let floor = globalFloorDb
         let speech = globalSpeechDb
         let editMap = precomputedEditMap
+        let hasScheduledAudio = scheduledContent > 0
         lock.unlock()
 
         guard live else { return }
@@ -596,7 +617,8 @@ final class LiveTrimProducer: @unchecked Sendable {
             lock.lock(); finishedDecoding = true; lock.unlock()
             return
         }
-        let plan = chunkPlan(for: start, editMap: trimming ? editMap : nil)
+        let plan = chunkPlan(for: start, editMap: trimming ? editMap : nil,
+                             hasScheduledAudio: hasScheduledAudio)
         if case let .boundedSplice(edit, rightEnd, preferredEnd) = plan {
             produceBoundedSplice(generation: gen, start: start, edit: edit, rightEnd: rightEnd,
                                  preferredEnd: preferredEnd, settings: tierSettings, lowAhead: lowAhead)
@@ -606,7 +628,8 @@ final class LiveTrimProducer: @unchecked Sendable {
         let seamExtension = max(0, end - preferredEnd)
 
         if trimming, let editMap,
-           let containingEdit = editMap.edits.first(where: { $0.start <= start && $0.end > start }) {
+           let containingEdit = editMap.edits.first(where: { $0.start <= start && $0.end > start }),
+           skipsContainingEdit(containingEdit, hasScheduledAudio: hasScheduledAudio) {
             let skipEnd = min(containingEdit.end, sourceDuration)
             let tailBatch = skipEnd >= sourceDuration
                 ? playbackBatch(input: nil, finish: true)
@@ -658,6 +681,8 @@ final class LiveTrimProducer: @unchecked Sendable {
             let removals: [SilenceRegion]
             if trimming, let editMap {
                 mode = .mapped
+                // An edit this chunk starts inside is being played through (see `chunkPlan`).
+                let editMap = PlaybackEditMap(edits: editMap.edits.filter { $0.start >= start })
                 candidateEdits = editMap.edits.compactMap { edit in
                     let overlapStart = max(start, edit.start)
                     let overlapEnd = min(end, edit.end)

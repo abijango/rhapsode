@@ -84,4 +84,17 @@ struct SemanticEditPlannerTests {
 
         #expect(map.renderEnd(from: 0, preferredEnd: 12, sourceEnd: 30) == 13.5)
     }
+
+    @Test("render boundary chains past a second edit reached by extending past the first")
+    func movesRenderBoundaryPastChainedEdit() {
+        // Landing inside the first edit and extending to its end can land inside a second edit
+        // that starts before the first one's end — the boundary must keep moving until it clears
+        // every edit, not stop after a single hop (the live producer's chunk-seam bug).
+        let map = PlaybackEditMap(edits: [
+            AudioEdit(start: 10, end: 11, kind: .compressPause),
+            AudioEdit(start: 10.5, end: 12, kind: .removeMusic)
+        ])
+
+        #expect(map.renderEnd(from: 0, preferredEnd: 10.2, sourceEnd: 30) == 12)
+    }
 }

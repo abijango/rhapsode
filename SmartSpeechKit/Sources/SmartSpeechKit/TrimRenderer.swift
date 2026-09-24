@@ -108,6 +108,79 @@ public struct TrimRenderer {
         try renderMapped(buffer: buffer, regions: regions).buffer
     }
 
+    /// Render exact chunk-local removal intervals. Unlike `renderMapped(regions:)`, these regions
+    /// have already been planned in source time and must not have silence policy applied again.
+    public func renderMappedRemoving(buffer: AVAudioPCMBuffer,
+                                     removals: [SilenceRegion]) throws -> RenderOutput {
+        var exactSettings = settings
+        exactSettings.minSilenceDuration = 0
+        exactSettings.minKeptSilence = 0
+        exactSettings.residualSlope = 0
+        return try TrimRenderer(settings: exactSettings)
+            .renderMapped(buffer: buffer, regions: removals)
+    }
+
+    /// Splice two separately decoded kept handles without decoding the source interval between
+    /// them. Segment source coordinates are virtual: left starts at zero, one removed frame
+    /// follows it, then right begins. The caller translates that virtual gap to its source-time
+    /// removal before recording its timeline map.
+    public func renderMappedSplice(left: AVAudioPCMBuffer,
+                                   right: AVAudioPCMBuffer) throws -> RenderOutput {
+        let leftFrames = Int(left.frameLength)
+        let rightFrames = Int(right.frameLength)
+        guard leftFrames > 0, rightFrames > 0,
+              left.format.sampleRate == right.format.sampleRate,
+              left.format.channelCount == right.format.channelCount,
+              let leftData = left.floatChannelData,
+              let rightData = right.floatChannelData else {
+            throw AudioIOError.allocationFailed
+        }
+
+        let channelCount = Int(left.format.channelCount)
+        let crossfadeFrames = max(1, Int((settings.crossfadeMs / 1000.0
+                                          * left.format.sampleRate).rounded()))
+        let crossfade = min(crossfadeFrames, leftFrames, rightFrames)
+        let outputFrames = leftFrames + rightFrames - crossfade
+        guard let output = AVAudioPCMBuffer(
+            pcmFormat: left.format,
+            frameCapacity: AVAudioFrameCount(outputFrames)
+        ), let outputData = output.floatChannelData else {
+            throw AudioIOError.allocationFailed
+        }
+        output.frameLength = AVAudioFrameCount(outputFrames)
+        let gains = Self.equalPowerLUT(length: crossfade)
+        for channel in 0..<channelCount {
+            outputData[channel].update(from: leftData[channel], count: leftFrames)
+            for frame in 0..<crossfade {
+                let gain = gains[frame]
+                let outputIndex = leftFrames - crossfade + frame
+                let mixed = outputData[channel][outputIndex] * gain.out
+                    + rightData[channel][frame] * gain.incoming
+                outputData[channel][outputIndex] = min(1, max(-1, mixed))
+            }
+            if rightFrames > crossfade {
+                outputData[channel].advanced(by: leftFrames)
+                    .update(from: rightData[channel].advanced(by: crossfade),
+                            count: rightFrames - crossfade)
+            }
+        }
+
+        let virtualRightStart = leftFrames + 1
+        var segments = [
+            RenderSegment(sourceStart: 0, sourceEnd: leftFrames,
+                          trimmedStart: 0, trimmedEnd: leftFrames)
+        ]
+        if rightFrames > crossfade {
+            segments.append(
+                RenderSegment(sourceStart: virtualRightStart + crossfade,
+                              sourceEnd: virtualRightStart + rightFrames,
+                              trimmedStart: leftFrames,
+                              trimmedEnd: outputFrames)
+            )
+        }
+        return RenderOutput(buffer: output, segments: segments)
+    }
+
     /// As `render`, but also returns the realized source↔trimmed segment map (WP3). The audio
     /// path is byte-for-byte identical to `render`; the segments are pure bookkeeping captured
     /// alongside, anchored to the actual cumulative output so the map cannot drift.
@@ -184,7 +257,10 @@ public struct TrimRenderer {
                     let (gOut, gIn) = lut[k]
                     let outIdx = writePos - cf + k
                     for ch in 0..<channelCount {
-                        dest[ch][outIdx] = dest[ch][outIdx] * gOut + source[ch][starts[i] + k] * gIn
+                        let mixed = dest[ch][outIdx] * gOut + source[ch][starts[i] + k] * gIn
+                        // Equal-power gains can exceed full scale for correlated signals. Saturate
+                        // only the splice sample so a join cannot introduce digital clipping.
+                        dest[ch][outIdx] = min(1, max(-1, mixed))
                     }
                 }
             }

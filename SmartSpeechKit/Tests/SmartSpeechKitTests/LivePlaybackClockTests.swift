@@ -41,4 +41,12 @@ struct LivePlaybackClockTests {
         )
         #expect(rejected == 24)
     }
+
+    @Test("A backwards node clock never moves the session playhead backwards")
+    func backwardsClock() {
+        let played = LivePlaybackClock.sessionPlayed(
+            rawSeconds: 8, scheduledOutput: 24, lastGood: 10
+        )
+        #expect(played == 10)
+    }
 }

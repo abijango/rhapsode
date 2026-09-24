@@ -104,4 +104,30 @@ struct TrimRendererTests {
         #expect(rendered.frameLength == buffer.frameLength)
         #expect(PCM.channel(rendered) == samples)
     }
+
+    @Test("exact removals are not shortened by silence policy")
+    func exactRemoval() throws {
+        let samples = PCM.tone(seconds: 1, sampleRate: sampleRate)
+            + PCM.silence(seconds: 1, sampleRate: sampleRate)
+            + PCM.tone(seconds: 1, sampleRate: sampleRate)
+        let output = try renderer.renderMappedRemoving(
+            buffer: PCM.buffer(samples, sampleRate: sampleRate),
+            removals: [SilenceRegion(start: 1.25, end: 1.75)]
+        )
+
+        let crossfadeFrames = Int((SmartSpeechSettings().crossfadeMs / 1000 * sampleRate).rounded())
+        #expect(Int(output.buffer.frameLength) == samples.count - Int(0.5 * sampleRate) - crossfadeFrames)
+    }
+
+    @Test("crossfades cannot exceed full scale")
+    func splicePeakProtection() throws {
+        let loud = [Float](repeating: 0.95, count: Int(sampleRate))
+        let gap = PCM.silence(seconds: 0.8, sampleRate: sampleRate)
+        let output = try renderer.render(
+            buffer: PCM.buffer(loud + gap + loud, sampleRate: sampleRate),
+            regions: [SilenceRegion(start: 1, end: 1.8)]
+        )
+
+        #expect(PCM.channel(output).allSatisfy { abs($0) <= 1 })
+    }
 }

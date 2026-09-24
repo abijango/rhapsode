@@ -23,6 +23,7 @@ public enum LivePlaybackClock {
         let fallback = min(max(0, lastGood), scheduled)
         guard let raw = rawSeconds, raw.isFinite, raw >= 0 else { return fallback }
         if raw > scheduled + scheduledSlack { return fallback }
+        if raw < fallback { return fallback }
         return raw
     }
 }

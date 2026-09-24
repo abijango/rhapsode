@@ -88,15 +88,20 @@ struct DropboxProgressSync: ProgressSync {
 
     func pushDeviceStats(_ stats: DeviceStatsRecord) async throws {
         let path = Self.deviceStatsPath(deviceId: stats.deviceId)
-        if let data = try? await source.readFile(at: path),
-           let existing = try? PlaybackProgress.decoder.decode(DeviceStatsRecord.self, from: data),
-           existing.updatedAt > stats.updatedAt {
-            return
+        var mergedStats = stats
+        if let data = try await source.readFile(at: path),
+           let existing = try? PlaybackProgress.decoder.decode(DeviceStatsRecord.self, from: data) {
+            let speedSavedSeconds = max(existing.speedSavedSeconds, stats.speedSavedSeconds)
+            if existing.updatedAt > stats.updatedAt {
+                guard speedSavedSeconds > existing.speedSavedSeconds else { return }
+                mergedStats = existing
+            }
+            mergedStats.speedSavedSeconds = speedSavedSeconds
         }
         try await source.ensureFolderExists(Self.folder)
         try await source.ensureFolderExists("\(Self.folder)/devices")
         try await source.ensureFolderExists("\(Self.folder)/devices/\(stats.deviceId)")
-        let data = try PlaybackProgress.encoder.encode(stats)
+        let data = try PlaybackProgress.encoder.encode(mergedStats)
         try await source.writeFile(data, to: path)
     }
 
@@ -105,31 +110,47 @@ struct DropboxProgressSync: ProgressSync {
         do {
             devices = try await source.listFolder("\(Self.folder)/devices")
         } catch {
-            return []
+            if case LibrarySourceError.network(let detail) = error,
+               detail.contains("path/not_found") { return [] }
+            throw error
         }
         var result: [DeviceStatsRecord] = []
         for entry in devices where entry.isFolder {
-            if let data = try? await source.readFile(at: "\(entry.path)/stats.json"),
-               let record = try? PlaybackProgress.decoder.decode(DeviceStatsRecord.self, from: data) {
-                result.append(record)
+            guard let data = try await source.readFile(at: "\(entry.path)/stats.json") else {
+                throw LibrarySourceError.notFound(path: "\(entry.path)/stats.json")
             }
+            result.append(try PlaybackProgress.decoder.decode(DeviceStatsRecord.self, from: data))
         }
         return result
     }
 
     func pushBookContribution(_ contribution: DeviceBookContribution) async throws {
         let path = Self.bookContributionPath(deviceId: contribution.deviceId, key: contribution.key)
-        if let data = try? await source.readFile(at: path),
-           let existing = try? PlaybackProgress.decoder.decode(DeviceBookContribution.self, from: data),
-           existing.updatedAt > contribution.updatedAt {
-            return
+        var mergedContribution = contribution
+        if let data = try await source.readFile(at: path),
+           let existing = try? PlaybackProgress.decoder.decode(DeviceBookContribution.self, from: data) {
+            let speedSavedSeconds = Self.maxOptional(existing.speedSavedSeconds, contribution.speedSavedSeconds)
+            if existing.updatedAt > contribution.updatedAt {
+                guard speedSavedSeconds != existing.speedSavedSeconds else { return }
+                mergedContribution = existing
+            }
+            mergedContribution.speedSavedSeconds = speedSavedSeconds
         }
         try await source.ensureFolderExists(Self.folder)
         try await source.ensureFolderExists("\(Self.folder)/devices")
         try await source.ensureFolderExists("\(Self.folder)/devices/\(contribution.deviceId)")
         try await source.ensureFolderExists("\(Self.folder)/devices/\(contribution.deviceId)/books")
-        let data = try PlaybackProgress.encoder.encode(contribution)
+        let data = try PlaybackProgress.encoder.encode(mergedContribution)
         try await source.writeFile(data, to: path)
+    }
+
+    private static func maxOptional(_ lhs: Double?, _ rhs: Double?) -> Double? {
+        switch (lhs, rhs) {
+        case let (lhs?, rhs?): Swift.max(lhs, rhs)
+        case let (lhs?, nil): lhs
+        case let (nil, rhs?): rhs
+        case (nil, nil): nil
+        }
     }
 
     func pullAllBookContributions() async throws -> [DeviceBookContribution] {

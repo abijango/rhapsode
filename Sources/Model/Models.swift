@@ -75,6 +75,10 @@ final class Audiobook {
     var myListenedSeconds: Double?
     /// This device's contribution to `smartSpeechSavedSeconds`.
     var mySmartSpeechSavedSeconds: Double?
+    /// Cumulative playback-speed time saved for this book. Separate from SmartSpeech savings.
+    var playbackSpeedSavedSeconds: Double?
+    /// This device's contribution to `playbackSpeedSavedSeconds`.
+    var myPlaybackSpeedSavedSeconds: Double?
     /// Narrator(s), when the file's metadata names them. Secondary matching signal for
     /// Hardcover — the primary one is runtime. Nil on everything imported before this existed.
     var narrator: String?
@@ -126,6 +130,8 @@ final class Audiobook {
         listenedSeconds: Double? = nil,
         myListenedSeconds: Double? = nil,
         mySmartSpeechSavedSeconds: Double? = nil,
+        playbackSpeedSavedSeconds: Double? = nil,
+        myPlaybackSpeedSavedSeconds: Double? = nil,
         narrator: String? = nil,
         collections: [LibraryCollection] = []
     ) {
@@ -146,6 +152,8 @@ final class Audiobook {
         self.listenedSeconds = listenedSeconds
         self.myListenedSeconds = myListenedSeconds
         self.mySmartSpeechSavedSeconds = mySmartSpeechSavedSeconds
+        self.playbackSpeedSavedSeconds = playbackSpeedSavedSeconds
+        self.myPlaybackSpeedSavedSeconds = myPlaybackSpeedSavedSeconds
         self.narrator = narrator
         self.collections = collections
     }

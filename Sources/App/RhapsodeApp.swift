@@ -86,7 +86,11 @@ struct RhapsodeApp: App {
         // player goes into @State, same reasoning as the callback above.
         let hardcoverService = HardcoverSyncService()
         hardcoverService.attach(context: container.mainContext)
-        player.onPlaybackStopped = { [hardcoverService] book, progress, endedNaturally, isSwitch in
+        player.onPlaybackStopped = { [syncManager, hardcoverService] book, progress, endedNaturally, isSwitch in
+            Task {
+                await syncManager.pushAudiobookProgress(sourcePath: book.sourcePath)
+                await syncManager.pushSmartSpeechStats()
+            }
             hardcoverService.playbackStopped(book, progress: progress,
                                              endedNaturally: endedNaturally,
                                              isBookSwitch: isSwitch)
@@ -244,4 +248,3 @@ struct RhapsodeApp: App {
     }
     #endif
 }
-

@@ -13,6 +13,12 @@ enum SmartSpeechResolved: Equatable {
 let smartSpeechOffValue = "off"
 
 extension Audiobook {
+    func addPlaybackSpeedSaved(_ seconds: TimeInterval) {
+        guard seconds.isFinite, seconds > 0 else { return }
+        myPlaybackSpeedSavedSeconds = (myPlaybackSpeedSavedSeconds ?? 0) + seconds
+        playbackSpeedSavedSeconds = (playbackSpeedSavedSeconds ?? 0) + seconds
+    }
+
     /// The tier this book *would* use if enabled — the per-book override if it names a profile,
     /// otherwise the global default. Used for display ("Use Global (More)") and as the render
     /// preset. Note: an "off" override has no tier of its own, so this falls back to the default.

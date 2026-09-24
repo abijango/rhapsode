@@ -54,7 +54,68 @@ struct DeviceStatsRecord: Codable, Sendable, Equatable {
     var deviceId: String
     var savedSeconds: TimeInterval
     var playedSeconds: TimeInterval
+    var speedSavedSeconds: TimeInterval
     var updatedAt: Date
+
+    init(deviceId: String, savedSeconds: TimeInterval, playedSeconds: TimeInterval,
+         speedSavedSeconds: TimeInterval = 0, updatedAt: Date) {
+        self.deviceId = deviceId
+        self.savedSeconds = savedSeconds
+        self.playedSeconds = playedSeconds
+        self.speedSavedSeconds = speedSavedSeconds
+        self.updatedAt = updatedAt
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case deviceId
+        case savedSeconds
+        case playedSeconds
+        case speedSavedSeconds
+        case updatedAt
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        deviceId = try container.decode(String.self, forKey: .deviceId)
+        savedSeconds = try container.decode(TimeInterval.self, forKey: .savedSeconds)
+        playedSeconds = try container.decode(TimeInterval.self, forKey: .playedSeconds)
+        speedSavedSeconds = try container.decodeIfPresent(TimeInterval.self, forKey: .speedSavedSeconds) ?? 0
+        updatedAt = try container.decode(Date.self, forKey: .updatedAt)
+    }
+}
+
+struct DeviceStatsTotals: Equatable {
+    let savedSeconds: TimeInterval
+    let playedSeconds: TimeInterval
+    let speedSavedSeconds: TimeInterval
+    let mySavedSeconds: TimeInterval
+    let myPlayedSeconds: TimeInterval
+    let mySpeedSavedSeconds: TimeInterval
+
+    init(records: [DeviceStatsRecord], deviceId: String,
+         mySavedSeconds: TimeInterval, myPlayedSeconds: TimeInterval,
+         mySpeedSavedSeconds: TimeInterval = 0) {
+        var contributions: [String: (saved: TimeInterval, played: TimeInterval, speedSaved: TimeInterval)] = [:]
+        for record in records {
+            let current = contributions[record.deviceId] ?? (0, 0, 0)
+            contributions[record.deviceId] = (
+                max(current.saved, max(0, record.savedSeconds)),
+                max(current.played, max(0, record.playedSeconds)),
+                max(current.speedSaved, max(0, record.speedSavedSeconds))
+            )
+        }
+
+        let remoteMine = contributions[deviceId] ?? (0, 0, 0)
+        self.mySavedSeconds = max(max(0, mySavedSeconds), remoteMine.saved)
+        self.myPlayedSeconds = max(max(0, myPlayedSeconds), remoteMine.played)
+        self.mySpeedSavedSeconds = max(max(0, mySpeedSavedSeconds), remoteMine.speedSaved)
+        self.savedSeconds = contributions.filter { $0.key != deviceId }
+            .values.reduce(self.mySavedSeconds) { $0 + $1.saved }
+        self.playedSeconds = contributions.filter { $0.key != deviceId }
+            .values.reduce(self.myPlayedSeconds) { $0 + $1.played }
+        self.speedSavedSeconds = contributions.filter { $0.key != deviceId }
+            .values.reduce(self.mySpeedSavedSeconds) { $0 + $1.speedSaved }
+    }
 }
 
 /// One device's contribution to a single book's listened / saved / reading time.
@@ -64,6 +125,7 @@ struct DeviceBookContribution: Codable, Sendable, Equatable {
     var kind: FolderKind
     var listenedSeconds: Double? = nil
     var savedSeconds: Double? = nil
+    var speedSavedSeconds: Double? = nil
     var readingSeconds: Double? = nil
     var updatedAt: Date
 }

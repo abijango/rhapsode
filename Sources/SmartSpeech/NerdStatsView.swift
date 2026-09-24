@@ -2,13 +2,13 @@ import SwiftData
 import SwiftUI
 import UIKit
 
-/// "Nerd Stats" — audiobook "Reclaimed"
-/// stats (silence trimmed) plus an e-book "Reading" section (foreground time + progress). Ink & Mint
+/// "Nerd Stats" — audiobook time-saved stats (SmartSpeech and playback speed) plus an e-book
+/// "Reading" section (foreground time + progress). Ink & Mint
 /// for audiobooks; warm sepia accent for e-books. Hanken Grotesk display + IBM Plex Mono data.
 ///
-/// "Listened"/"played" = trimmed CONTENT seconds actually heard (rate-independent); "saved" = silence
-/// collapsed while trimming was active. Lifetime totals live in `SmartSpeechStats` (UserDefaults), polled
-/// ~1×/s so the hero ticks up live; the per-book rows come from SwiftData.
+/// "Listened"/"played" = trimmed CONTENT seconds actually heard (rate-independent); "saved" combines
+/// SmartSpeech silence savings and playback-speed savings. Lifetime totals live in `SmartSpeechStats`
+/// (UserDefaults), polled ~1×/s so the hero ticks up live; the per-book rows come from SwiftData.
 struct NerdStatsView: View {
     var embedsNavigationStack = true
 
@@ -20,14 +20,18 @@ struct NerdStatsView: View {
 
     @State private var totalPlayed: TimeInterval = 0
     @State private var totalSaved: TimeInterval = 0
+    @State private var totalSpeedSaved: TimeInterval = 0
     @State private var showRecalcConfirm = false
     @State private var noticeText: String?
 
-    /// Books that have reclaimed any silence, most-reclaimed first (drives the "Most reclaimed" list).
-    private var reclaimedBooks: [Audiobook] {
+    /// Books with recorded savings, highest combined total first.
+    private var booksWithSavings: [Audiobook] {
         books
-            .filter { ($0.smartSpeechSavedSeconds ?? 0) > 0 }
-            .sorted { ($0.smartSpeechSavedSeconds ?? 0) > ($1.smartSpeechSavedSeconds ?? 0) }
+            .filter { ($0.smartSpeechSavedSeconds ?? 0) + ($0.playbackSpeedSavedSeconds ?? 0) > 0 }
+            .sorted {
+                ($0.smartSpeechSavedSeconds ?? 0) + ($0.playbackSpeedSavedSeconds ?? 0)
+                    > ($1.smartSpeechSavedSeconds ?? 0) + ($1.playbackSpeedSavedSeconds ?? 0)
+            }
     }
     /// E-books with any recorded reading time, most-read first.
     private var readEbooks: [Book] {
@@ -42,11 +46,11 @@ struct NerdStatsView: View {
     private var inProgressCount: Int {
         ebooks.filter { ($0.readingSeconds ?? 0) > 0 && $0.finishedAt == nil }.count
     }
-    private var hasAudiobookStats: Bool { !reclaimedBooks.isEmpty || totalSaved > 0 }
+    private var hasAudiobookStats: Bool { !booksWithSavings.isEmpty || totalSaved + totalSpeedSaved > 0 }
     private var hasEbookStats: Bool { totalReading > 0 }
-    private var maxSaved: Double { reclaimedBooks.first?.smartSpeechSavedSeconds ?? 1 }
-    private var overallPct: Int {
-        totalPlayed > 0 ? Int((totalSaved / totalPlayed * 100).rounded()) : 0
+    private var maxSaved: Double {
+        guard let book = booksWithSavings.first else { return 1 }
+        return (book.smartSpeechSavedSeconds ?? 0) + (book.playbackSpeedSavedSeconds ?? 0)
     }
 
     var body: some View {
@@ -79,18 +83,18 @@ struct NerdStatsView: View {
                         Label("Back up stats now", systemImage: "icloud.and.arrow.up")
                     }
                     Button { showRecalcConfirm = true } label: {
-                        Label("Recalculate from library", systemImage: "arrow.triangle.2.circlepath")
+                        Label("Sync totals from devices", systemImage: "arrow.triangle.2.circlepath")
                     }
                 } label: {
                     Image(systemName: "ellipsis.circle").tint(DS.Palette.Reclaim.mint)
                 }
             }
         }
-        .confirmationDialog("Recalculate lifetime stats?", isPresented: $showRecalcConfirm, titleVisibility: .visible) {
-            Button("Recalculate", role: .destructive) { recalcStats() }
+        .confirmationDialog("Sync lifetime stats?", isPresented: $showRecalcConfirm, titleVisibility: .visible) {
+            Button("Sync totals") { recalcStats() }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Sets the lifetime reclaimed/listened totals to the sum across your current books, then backs them up. Use this if the total looks wrong.")
+            Text("Combines this device's live totals with every device's backed-up totals. Your current library does not limit lifetime stats.")
         }
         .alert("Stats", isPresented: Binding(get: { noticeText != nil }, set: { if !$0 { noticeText = nil } })) {
             Button("OK", role: .cancel) {}
@@ -100,24 +104,22 @@ struct NerdStatsView: View {
             while !Task.isCancelled {
                 totalPlayed = SmartSpeechStats.totalPlayedSeconds
                 totalSaved = SmartSpeechStats.totalSavedSeconds
+                totalSpeedSaved = SmartSpeechStats.totalSpeedSavedSeconds
                 try? await Task.sleep(for: .seconds(1))
             }
         }
     }
 
-    /// Rebuild the lifetime totals from the per-book values, then back them up. Fixes a lifetime
-    /// counter that has drifted from the library.
+    /// Refresh lifetime totals without discarding remote devices or books removed locally.
     private func recalcStats() {
-        let saved = books.reduce(0.0) { $0 + ($1.mySmartSpeechSavedSeconds ?? 0) }
-        let played = books.reduce(0.0) { $0 + ($1.myListenedSeconds ?? 0) }
-        SmartSpeechStats.overwrite(savedSeconds: saved, playedSeconds: played)
         Task {
-            await sync.pushSmartSpeechStats()
-            await sync.pullAndMergeProgress()
+            let succeeded = await sync.refreshSmartSpeechStats()
             totalSaved = SmartSpeechStats.totalSavedSeconds
             totalPlayed = SmartSpeechStats.totalPlayedSeconds
+            totalSpeedSaved = SmartSpeechStats.totalSpeedSavedSeconds
+            noticeText = succeeded ? "Totals synced across devices." :
+                "Couldn't sync totals. Your local totals were kept; check your connection and try again."
         }
-        noticeText = "Recalculated this device and backed up."
     }
 
     /// Force a backup of the lifetime stats to the Dropbox app folder (they also back up
@@ -141,18 +143,18 @@ struct NerdStatsView: View {
         LazyVStack(alignment: .leading, spacing: 0) {
             if hasAudiobookStats {
                 audiobookHero
-                Text("AUDIOBOOKS · SMARTSPEECH")
+                Text("AUDIOBOOKS · TIME SAVED")
                     .font(ReceiptFont.mono(11)).kerning(2)
                     .foregroundStyle(DS.Palette.Reclaim.muted)
                     .padding(.top, DS.Spacing.xl)
                     .padding(.bottom, DS.Spacing.sm)
-                if reclaimedBooks.isEmpty {
-                    Text("No books in your library have recorded savings yet — the lifetime total above may include books no longer here. Per-book rows appear as you listen.")
+                if booksWithSavings.isEmpty {
+                    Text("No books in your library have recorded time savings yet — the lifetime total above may include books no longer here. Per-book rows appear as you listen.")
                         .font(ReceiptFont.mono(12))
                         .foregroundStyle(DS.Palette.Reclaim.muted)
                         .fixedSize(horizontal: false, vertical: true)
                 } else {
-                    ForEach(reclaimedBooks) { book in audiobookRow(book) }
+                    ForEach(booksWithSavings) { book in audiobookRow(book) }
                 }
             }
             if hasEbookStats {
@@ -177,27 +179,30 @@ struct NerdStatsView: View {
 
     private var audiobookHero: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text(reclaimedBooks.isEmpty ? "LIFETIME"
-                 : "LIFETIME · \(reclaimedBooks.count) BOOK\(reclaimedBooks.count == 1 ? "" : "S")")
+            Text(booksWithSavings.isEmpty ? "LIFETIME"
+                 : "LIFETIME · \(booksWithSavings.count) BOOK\(booksWithSavings.count == 1 ? "" : "S")")
                 .font(ReceiptFont.mono(11)).kerning(2)
                 .foregroundStyle(DS.Palette.Reclaim.muted)
                 .padding(.bottom, DS.Spacing.md)
-            Text("You’ve reclaimed")
+            Text("Total time saved")
                 .font(BrandFont.display(17, .medium))
                 .foregroundStyle(DS.Palette.Reclaim.muted)
-            Text(Self.hms(totalSaved))
+            Text(Self.hms(totalSaved + totalSpeedSaved))
                 .font(BrandFont.display(58, .heavy))
                 .foregroundStyle(DS.Palette.Reclaim.mintBright)
                 .minimumScaleFactor(0.5)
                 .lineLimit(1)
                 .padding(.top, 2)
-            (Text("of silence from ")
-                + Text(Self.hoursListened(totalPlayed)).foregroundColor(DS.Palette.Reclaim.text)
-                + Text(" listened · ")
-                + Text("\(overallPct)% back").foregroundColor(DS.Palette.Reclaim.text))
+            Text("SmartSpeech · \(Self.hms(totalSaved))")
                 .font(ReceiptFont.mono(12))
                 .foregroundStyle(DS.Palette.Reclaim.muted)
                 .padding(.top, DS.Spacing.sm)
+            Text("Speed · \(Self.hms(totalSpeedSaved))")
+                .font(ReceiptFont.mono(12))
+                .foregroundStyle(DS.Palette.Reclaim.muted)
+            Text("\(Self.hoursListened(totalPlayed)) listened")
+                .font(ReceiptFont.mono(12))
+                .foregroundStyle(DS.Palette.Reclaim.muted)
         }
     }
 
@@ -227,8 +232,9 @@ struct NerdStatsView: View {
 
     private func audiobookRow(_ book: Audiobook) -> some View {
         let played = book.listenedSeconds ?? 0
-        let saved = book.smartSpeechSavedSeconds ?? 0
-        let pct = played > 0 ? Int((saved / played * 100).rounded()) : 0
+        let smartSpeechSaved = book.smartSpeechSavedSeconds ?? 0
+        let speedSaved = book.playbackSpeedSavedSeconds ?? 0
+        let saved = smartSpeechSaved + speedSaved
         return HStack(alignment: .center, spacing: 13) {
             NerdStatsCoverThumb(coverPath: book.coverPath, placeholderIcon: "headphones")
             VStack(alignment: .leading, spacing: 8) {
@@ -241,12 +247,17 @@ struct NerdStatsView: View {
                     .font(ReceiptFont.mono(11))
                     .foregroundStyle(DS.Palette.Reclaim.muted)
             }
-            VStack(alignment: .trailing, spacing: 6) {
-                Text(Self.hms(saved))
+            VStack(alignment: .trailing, spacing: 3) {
+                Text("Total · \(Self.hms(saved))")
                     .font(ReceiptFont.mono(15, .bold))
                     .foregroundStyle(DS.Palette.Reclaim.mintBright)
-                Text("\(pct)% saved")
-                    .font(ReceiptFont.mono(11))
+                Text("SmartSpeech · \(Self.hms(smartSpeechSaved))")
+                    .font(ReceiptFont.mono(9))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.75)
+                    .foregroundStyle(DS.Palette.Reclaim.muted)
+                Text("Speed · \(Self.hms(speedSaved))")
+                    .font(ReceiptFont.mono(9))
                     .foregroundStyle(DS.Palette.Reclaim.muted)
             }
         }

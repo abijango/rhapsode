@@ -15,6 +15,8 @@ enum SmartSpeechStats {
         static let updatedAt = "cadence.statsUpdatedAt"
         static let mySavedSeconds = "rhapsode.stats.mySavedSeconds"
         static let myPlayedSeconds = "rhapsode.stats.myPlayedSeconds"
+        static let totalSpeedSavedSeconds = "rhapsode.stats.totalSpeedSavedSeconds"
+        static let mySpeedSavedSeconds = "rhapsode.stats.mySpeedSavedSeconds"
         static let myUpdatedAt = "rhapsode.stats.myUpdatedAt"
         static let migratedMine = "rhapsode.stats.migratedMine.v1"
     }
@@ -46,6 +48,15 @@ enum SmartSpeechStats {
         }
     }
 
+    /// Total lifetime seconds saved by playback speed, independent of SmartSpeech savings.
+    static var totalSpeedSavedSeconds: TimeInterval {
+        get {
+            let raw = UserDefaults.standard.double(forKey: Key.totalSpeedSavedSeconds)
+            return raw < 0 ? 0 : raw
+        }
+        set { UserDefaults.standard.set(newValue < 0 ? 0 : newValue, forKey: Key.totalSpeedSavedSeconds) }
+    }
+
     /// When the stats last changed locally (or were applied from a remote backup). Drives the
     /// last-writer-wins backup in Dropbox. nil = never recorded.
     static var updatedAt: Date? {
@@ -73,12 +84,25 @@ enum SmartSpeechStats {
         set { UserDefaults.standard.set(newValue < 0 ? 0 : newValue, forKey: Key.myPlayedSeconds) }
     }
 
+    /// This device's lifetime seconds saved by playback speed.
+    static var mySpeedSavedSeconds: TimeInterval {
+        get {
+            migrateMineIfNeeded()
+            let raw = UserDefaults.standard.double(forKey: Key.mySpeedSavedSeconds)
+            return raw < 0 ? 0 : raw
+        }
+        set { UserDefaults.standard.set(newValue < 0 ? 0 : newValue, forKey: Key.mySpeedSavedSeconds) }
+    }
+
     static var myUpdatedAt: Date? {
         get { UserDefaults.standard.object(forKey: Key.myUpdatedAt) as? Date }
         set { UserDefaults.standard.set(newValue, forKey: Key.myUpdatedAt) }
     }
 
     static func migrateMineIfNeeded() {
+        if UserDefaults.standard.object(forKey: Key.mySpeedSavedSeconds) == nil {
+            UserDefaults.standard.set(0.0, forKey: Key.mySpeedSavedSeconds)
+        }
         guard !UserDefaults.standard.bool(forKey: Key.migratedMine) else { return }
         UserDefaults.standard.set(true, forKey: Key.migratedMine)
         if UserDefaults.standard.object(forKey: Key.myPlayedSeconds) == nil {
@@ -96,6 +120,18 @@ enum SmartSpeechStats {
         migrateMineIfNeeded()
         totalSavedSeconds += clamped
         mySavedSeconds += clamped
+        let now = Date()
+        updatedAt = now
+        myUpdatedAt = now
+    }
+
+    /// Add playback-speed savings without changing the SmartSpeech saved or played counters.
+    static func addSpeedSaved(_ seconds: TimeInterval) {
+        let clamped = seconds < 0 ? 0 : seconds
+        guard clamped > 0 else { return }
+        migrateMineIfNeeded()
+        totalSpeedSavedSeconds += clamped
+        mySpeedSavedSeconds += clamped
         let now = Date()
         updatedAt = now
         myUpdatedAt = now

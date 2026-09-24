@@ -223,6 +223,7 @@ final class SyncManager {
         } else {
             // Never touched (nil stamp + zero position): nothing to sync — pushing a fresh
             // timestamp on a zero position is exactly the clobber we're avoiding.
+            await pushBookContribution(forAudiobook: book)
             return
         }
         // Dropbox stores track index + in-track offset. Rhapsode Server stores
@@ -377,36 +378,51 @@ final class SyncManager {
     }
 
     /// Back up this device's lifetime SmartSpeech contribution.
-    func pushSmartSpeechStats() async {
+    @discardableResult
+    func pushSmartSpeechStats() async -> Bool {
         SmartSpeechStats.migrateMineIfNeeded()
         guard progress.storesRemotely else {
             enqueueOutbox { $0.insertLifetimeStats() }
-            return
+            return false
         }
         let record = DeviceStatsRecord(
             deviceId: ProgressDeviceIdentity.deviceId,
             savedSeconds: SmartSpeechStats.mySavedSeconds,
             playedSeconds: SmartSpeechStats.myPlayedSeconds,
+            speedSavedSeconds: SmartSpeechStats.mySpeedSavedSeconds,
             updatedAt: SmartSpeechStats.myUpdatedAt ?? Date())
         do {
             try await progress.pushDeviceStats(record)
             markProgressSuccess()
+            return true
         } catch {
             Self.log("pushSmartSpeechStats failed: \(error.localizedDescription)")
             enqueueOutbox { $0.insertLifetimeStats() }
             progressLastError = Self.progressSyncErrorMessage(error)
+            return false
         }
     }
 
+    /// Refresh lifetime totals from every device, without replacing this device's live counter
+    /// with the subset of books currently present in the local library.
+    func refreshSmartSpeechStats() async -> Bool {
+        guard progress.storesRemotely else { return false }
+        guard await pullSmartSpeechStats() else { return false }
+        guard await pushSmartSpeechStats() else { return false }
+        return await pullSmartSpeechStats()
+    }
+
     /// Sum every device's lifetime contribution into the displayed totals.
-    private func pullSmartSpeechStats() async {
+    @discardableResult
+    private func pullSmartSpeechStats() async -> Bool {
         SmartSpeechStats.migrateMineIfNeeded()
         let remotes: [DeviceStatsRecord]
         do {
             remotes = try await progress.pullAllDeviceStats()
         } catch {
             Self.log("pullSmartSpeechStats failed: \(error.localizedDescription)")
-            return
+            progressLastError = Self.progressSyncErrorMessage(error)
+            return false
         }
         if remotes.isEmpty, let legacy = try? await progress.pullStats() {
             // Old LWW cadence-stats.json is the same number on every device. Use it
@@ -414,33 +430,27 @@ final class SyncManager {
             SmartSpeechStats.applyDisplayTotals(
                 savedSeconds: max(SmartSpeechStats.totalSavedSeconds, legacy.savedSeconds),
                 playedSeconds: max(SmartSpeechStats.totalPlayedSeconds, legacy.playedSeconds ?? 0))
-            return
+            SmartSpeechStats.totalSpeedSavedSeconds = max(
+                SmartSpeechStats.totalSpeedSavedSeconds, SmartSpeechStats.mySpeedSavedSeconds)
+            return true
         }
-        var saved = 0.0
-        var played = 0.0
-        var sawMine = false
-        for record in remotes {
-            if record.deviceId == ProgressDeviceIdentity.deviceId {
-                sawMine = true
-                let playedMine = max(record.playedSeconds, SmartSpeechStats.myPlayedSeconds)
-                let savedMine = max(record.savedSeconds, SmartSpeechStats.mySavedSeconds)
-                if playedMine > SmartSpeechStats.myPlayedSeconds {
-                    SmartSpeechStats.myPlayedSeconds = playedMine
-                    SmartSpeechStats.mySavedSeconds = savedMine
-                    SmartSpeechStats.myUpdatedAt = record.updatedAt
-                }
-                saved += savedMine
-                played += playedMine
-            } else {
-                saved += record.savedSeconds
-                played += record.playedSeconds
-            }
+        let totals = DeviceStatsTotals(
+            records: remotes, deviceId: ProgressDeviceIdentity.deviceId,
+            mySavedSeconds: SmartSpeechStats.mySavedSeconds,
+            myPlayedSeconds: SmartSpeechStats.myPlayedSeconds,
+            mySpeedSavedSeconds: SmartSpeechStats.mySpeedSavedSeconds)
+        if totals.mySavedSeconds > SmartSpeechStats.mySavedSeconds ||
+            totals.myPlayedSeconds > SmartSpeechStats.myPlayedSeconds ||
+            totals.mySpeedSavedSeconds > SmartSpeechStats.mySpeedSavedSeconds {
+            SmartSpeechStats.mySavedSeconds = totals.mySavedSeconds
+            SmartSpeechStats.myPlayedSeconds = totals.myPlayedSeconds
+            SmartSpeechStats.mySpeedSavedSeconds = totals.mySpeedSavedSeconds
+            SmartSpeechStats.myUpdatedAt = Date()
         }
-        if !sawMine {
-            saved += SmartSpeechStats.mySavedSeconds
-            played += SmartSpeechStats.myPlayedSeconds
-        }
-        SmartSpeechStats.applyDisplayTotals(savedSeconds: saved, playedSeconds: played)
+        SmartSpeechStats.applyDisplayTotals(
+            savedSeconds: totals.savedSeconds, playedSeconds: totals.playedSeconds)
+        SmartSpeechStats.totalSpeedSavedSeconds = totals.speedSavedSeconds
+        return true
     }
 
     // MARK: Cross-device collections sync
@@ -1535,7 +1545,9 @@ final class SyncManager {
             kind: .audiobooks,
             listenedSeconds: book.myListenedSeconds,
             savedSeconds: book.mySmartSpeechSavedSeconds,
-            updatedAt: book.progressUpdatedAt ?? Date())
+            speedSavedSeconds: book.myPlaybackSpeedSavedSeconds ?? book.playbackSpeedSavedSeconds ?? 0,
+            updatedAt: max(book.progressUpdatedAt ?? .distantPast,
+                           SmartSpeechStats.myUpdatedAt ?? Date()))
         do {
             try await progress.pushBookContribution(c)
             markProgressSuccess()
@@ -1581,6 +1593,7 @@ final class SyncManager {
         let mergeContext = ProgressMergeContext.load(from: context, source: source)
         var listenedByKey: [String: (mine: Double, others: Double)] = [:]
         var savedByKey: [String: (mine: Double, others: Double)] = [:]
+        var speedSavedByKey: [String: [String: Double]] = [:]
         var readingByKey: [String: (mine: Double, others: Double)] = [:]
         for c in remotes {
             if let listened = c.listenedSeconds {
@@ -1594,6 +1607,11 @@ final class SyncManager {
                 if c.deviceId == mine { slot.mine = max(slot.mine, saved) }
                 else { slot.others += saved }
                 savedByKey[c.key] = slot
+            }
+            if let speedSaved = c.speedSavedSeconds {
+                var contributions = speedSavedByKey[c.key] ?? [:]
+                contributions[c.deviceId] = max(contributions[c.deviceId] ?? 0, speedSaved)
+                speedSavedByKey[c.key] = contributions
             }
             if let reading = c.readingSeconds {
                 var slot = readingByKey[c.key] ?? (0, 0)
@@ -1619,6 +1637,16 @@ final class SyncManager {
                 remoteMine: slot.mine,
                 others: slot.others)
             book.smartSpeechSavedSeconds = (book.mySmartSpeechSavedSeconds ?? 0) + slot.others
+        }
+        for (key, contributions) in speedSavedByKey {
+            guard let book = mergeContext.audiobook(for: key) else { continue }
+            let others = contributions.filter { $0.key != mine }.values.reduce(0, +)
+            book.myPlaybackSpeedSavedSeconds = Self.seedMine(
+                localMine: book.myPlaybackSpeedSavedSeconds,
+                localTotal: book.playbackSpeedSavedSeconds,
+                remoteMine: contributions[mine] ?? 0,
+                others: others)
+            book.playbackSpeedSavedSeconds = (book.myPlaybackSpeedSavedSeconds ?? 0) + others
         }
         for (key, slot) in readingByKey {
             guard let book = mergeContext.book(for: key) else { continue }

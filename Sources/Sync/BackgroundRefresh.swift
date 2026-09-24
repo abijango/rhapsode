@@ -9,6 +9,7 @@ import SwiftData
 /// `_simulateLaunchForTaskWithIdentifier:` command.
 enum BackgroundRefresh {
     static let taskID = "com.naufalmir.rhapsode.refresh"
+    static let launchQueue = DispatchQueue.main
 
     /// Builds a `SyncManager` for the active library backend. Set via `register` at launch
     /// (e.g. from `RhapsodeApp`) so background refresh uses the same source + progress sync
@@ -34,7 +35,7 @@ enum BackgroundRefresh {
         if let factory {
             Self.makeSyncManager = factory
         }
-        BGTaskScheduler.shared.register(forTaskWithIdentifier: taskID, using: nil) { task in
+        BGTaskScheduler.shared.register(forTaskWithIdentifier: taskID, using: launchQueue) { task in
             guard let refresh = task as? BGAppRefreshTask else {
                 task.setTaskCompleted(success: false)
                 return

@@ -18,6 +18,10 @@ enum SmartSpeechPreferences {
     private enum Key {
         static let enabled = "cadence.enabled"
         static let defaultTier = "cadence.defaultTier"
+        #if PERSONAL_RUBBERBAND
+        static let useRubberBand = "cadence.useRubberBand"
+        static let adaptiveSpeed = "cadence.adaptiveSpeed"
+        #endif
     }
 
     /// Master switch. **Opt-in** — off until the user turns it on, because rendering has a
@@ -32,4 +36,16 @@ enum SmartSpeechPreferences {
         get { SmartSpeechSettings.Preset(rawValue: UserDefaults.standard.string(forKey: Key.defaultTier) ?? "") ?? .default }
         set { UserDefaults.standard.set(newValue.rawValue, forKey: Key.defaultTier) }
     }
+
+    #if PERSONAL_RUBBERBAND
+    static var useRubberBand: Bool {
+        get { UserDefaults.standard.object(forKey: Key.useRubberBand) as? Bool ?? true }
+        set { UserDefaults.standard.set(newValue, forKey: Key.useRubberBand) }
+    }
+
+    static var adaptiveSpeed: Bool {
+        get { UserDefaults.standard.bool(forKey: Key.adaptiveSpeed) }
+        set { UserDefaults.standard.set(newValue, forKey: Key.adaptiveSpeed) }
+    }
+    #endif
 }

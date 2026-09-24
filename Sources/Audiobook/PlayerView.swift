@@ -105,7 +105,11 @@ struct PlayerView: View {
         .accessibilityLabel("Player pages")
     }
 
-    private var savedSeconds: Double { audiobook.smartSpeechSavedSeconds ?? 0 }
+    private var savedSeconds: Double {
+        (audiobook.smartSpeechSavedSeconds ?? 0)
+            + (audiobook.playbackSpeedSavedSeconds ?? 0)
+            + player.pendingTotalSavedSeconds
+    }
 
     private var bottomChrome: some View {
         VStack(spacing: 10) {
@@ -314,19 +318,21 @@ private struct PlayerThisBookPanel: View {
 
     var body: some View {
         let played = audiobook.listenedSeconds ?? 0
-        let saved = audiobook.smartSpeechSavedSeconds ?? 0
-        let pct = played > 0 ? Int((saved / played * 100).rounded()) : 0
+        let smartSpeechSaved = (audiobook.smartSpeechSavedSeconds ?? 0)
+            + player.pendingSmartSpeechSavedSeconds
+        let speedSaved = player.bookPlaybackSpeedSavedSeconds
+        let saved = smartSpeechSaved + speedSaved
         PlayerPanelSurface(side: side) {
             Text("This book").font(BrandFont.display(18, .bold)).foregroundStyle(C.text)
             Text(NerdStatsView.hms(saved)).font(BrandFont.display(30, .heavy))
                 .foregroundStyle(C.mintBright).padding(.top, 8)
-            Text("RECLAIMED · \(pct)%").font(ReceiptFont.mono(10)).kerning(1.5)
+            Text("TIME SAVED").font(ReceiptFont.mono(10)).kerning(1.5)
                 .foregroundStyle(C.muted).padding(.top, 6)
             VStack(spacing: 0) {
                 PlayerKVRow(label: "Listened", value: NerdStatsView.hms(played))
-                PlayerKVRow(label: "Silence saved", value: "−\(NerdStatsView.hms(saved))", color: C.mint)
-                PlayerKVRow(label: "% saved", value: "\(pct)%")
-                PlayerKVRow(label: "Speed", value: String(format: "%g×", player.rate))
+                PlayerKVRow(label: "SmartSpeech", value: NerdStatsView.hms(smartSpeechSaved), color: C.mint)
+                PlayerKVRow(label: "Speed saved", value: NerdStatsView.hms(speedSaved), color: C.mint)
+                PlayerKVRow(label: "Playback speed", value: String(format: "%g×", player.rate))
             }
             .padding(.top, 16)
             Spacer(minLength: 0)
@@ -386,7 +392,7 @@ private struct PlayerMetaBlock: View {
                 .padding(.top, 7)
 
             if savedSeconds >= 1 {
-                Text("◆ \(NerdStatsView.hms(savedSeconds)) reclaimed")
+                Text("◆ \(NerdStatsView.hms(savedSeconds)) time saved")
                     .font(ReceiptFont.mono(11, .semibold)).foregroundStyle(C.mint)
                     .frame(maxWidth: .infinity, alignment: .trailing)
                     .padding(.top, 12)

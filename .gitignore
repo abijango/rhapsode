@@ -10,6 +10,8 @@ xcuserdata/
 DerivedData/
 build/
 build-cat/
+.personal-rubberband/
+RhapsodePersonal.xcodeproj/
 *.moved-aside
 *.hmap
 *.ipa

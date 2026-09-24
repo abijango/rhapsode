@@ -5,6 +5,176 @@ import MediaPlayer
 import SwiftData
 import UIKit
 
+struct PlaybackSavingsDiagnosticBatch {
+    struct Snapshot: Equatable {
+        let listenedSeconds: TimeInterval
+        let savedSeconds: TimeInterval
+
+        var formatted: String {
+            "playback_saved listened_s=\(Self.seconds(listenedSeconds)) saved_s=\(Self.seconds(savedSeconds))"
+        }
+
+        private static let posixLocale = Locale(identifier: "en_US_POSIX")
+
+        private static func seconds(_ value: TimeInterval) -> String {
+            let fixed = String(format: "%.3f", locale: posixLocale, value)
+            return fixed.replacingOccurrences(of: #"0+$"#, with: "", options: .regularExpression)
+                .replacingOccurrences(of: #"\.$"#, with: "", options: .regularExpression)
+        }
+    }
+
+    private let interval: TimeInterval
+    private var listenedSeconds: TimeInterval = 0
+    private var savedSeconds: TimeInterval = 0
+
+    init(interval: TimeInterval) {
+        self.interval = max(0, interval)
+    }
+
+    mutating func record(listenedSeconds: TimeInterval, savedSeconds: TimeInterval) -> Snapshot? {
+        guard listenedSeconds.isFinite, savedSeconds.isFinite,
+              listenedSeconds >= 0, savedSeconds >= 0 else { return nil }
+        self.listenedSeconds += listenedSeconds
+        self.savedSeconds += savedSeconds
+        guard self.listenedSeconds >= interval else { return nil }
+        return flush()
+    }
+
+    mutating func flush() -> Snapshot? {
+        defer {
+            listenedSeconds = 0
+            savedSeconds = 0
+        }
+        guard listenedSeconds > 0, savedSeconds > 0 else { return nil }
+        return Snapshot(listenedSeconds: listenedSeconds, savedSeconds: savedSeconds)
+    }
+}
+
+struct PlaybackSpeedSavingsAccumulator {
+    private var lastOutputSeconds: TimeInterval?
+    private var lastRate: Double?
+    private var lastContentSeconds: TimeInterval?
+
+    mutating func record(outputSeconds: TimeInterval, rate: Double) -> TimeInterval {
+        guard outputSeconds.isFinite, rate.isFinite, rate > 0 else {
+            reset()
+            return 0
+        }
+        defer {
+            lastOutputSeconds = outputSeconds
+            lastRate = rate
+        }
+        guard let lastOutputSeconds, let lastRate else { return 0 }
+        let outputDelta = outputSeconds - lastOutputSeconds
+        guard rate == lastRate, outputDelta > 0 else { return 0 }
+        return outputDelta * max(0, rate - 1)
+    }
+
+    mutating func record(contentSeconds: TimeInterval, outputSeconds: TimeInterval) -> TimeInterval {
+        guard contentSeconds.isFinite, outputSeconds.isFinite,
+              contentSeconds >= 0, outputSeconds >= 0 else {
+            reset()
+            return 0
+        }
+        defer {
+            lastContentSeconds = contentSeconds
+            lastOutputSeconds = outputSeconds
+        }
+        guard let lastContentSeconds, let lastOutputSeconds else { return 0 }
+        let contentDelta = contentSeconds - lastContentSeconds
+        let outputDelta = outputSeconds - lastOutputSeconds
+        guard contentDelta >= 0, outputDelta >= 0 else { return 0 }
+        return max(0, contentDelta - outputDelta)
+    }
+
+    mutating func reset() {
+        lastOutputSeconds = nil
+        lastRate = nil
+        lastContentSeconds = nil
+    }
+}
+
+struct PrescanDiagnosticLifecycle {
+    private var analyzedSeconds: TimeInterval = 0
+    private var sourceSeconds: TimeInterval = 0
+    private var terminalStatus: SmartSpeechDiagnosticEvent.PrescanStatus?
+
+    mutating func recordWorkerStatus(_ status: SmartSpeechDiagnosticEvent.PrescanStatus,
+                                     analyzedSeconds: TimeInterval,
+                                     sourceSeconds: TimeInterval) -> SmartSpeechDiagnosticEvent? {
+        guard terminalStatus == nil else { return nil }
+        self.analyzedSeconds = analyzedSeconds
+        self.sourceSeconds = sourceSeconds
+        switch status {
+        case .started, .progress:
+            return event(status: status)
+        case .cancelled:
+            terminalStatus = .cancelled
+            return event(status: .cancelled)
+        case .completed:
+            return nil
+        }
+    }
+
+    mutating func cancelIfNeeded() -> SmartSpeechDiagnosticEvent? {
+        guard terminalStatus == nil else { return nil }
+        terminalStatus = .cancelled
+        return event(status: .cancelled)
+    }
+
+    mutating func acceptCompletion(sourceSeconds: TimeInterval) -> SmartSpeechDiagnosticEvent? {
+        guard terminalStatus == nil else { return nil }
+        analyzedSeconds = sourceSeconds
+        self.sourceSeconds = sourceSeconds
+        terminalStatus = .completed
+        return event(status: .completed)
+    }
+
+    private func event(status: SmartSpeechDiagnosticEvent.PrescanStatus) -> SmartSpeechDiagnosticEvent {
+        .prescan(
+            status: status,
+            analyzedSeconds: analyzedSeconds,
+            sourceSeconds: sourceSeconds,
+            fallback: status == .completed ? .none : .rolling
+        )
+    }
+}
+
+private final class PrescanDiagnosticReporter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var lifecycle = PrescanDiagnosticLifecycle()
+
+    func recordWorkerStatus(_ status: SmartSpeechDiagnosticEvent.PrescanStatus,
+                            analyzedSeconds: TimeInterval,
+                            sourceSeconds: TimeInterval) {
+        lock.lock()
+        let event = lifecycle.recordWorkerStatus(
+            status, analyzedSeconds: analyzedSeconds, sourceSeconds: sourceSeconds
+        )
+        lock.unlock()
+        log(event)
+    }
+
+    func cancelIfNeeded() {
+        lock.lock()
+        let event = lifecycle.cancelIfNeeded()
+        lock.unlock()
+        log(event)
+    }
+
+    func acceptCompletion(sourceSeconds: TimeInterval) {
+        lock.lock()
+        let event = lifecycle.acceptCompletion(sourceSeconds: sourceSeconds)
+        lock.unlock()
+        log(event)
+    }
+
+    private func log(_ event: SmartSpeechDiagnosticEvent?) {
+        guard let event else { return }
+        DiagnosticLog.info(event.formatted, category: .smartspeech)
+    }
+}
+
 /// Plays an `Audiobook`, handling both formats behind one `(trackIndex, offset)`
 /// model, plus background audio, lock-screen/Control-Center controls, and resume.
 ///
@@ -30,7 +200,22 @@ final class AudiobookPlayer {
     private(set) var sleepTimerEnd: Date?
     /// Current AVAudioSession output, e.g. "BATMAN'S AIRPODS PRO" — shown above the player dock.
     private(set) var outputRouteName = AudiobookPlayer.liveOutputRouteName()
-    var rate: Float = 1.0 { didSet { backend.rate = rate; updateNowPlaying() } }
+    var rate: Float = 1.0 {
+        didSet {
+            if oldValue != rate {
+                settlePlaybackSpeedSavings(rate: Double(backend.rate))
+                if isPlaying {
+                    let sourceNow = backend.currentSource
+                    accumulateSaved(playerNow: backend.currentOutput, sourceNow: sourceNow)
+                }
+                speedSavingsAccumulator.reset()
+                lastPlayerTime = nil
+                lastSourceTime = nil
+            }
+            backend.rate = rate
+            updateNowPlaying()
+        }
+    }
 
     private let backend = LiveAudioBackend()
     private var isSingleFile = false
@@ -51,24 +236,31 @@ final class AudiobookPlayer {
     /// action. Without this a cold launch would call `configureAudioSession()` →
     /// `setActive(true)` and duck/stop whatever the user is already playing in another app.
     private var needsMaterialize = false
-    /// Per-file cache of analyze-ahead prescan results (Fix A). Seeded by a detached prescan on
-    /// first load of a file; the global floor is passed into `backend.load` on any later load.
-    private var prescanByURL: [URL: LiveSilencePrescanResult] = [:]
+    private struct PrescanCacheKey: Hashable {
+        let url: URL
+        let preset: SmartSpeechSettings.Preset
+    }
+    /// Analysis decisions vary by tier, so URL alone is not a valid cache key.
+    private var prescanCache: [PrescanCacheKey: LiveSilencePrescanResult] = [:]
+    /// Finalized source-time maps used both for in-process reuse and the persistent cache.
+    private var editMapCache: [PrescanCacheKey: PlaybackEditMap] = [:]
     /// In-flight prescan for the current load; cancelled when the file/book changes
     /// or when the app backgrounds (lock-screen playback cannot afford a second
     /// full-file decode alongside the live producer).
     private var prescanTask: Task<Void, Never>?
     /// Restarted when the scene becomes active if the current file still needs a scan.
     private var prescanPending: (url: URL, cuts: [TimeInterval], preset: SmartSpeechSettings.Preset)?
+    private var prescanScanID: UUID?
+    private var lastAppActiveState: Bool?
+    private var playbackSavingsDiagnosticBatch = PlaybackSavingsDiagnosticBatch(interval: 30)
     private var sleepTimerTask: Task<Void, Never>?
 
     // AVAudioSession event handling. AVPlayer handled these implicitly; the AVAudioEngine-based
     // backend does not, so the player owns interruption + route-change reactions.
     private var interruptionObserver: NSObjectProtocol?
     private var routeChangeObserver: NSObjectProtocol?
-    /// Set when playback was paused by an interruption we began, so `.ended` (with `.shouldResume`)
-    /// can resume only in that case — not after a user-initiated pause.
-    private var wasInterrupted = false
+    private var suppressAccessoryPlayUntil = Date.distantPast
+    private var awaitingRouteReplacement = false
 
     /// Cached lock-screen artwork for the current cover path (avoid reloading on every tick).
     private var nowPlayingCoverPath: String?
@@ -123,6 +315,8 @@ final class AudiobookPlayer {
     /// Per-book listened/saved seconds accrued since the last model flush (see `flushPendingStats`).
     private var pendingListenedSeconds: Double = 0
     private var pendingSavedSeconds: Double = 0
+    private var pendingPlaybackSpeedSavedSeconds: Double = 0
+    private var speedSavingsAccumulator = PlaybackSpeedSavingsAccumulator()
 
     #if DEBUG
     /// Debug-only: the timeline map fed to the stat-accumulation self-test seam.
@@ -132,9 +326,21 @@ final class AudiobookPlayer {
     // MARK: Init
 
     init() {
+        #if PERSONAL_RUBBERBAND
+        backend.useRubberBand = SmartSpeechPreferences.useRubberBand
+        backend.adaptiveSpeedEnabled = SmartSpeechPreferences.adaptiveSpeed
+        #endif
         backend.onTick = { [weak self] in self?.tick() }
         backend.onReachedEnd = { [weak self] in self?.handleItemEnd() }
         backend.onEngineInvalidated = { [weak self] in self?.reloadAfterEngineInvalidation() }
+        backend.onPlaybackFailed = { [weak self] in
+            guard let self else { return }
+            self.settlePlaybackSpeedSavings()
+            self.speedSavingsAccumulator.reset()
+            self.isPlaying = false
+            self.persist(force: true)
+            self.updateNowPlaying()
+        }
 
         let nc = NotificationCenter.default
         // AVAudioSession posts on an arbitrary thread. Extract the primitive (Sendable) payload in
@@ -155,6 +361,43 @@ final class AudiobookPlayer {
         }
     }
 
+    /// SmartSpeech and playback-speed savings have separate lifetime counters, but views can
+    /// observe their unsaved per-book contributions together.
+    var pendingTotalSavedSeconds: TimeInterval {
+        pendingSavedSeconds + pendingPlaybackSpeedSavedSeconds
+    }
+
+    var pendingSmartSpeechSavedSeconds: TimeInterval {
+        pendingSavedSeconds
+    }
+
+    /// Persisted plus pending playback-speed savings for the current book.
+    var bookPlaybackSpeedSavedSeconds: TimeInterval {
+        (book?.playbackSpeedSavedSeconds ?? 0) + pendingPlaybackSpeedSavedSeconds
+    }
+
+    private func settlePlaybackSpeedSavings(rate: Double? = nil) {
+        guard isPlaying else {
+            speedSavingsAccumulator.reset()
+            return
+        }
+        let savings: TimeInterval
+        if backend.isUsingRubberBand {
+            savings = speedSavingsAccumulator.record(
+                contentSeconds: backend.currentSpeedSavingsContent,
+                outputSeconds: backend.currentSpeedSavingsOutput
+            )
+        } else {
+            savings = speedSavingsAccumulator.record(
+                outputSeconds: backend.currentSpeedSavingsOutput,
+                rate: rate ?? Double(backend.rate)
+            )
+        }
+        guard savings > 0 else { return }
+        SmartSpeechStats.addSpeedSaved(savings)
+        pendingPlaybackSpeedSavedSeconds += savings
+    }
+
     /// Accumulate honest saved time from one tick to the next.
     ///
     /// The guard is on `trimmedDelta` (how far the backend output advanced) only. When playback
@@ -166,7 +409,7 @@ final class AudiobookPlayer {
     /// - No baseline yet (first tick after load or discontinuity).
     /// - `trimmedDelta < 0`: backward seek, load/session reset, or smart-resume nudge (the backend's
     ///   `currentOutput` is session-relative and resets on seek/load, so a fresh session drops it).
-    /// - `trimmedDelta >= 4.0`: forward skip/jump (above `maxRate × interval` budget).
+    /// - A seek/load/route transition resets the baseline before another tick is counted.
     ///
     /// Always updates `lastPlayerTime`/`lastSourceTime` so the next tick has a fresh baseline.
     private func accumulateSaved(playerNow: Double, sourceNow: Double) {
@@ -174,20 +417,30 @@ final class AudiobookPlayer {
         guard isPlaying, let lp = lastPlayerTime, let ls = lastSourceTime else { return }
         let trimmedDelta = playerNow - lp
         let sourceDelta  = sourceNow - ls
-        guard trimmedDelta >= 0, trimmedDelta < 4.0 else { return }
+        guard trimmedDelta >= 0, sourceDelta >= 0 else { return }
 
         // WP7 — played: trimmed/output CONTENT seconds actually listened through, accrued on EVERY
         // valid playing tick regardless of trimming (rate-independent; this is the per-tick output delta).
         SmartSpeechStats.addPlayed(trimmedDelta)                                          // lifetime/global
         pendingListenedSeconds += trimmedDelta                                            // per-book (flushed in persist)
+        let saved = trimActive ? max(0, sourceDelta - trimmedDelta) : 0
+        if let snapshot = playbackSavingsDiagnosticBatch.record(
+            listenedSeconds: trimmedDelta, savedSeconds: saved
+        ) {
+            DiagnosticLog.info(snapshot.formatted, category: .smartspeech)
+        }
 
         // WP7 — saved: only meaningful while trimming (the source outran the output across a gap).
         guard trimActive else { return }
-        let saved = max(0, sourceDelta - trimmedDelta)
         guard saved > 0 else { return }
         SmartSpeechStats.addSaved(saved)                                  // lifetime/global total
         pendingSavedSeconds += saved                                      // per-book (flushed in persist)
         // All persist via the throttled persist() in tick() (or force-save on pause).
+    }
+
+    private func flushPlaybackSavingsDiagnostic() {
+        guard let snapshot = playbackSavingsDiagnosticBatch.flush() else { return }
+        DiagnosticLog.info(snapshot.formatted, category: .smartspeech)
     }
 
     /// Write accrued per-book stats onto the model. Called from `persist()` and other force-save paths.
@@ -195,6 +448,7 @@ final class AudiobookPlayer {
         guard let book else {
             pendingListenedSeconds = 0
             pendingSavedSeconds = 0
+            pendingPlaybackSpeedSavedSeconds = 0
             return
         }
         if pendingListenedSeconds > 0 {
@@ -211,20 +465,39 @@ final class AudiobookPlayer {
             book.smartSpeechSavedSeconds = (book.smartSpeechSavedSeconds ?? 0) + pendingSavedSeconds
             pendingSavedSeconds = 0
         }
+        if pendingPlaybackSpeedSavedSeconds > 0 {
+            book.addPlaybackSpeedSaved(pendingPlaybackSpeedSavedSeconds)
+            pendingPlaybackSpeedSavedSeconds = 0
+        }
     }
 
     /// Apply a completed prescan to the live backend when still relevant to the current load.
-    private func applyPrescanResult(_ result: LiveSilencePrescanResult, for url: URL) {
+    private func applyPrescanResult(_ result: LiveSilencePrescanResult, editMap: PlaybackEditMap,
+                                    for url: URL, preset: SmartSpeechSettings.Preset) {
         guard loadedURL == url else { return }
-        prescanByURL[url] = result
+        let key = PrescanCacheKey(url: url, preset: preset)
+        prescanCache[key] = result
+        editMapCache[key] = editMap
         prescanPending = nil
-        backend.applyPrescan(result)
+        backend.applyPrescan(result, editMap: editMap)
+    }
+
+    private func applyCachedEditMap(_ editMap: PlaybackEditMap, for url: URL,
+                                    preset: SmartSpeechSettings.Preset) {
+        guard loadedURL == url else { return }
+        editMapCache[PrescanCacheKey(url: url, preset: preset)] = editMap
+        prescanPending = nil
+        backend.applyCachedEditMap(editMap)
     }
 
     /// Scene-phase hook from `RootTabView`. Locking the phone must not keep a
     /// whole-file decode running next to live playback — that is the MetricKit
     /// cpuException in the diagnostic log (48s CPU in 51s).
     func handleAppActive(_ active: Bool) {
+        if lastAppActiveState != active {
+            lastAppActiveState = active
+            DiagnosticLog.info("lifecycle foreground=\(active ? 1 : 0)", category: .smartspeech)
+        }
         backend.setAppForegrounded(active)
         if active {
             resumePrescanIfNeeded()
@@ -237,39 +510,94 @@ final class AudiobookPlayer {
                               preset: SmartSpeechSettings.Preset, bookID: UUID) {
         prescanPending = (url, cuts, preset)
         prescanTask?.cancel()
-        DiagnosticLog.info("prescan start \(url.lastPathComponent)", category: .smartspeech)
+        let scanID = UUID()
+        prescanScanID = scanID
+        let policy = SmartSpeechEditCache.livePolicy(for: preset)
         prescanTask = Task.detached(priority: .utility) { [weak self] in
+            let source = try? SmartSpeechEditCache.source(url: url, cutPoints: cuts)
+            if !Task.isCancelled, let source,
+               let editMap = SmartSpeechEditCache().load(for: source, policy: policy) {
+                await MainActor.run {
+                    guard !Task.isCancelled, let self, self.loadedURL == url, let book = self.book,
+                          book.id == bookID, self.prescanScanID == scanID,
+                          case .on(let activePreset) = book.resolvedSmartSpeech,
+                          activePreset == preset else {
+                        return
+                    }
+                    self.prescanTask = nil
+                    self.prescanScanID = nil
+                    self.applyCachedEditMap(editMap, for: url, preset: preset)
+                    DiagnosticLog.info(
+                        "prescan cache hit edits=\(editMap.edits.count)",
+                        category: .smartspeech
+                    )
+                }
+                return
+            }
+
+            guard !Task.isCancelled else { return }
+            let diagnostics = PrescanDiagnosticReporter()
             let result: LiveSilencePrescanResult?
             do {
                 result = try LiveSilencePrescan.analyze(
                     url: url, cutPoints: cuts, preset: preset,
-                    isCancelled: { Task.isCancelled }
+                    isCancelled: { Task.isCancelled },
+                    onProgress: { status, analyzedSeconds, sourceSeconds in
+                        diagnostics.recordWorkerStatus(
+                            status, analyzedSeconds: analyzedSeconds, sourceSeconds: sourceSeconds
+                        )
+                    }
                 )
             } catch {
                 result = nil
             }
-            guard !Task.isCancelled, let result else { return }
+            guard !Task.isCancelled, let result else {
+                if Task.isCancelled { diagnostics.cancelIfNeeded() }
+                return
+            }
             await MainActor.run {
-                guard let self, self.loadedURL == url, self.book?.id == bookID else { return }
+                guard let self, self.loadedURL == url, let book = self.book,
+                      book.id == bookID, self.prescanScanID == scanID,
+                      case .on(let activePreset) = book.resolvedSmartSpeech,
+                      activePreset == preset else {
+                    diagnostics.cancelIfNeeded()
+                    return
+                }
+                self.prescanTask = nil
+                self.prescanScanID = nil
+                let editMap = LiveTrimProducer.makeEditMap(
+                    regions: result.regions,
+                    settings: LiveSmartSpeechTuning.settings(preset: preset)
+                )
                 DiagnosticLog.info(
                     "prescan done regions=\(result.regionCount) floor=\(String(format: "%.1f", result.globalFloorDb))",
                     category: .smartspeech
                 )
-                self.applyPrescanResult(result, for: url)
+                self.applyPrescanResult(result, editMap: editMap, for: url, preset: preset)
+                diagnostics.acceptCompletion(sourceSeconds: result.sourceDuration)
+                Task.detached(priority: .utility) {
+                    guard let source = try? SmartSpeechEditCache.source(url: url, cutPoints: cuts) else { return }
+                    do {
+                        try SmartSpeechEditCache().store(editMap, for: source, policy: policy)
+                    } catch {
+                        DiagnosticLog.error("prescan cache store failed: \(error)", category: .smartspeech)
+                    }
+                }
             }
         }
     }
 
     private func suspendPrescanForBackground() {
         guard prescanTask != nil else { return }
-        DiagnosticLog.info("prescan pause (background)", category: .smartspeech)
         prescanTask?.cancel()
         prescanTask = nil
+        prescanScanID = nil
     }
 
     private func resumePrescanIfNeeded() {
         guard let pending = prescanPending, let book,
-              loadedURL == pending.url, prescanByURL[pending.url] == nil,
+              loadedURL == pending.url,
+              editMapCache[PrescanCacheKey(url: pending.url, preset: pending.preset)] == nil,
               prescanTask == nil else { return }
         startPrescan(url: pending.url, cuts: pending.cuts, preset: pending.preset, bookID: book.id)
     }
@@ -360,6 +688,7 @@ final class AudiobookPlayer {
     /// State shared by `load` and `restore`: adopt the book and its persisted position.
     /// Touches no audio machinery.
     private func adopt(_ book: Audiobook) {
+        flushPlaybackSavingsDiagnostic()
         self.book = book
         self.tracks = book.orderedTracks
         self.isSingleFile = Self.detectSingleFile(tracks)
@@ -378,10 +707,13 @@ final class AudiobookPlayer {
         // does not pollute the first tick.
         lastPlayerTime = nil
         lastSourceTime = nil
+        speedSavingsAccumulator.reset()
         pendingListenedSeconds = 0
         pendingSavedSeconds = 0
+        pendingPlaybackSpeedSavedSeconds = 0
         prescanTask?.cancel()
         prescanTask = nil
+        prescanScanID = nil
         pendingResumeNudge = true   // WP8: initial load arms the smart-resume nudge
 
         // Remember the book for the next cold launch (see `RootTabView.restoreNowPlaying`).
@@ -412,11 +744,15 @@ final class AudiobookPlayer {
         if let title = book?.title {
             DiagnosticLog.info("teardown “\(title)”", category: .playback)
         }
+        settlePlaybackSpeedSavings()
+        speedSavingsAccumulator.reset()
+        flushPlaybackSavingsDiagnostic()
         persist(force: true)
         if let book { onPlaybackStopped?(book, bookProgress, false, true) }
         cancelSleepTimer()
         prescanTask?.cancel()
         prescanTask = nil
+        prescanScanID = nil
         prescanPending = nil
         isPlaying = false
         needsMaterialize = false
@@ -432,6 +768,8 @@ final class AudiobookPlayer {
     func togglePlayPause() { isPlaying ? pause() : play() }
 
     func play() {
+        guard !isPlaying else { return }
+        suppressAccessoryPlayUntil = .distantPast
         materialize()   // a launch-restored book has no session/asset yet
         // WP8 — smart resume: nudge position back before playing, but only when the flag was armed
         // (initial load or pause). Deliberate seeks clear the flag so scrub-then-play isn't yanked back.
@@ -441,6 +779,11 @@ final class AudiobookPlayer {
         }
         backend.rate = rate
         backend.play()
+        guard backend.isPlaying else {
+            isPlaying = false
+            updateNowPlaying()
+            return
+        }
         isPlaying = true
         DiagnosticLog.info("play “\(book?.title ?? "?")”", category: .playback)
         updateNowPlaying()
@@ -453,11 +796,14 @@ final class AudiobookPlayer {
     /// `endedNaturally` is set only by `handleItemEnd()` on the last track, so a listener can
     /// tell "reached the end" from "user stopped".
     private func pause(endedNaturally: Bool) {
+        settlePlaybackSpeedSavings()
+        speedSavingsAccumulator.reset()
         isPlaying = false
         backend.pause()
         DiagnosticLog.info("pause “\(book?.title ?? "?")”"
                            + (endedNaturally ? " (end of book)" : ""), category: .playback)
         pendingResumeNudge = true   // WP8: arm so next play() nudges
+        flushPlaybackSavingsDiagnostic()
         persist(force: true)
         updateNowPlaying()
         if let book { onPlaybackStopped?(book, bookProgress, endedNaturally, false) }
@@ -522,6 +868,8 @@ final class AudiobookPlayer {
 
     /// Seek within the current track (0...trackDuration).
     func seekInTrack(to seconds: Double) {
+        settlePlaybackSpeedSavings()
+        speedSavingsAccumulator.reset()
         materialize()   // a launch-restored book has no session/asset yet
         pendingResumeNudge = false   // WP8: deliberate seek — do not nudge on next play()
         let clamped = min(max(seconds, 0), trackDuration)
@@ -542,6 +890,8 @@ final class AudiobookPlayer {
     func seekInBook(to bookTime: Double) { seekWithinBook(toBookTime: bookTime) }
 
     func jump(toTrack index: Int) {
+        settlePlaybackSpeedSavings()
+        speedSavingsAccumulator.reset()
         materialize()   // a launch-restored book has no session/asset yet
         pendingResumeNudge = false   // WP8: track jump is deliberate — do not nudge
         guard tracks.indices.contains(index) else { return }
@@ -560,6 +910,8 @@ final class AudiobookPlayer {
     // MARK: Item loading
 
     private func loadCurrentItem(seekTo offset: Double) {
+        settlePlaybackSpeedSavings()
+        speedSavingsAccumulator.reset()
         guard let track = currentTrack, let book,
               let url = try? ContainerPaths.url(forRelativePath: track.fileRelPath) else { return }
 
@@ -581,14 +933,20 @@ final class AudiobookPlayer {
 
         if loadedURL != url {
             loadedURL = url
-            let cached = prescanByURL[url]
+            let key = PrescanCacheKey(url: url, preset: preset)
+            let cached = prescanCache[key]
+            let cachedEditMap = editMapCache[key]
             backend.load(url: url, sourceDuration: srcDuration, cutPoints: cuts,
                          startSource: startSource, trimEnabled: trimEnabled,
                          preset: preset, globalFloorDb: cached?.globalFloorDb)
             // Re-apply full cached regions (not just floor) so playback skips live RMS.
-            if let cached { backend.applyPrescan(cached) }
-            // Analyze-ahead once per file when no cache yet (regions + global floor/speech).
-            if trimEnabled, cached == nil {
+            if let cached, let cachedEditMap {
+                backend.applyPrescan(cached, editMap: cachedEditMap)
+            } else if let cachedEditMap {
+                backend.applyCachedEditMap(cachedEditMap)
+            }
+            // Load a persistent finalized map before falling back to a full prescan.
+            if trimEnabled, cachedEditMap == nil {
                 startPrescan(url: url, cuts: cuts, preset: preset, bookID: book.id)
             } else {
                 prescanPending = nil
@@ -623,6 +981,7 @@ final class AudiobookPlayer {
         // Force a reload with the new trim setting at the preserved position.
         prescanTask?.cancel()
         prescanTask = nil
+        prescanScanID = nil
         prescanPending = nil
         loadedURL = nil
         if isSingleFile {
@@ -634,6 +993,30 @@ final class AudiobookPlayer {
         updateNowPlaying()
     }
 
+    #if PERSONAL_RUBBERBAND
+    func setRubberBandEnabled(_ enabled: Bool) {
+        guard SmartSpeechPreferences.useRubberBand != enabled else { return }
+        settlePlaybackSpeedSavings()
+        speedSavingsAccumulator.reset()
+        SmartSpeechPreferences.useRubberBand = enabled
+        backend.useRubberBand = enabled
+        lastPlayerTime = nil
+        lastSourceTime = nil
+        applySmartSpeechChange()
+    }
+
+    func setAdaptiveSpeedEnabled(_ enabled: Bool) {
+        guard SmartSpeechPreferences.adaptiveSpeed != enabled else { return }
+        settlePlaybackSpeedSavings()
+        speedSavingsAccumulator.reset()
+        SmartSpeechPreferences.adaptiveSpeed = enabled
+        backend.adaptiveSpeedEnabled = enabled
+        lastPlayerTime = nil
+        lastSourceTime = nil
+        applySmartSpeechChange()
+    }
+    #endif
+
     private func seekSingleFile(to bookTime: Double) {
         backend.seek(toSource: bookTime)
         recomputeIndex(forBookTime: bookTime)
@@ -642,6 +1025,8 @@ final class AudiobookPlayer {
     }
 
     private func seekWithinBook(toBookTime t: Double) {
+        settlePlaybackSpeedSavings()
+        speedSavingsAccumulator.reset()
         pendingResumeNudge = false   // WP8: deliberate seek — do not nudge on next play()
         let clamped = min(max(t, 0), totalDuration)
         if needsMaterialize {
@@ -680,15 +1065,12 @@ final class AudiobookPlayer {
 
     private func handleInterruption(typeRaw: UInt, optionsRaw: UInt) {
         guard let type = AVAudioSession.InterruptionType(rawValue: typeRaw) else { return }
+        DiagnosticLog.info("audio interruption type=\(typeRaw) options=\(optionsRaw)", category: .playback)
         switch type {
         case .began:
-            if isPlaying { wasInterrupted = true; pause() }
+            if isPlaying { pause() }
         case .ended:
-            if wasInterrupted {
-                wasInterrupted = false
-                let options = AVAudioSession.InterruptionOptions(rawValue: optionsRaw)
-                if options.contains(.shouldResume) { play() }
-            }
+            break
         @unknown default:
             break
         }
@@ -697,8 +1079,16 @@ final class AudiobookPlayer {
     private func handleRouteChange(reasonRaw: UInt) {
         refreshOutputRoute()
         guard let reason = AVAudioSession.RouteChangeReason(rawValue: reasonRaw) else { return }
+        DiagnosticLog.info("audio route change reason=\(reasonRaw) output=\(outputRouteName)", category: .playback)
         // Headphones/route unplugged mid-play: pause rather than blast audio out the speaker.
-        if reason == .oldDeviceUnavailable, isPlaying { pause() }
+        if reason == .oldDeviceUnavailable {
+            awaitingRouteReplacement = true
+            suppressAccessoryPlayUntil = Date().addingTimeInterval(10)
+            if isPlaying { pause() }
+        } else if reason == .newDeviceAvailable, awaitingRouteReplacement {
+            awaitingRouteReplacement = false
+            suppressAccessoryPlayUntil = Date().addingTimeInterval(10)
+        }
     }
 
     func refreshOutputRoute() {
@@ -735,6 +1125,7 @@ final class AudiobookPlayer {
         } else {
             offsetInTrack = sourceNow
         }
+        settlePlaybackSpeedSavings()
         // WP7: accumulate honest time-saved stat from trimmed playback progress.
         accumulateSaved(playerNow: backend.currentOutput, sourceNow: sourceNow)
         updateNowPlayingElapsed()
@@ -812,6 +1203,7 @@ final class AudiobookPlayer {
         guard let book, let context else { return }
         let changed = currentIndex != lastPersistedIndex || offsetInTrack != lastPersistedOffset
         let statsPending = pendingListenedSeconds > 0 || pendingSavedSeconds > 0
+            || pendingPlaybackSpeedSavedSeconds > 0
         if !force {
             guard Date().timeIntervalSince(lastPersist) >= Self.positionPersistInterval else { return }
             // Do not hit SwiftData every tick just to refresh on-screen time — only when the
@@ -864,8 +1256,25 @@ final class AudiobookPlayer {
         // MediaPlayer invokes these handlers on a non-main thread, so hop to the
         // main actor (the player is @MainActor) rather than calling directly —
         // calling main-actor methods off-main trips a dispatch-queue assertion.
-        c.playCommand.addTarget { [weak self] _ in Task { @MainActor in self?.play() }; return .success }
-        c.pauseCommand.addTarget { [weak self] _ in Task { @MainActor in self?.pause() }; return .success }
+        c.playCommand.addTarget { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                if Date() < self.suppressAccessoryPlayUntil {
+                    DiagnosticLog.info("remote play suppressed after route removal", category: .playback)
+                    return
+                }
+                DiagnosticLog.info("remote play command", category: .playback)
+                self.play()
+            }
+            return .success
+        }
+        c.pauseCommand.addTarget { [weak self] _ in
+            Task { @MainActor in
+                DiagnosticLog.info("remote pause command", category: .playback)
+                self?.pause()
+            }
+            return .success
+        }
         c.skipForwardCommand.preferredIntervals = [30]
         c.skipForwardCommand.addTarget { [weak self] _ in Task { @MainActor in self?.skip(30) }; return .success }
         c.skipBackwardCommand.preferredIntervals = [15]

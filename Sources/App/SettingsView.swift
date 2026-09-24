@@ -204,6 +204,11 @@ struct SettingsView: View {
 // MARK: - SmartSpeech
 
 struct SmartSpeechSettingsView: View {
+    #if PERSONAL_RUBBERBAND
+    @Environment(AudiobookPlayer.self) private var audioPlayer
+    @State private var rubberBandEnabled = SmartSpeechPreferences.useRubberBand
+    @State private var adaptiveSpeedEnabled = SmartSpeechPreferences.adaptiveSpeed
+    #endif
     @State private var smartSpeechEnabled = SmartSpeechPreferences.isEnabled
     @State private var smartSpeechDefaultTier = SmartSpeechPreferences.defaultTier
 
@@ -219,6 +224,32 @@ struct SmartSpeechSettingsView: View {
             } footer: {
                 Text("Trims silence live during playback. Each audiobook can override this from its player.")
             }
+
+            #if PERSONAL_RUBBERBAND
+            Section {
+                Toggle("Rubber Band R3", isOn: Binding(
+                    get: { rubberBandEnabled },
+                    set: {
+                        rubberBandEnabled = $0
+                        audioPlayer.setRubberBandEnabled($0)
+                    }))
+            } header: {
+                Text("Playback speed engine")
+            } footer: {
+                Text("On by default in this personal build. Turn off to use the Apple speed engine. Changing this restarts the current audio stream.")
+            }
+            Section {
+                Toggle("Speech-aware speed", isOn: Binding(
+                    get: { adaptiveSpeedEnabled },
+                    set: {
+                        adaptiveSpeedEnabled = $0
+                        audioPlayer.setAdaptiveSpeedEnabled($0)
+                    }))
+                    .disabled(!rubberBandEnabled)
+            } footer: {
+                Text("Optional with Rubber Band R3. Confirmed speech plays slightly faster than your selected speed; music-only sections slow to 1×. Uncertain audio stays at your selected speed.")
+            }
+            #endif
 
             if smartSpeechEnabled {
                 Section {
@@ -245,6 +276,10 @@ struct SmartSpeechSettingsView: View {
         .task {
             smartSpeechEnabled = SmartSpeechPreferences.isEnabled
             smartSpeechDefaultTier = SmartSpeechPreferences.defaultTier
+            #if PERSONAL_RUBBERBAND
+            rubberBandEnabled = SmartSpeechPreferences.useRubberBand
+            adaptiveSpeedEnabled = SmartSpeechPreferences.adaptiveSpeed
+            #endif
         }
     }
 }

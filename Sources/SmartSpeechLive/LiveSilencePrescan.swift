@@ -60,13 +60,20 @@ enum LiveSilencePrescan {
     static func analyze(url: URL,
                         cutPoints: [TimeInterval],
                         preset: SmartSpeechSettings.Preset,
-                        isCancelled: @escaping @Sendable () -> Bool = { false }) throws -> LiveSilencePrescanResult {
+                        isCancelled: @escaping @Sendable () -> Bool = { false },
+                        onProgress: @escaping @Sendable (SmartSpeechDiagnosticEvent.PrescanStatus,
+                                                         TimeInterval, TimeInterval) -> Void = { _, _, _ in }) throws -> LiveSilencePrescanResult {
         let probe: AVAudioFile
         do { probe = try AVAudioFile(forReading: url) }
         catch { throw AudioIOError.undecodable(underlying: error) }
         let sampleRate = probe.processingFormat.sampleRate
         let sourceDuration = Double(probe.length) / sampleRate
+        onProgress(.started, 0, sourceDuration)
         guard probe.length > 0 else {
+            if isCancelled() {
+                onProgress(.cancelled, 0, sourceDuration)
+                throw CancellationError()
+            }
             return .init(sourceDuration: 0, projectedSavedSeconds: 0, regionCount: 0,
                          projectedSavedByTier: [:], globalFloorDb: -160, globalSpeechDb: -160,
                          regions: [])
@@ -80,8 +87,12 @@ enum LiveSilencePrescan {
         var hist = LoudnessHistogram()
         var windowProfiles: [(start: TimeInterval, profile: LoudnessProfile)] = []
         windowProfiles.reserveCapacity(windows.count)
+        var analyzedSeconds: TimeInterval = 0
         for w in windows {
-            if isCancelled() { throw CancellationError() }
+            if isCancelled() {
+                onProgress(.cancelled, analyzedSeconds, sourceDuration)
+                throw CancellationError()
+            }
             try autoreleasepool {
                 let buffer = try AudioIO.decode(url, startSeconds: w.start, durationSeconds: w.end - w.start,
                                                 maxSeconds: maxChunkSeconds + 5)
@@ -90,6 +101,8 @@ enum LiveSilencePrescan {
                 for db in profile.dbs { hist.add(db) }
                 windowProfiles.append((w.start, profile))
             }
+            analyzedSeconds += w.end - w.start
+            onProgress(.progress, analyzedSeconds, sourceDuration)
         }
         let globalFloorDb = hist.percentile(0.10)
         let globalSpeechDb = hist.percentile(0.90)
@@ -98,6 +111,10 @@ enum LiveSilencePrescan {
         var presetRegions: [SilenceRegion] = []
         let tierSettings = LiveSmartSpeechTuning.settings(preset: preset)
         for (windowStart, profile) in windowProfiles {
+            if isCancelled() {
+                onProgress(.cancelled, analyzedSeconds, sourceDuration)
+                throw CancellationError()
+            }
             let regions = SilenceAnalyzer(settings: tierSettings)
                 .regions(from: profile, floorOverrideDb: globalFloorDb, speechOverrideDb: nil)
             projectedSavedByTier[preset.rawValue, default: 0] += projectedSaved(regions: regions, settings: tierSettings)
@@ -107,6 +124,10 @@ enum LiveSilencePrescan {
         }
         let mergedRegions = mergeRegionsAcrossSeams(presetRegions)
 
+        if isCancelled() {
+            onProgress(.cancelled, analyzedSeconds, sourceDuration)
+            throw CancellationError()
+        }
         return LiveSilencePrescanResult(
             sourceDuration: sourceDuration,
             projectedSavedSeconds: projectedSavedByTier[preset.rawValue] ?? 0,

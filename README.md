@@ -56,12 +56,21 @@ Three rules that must not regress:
 
 Rhapsode is an XcodeGen project. `Rhapsode.xcodeproj` is generated and git-ignored, so edit `project.yml` and regenerate. Never hand-edit the `.xcodeproj`.
 
-```bash
-xcodegen generate
+For an installable build, use `sh scripts/build.sh` instead of invoking `xcodebuild`
+directly. It increments both the patch release version and the numeric build number,
+regenerates the project, then builds. Pass `--minor` for a compatible feature or
+`--major` for a major/breaking release; other arguments go to `xcodebuild`. Agents
+choose the version level as part of delivery, so no manual bump is needed. For an
+Xcode GUI build, the agent runs `sh scripts/next-build.sh` first; direct Xcode builds
+cannot update XcodeGen's tracked version settings in the same build. Commit the
+updated `project.yml` with the change; don't reuse an installable build number.
+Compile-only checks and tests can still use `xcodegen generate` and `xcodebuild`
+without consuming a release version. Settings, launch logs, and exported diagnostics
+show the installed version and build.
 
-xcodebuild -project Rhapsode.xcodeproj -scheme Rhapsode \
-  -configuration Debug \
-  -destination 'platform=iOS Simulator,name=iPhone 17 Pro' build
+```bash
+sh scripts/build.sh -project Rhapsode.xcodeproj -scheme Rhapsode \
+  -configuration Debug -destination 'platform=iOS Simulator,name=iPhone 17 Pro' build
 ```
 
 Run the DSP unit tests:

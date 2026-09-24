@@ -78,9 +78,9 @@ targets:
       path: SupportingFiles/Info.plist
       properties:
         CFBundleDisplayName: Rhapsode
-        CFBundleShortVersionString: "0.1.0"
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
         CFBundleIconName: AppIcon
-        CFBundleVersion: "2"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
         UILaunchScreen: {}
         # Lock-screen / Control Center audio control needs the audio background
         # mode. Free to declare; doing it now avoids an entitlements retrofit.
@@ -143,8 +143,8 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.naufalmir.rhapsode
         PRODUCT_NAME: Rhapsode
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
-        MARKETING_VERSION: "0.1.0"
-        CURRENT_PROJECT_VERSION: "2"
+        MARKETING_VERSION: "0.4.2"
+        CURRENT_PROJECT_VERSION: "14"
         TARGETED_DEVICE_FAMILY: "1,2" # iPhone + iPad (shared SwiftUI codebase)
         SWIFT_STRICT_CONCURRENCY: complete
         # Phase 4b — Mac Catalyst (feasibility probe). Shares the UIKit codebase

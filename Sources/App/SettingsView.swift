@@ -156,7 +156,9 @@ struct SettingsView: View {
                 } header: {
                     Text("Support")
                 } footer: {
-                    Text("On-device logs stay on this phone. Share them from Diagnostics after a crash.")
+                    Text("Version \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?") "
+                         + "(build \(Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?")). "
+                         + "On-device logs stay on this phone. Share them from Diagnostics after a crash.")
                 }
             }
             .navigationTitle("Settings")

@@ -14,17 +14,58 @@ struct SemanticEditPlannerTests {
         #expect(edits.isEmpty)
     }
 
-    @Test("removes the centre of a longer pause")
-    func removesPauseCentre() {
+    @Test("removes the trailing tail of a longer pause, matching SilencePolicy placement")
+    func removesPauseTail() {
         let planner = SemanticEditPlanner()
         let edits = planner.edits(for: [
             SemanticRegion(start: 1, end: 2, kind: .silence, confidence: 1)
         ])
 
+        // Default settings: target = minKeptSilence + (D - minSilenceDuration) * residualSlope
+        //                          = 0.18 + (1.0 - 0.28) * 0.12 = 0.2664
+        // Kept silence is leading (same as `TrimRenderer.plan`), so the removal is the tail
+        // and always ends exactly at the region end.
         #expect(edits.count == 1)
         #expect(edits[0].kind == .compressPause)
-        #expect(abs(edits[0].start - 1.11) < 0.001)
-        #expect(abs(edits[0].end - 1.89) < 0.001)
+        #expect(abs(edits[0].start - 1.2664) < 0.001)
+        #expect(edits[0].end == 2)
+    }
+
+    @Test("compressPause removal matches the legacy SilencePolicy / TrimRenderer.plan path, per tier")
+    func compressPauseMatchesLegacyPolicy() {
+        let sampleRate = 48_000.0
+        let regionStart: TimeInterval = 10
+        let durations: [TimeInterval] = [0.15, 0.19, 0.25, 0.30, 0.45, 0.80, 1.5, 3.0]
+
+        for preset in SmartSpeechSettings.Preset.allCases {
+            let settings = SmartSpeechSettings(preset: preset)
+            let planner = SemanticEditPlanner(policy: SemanticEditPolicy(silenceSettings: settings))
+
+            for D in durations {
+                let region = SemanticRegion(start: regionStart, end: regionStart + D,
+                                            kind: .silence, confidence: 1)
+                let edits = planner.edits(for: [region])
+
+                // Legacy path: identical D→target mapping and kept-silence placement.
+                let totalFrames = Int((regionStart + D + 5) * sampleRate)
+                let plan = TrimRenderer(settings: settings).plan(
+                    regions: [SilenceRegion(start: regionStart, end: regionStart + D)],
+                    totalFrames: totalFrames, sampleRate: sampleRate)
+                let joint = plan.joints[0]
+                let legacyStart = Double(joint.outCut) / sampleRate
+                let legacyEnd = Double(joint.inResume) / sampleRate
+
+                if legacyEnd - legacyStart < 1e-4 {
+                    #expect(edits.isEmpty, "\(preset) D=\(D): legacy path keeps the pause whole")
+                } else {
+                    #expect(edits.count == 1, "\(preset) D=\(D)")
+                    if let edit = edits.first {
+                        #expect(abs(edit.start - legacyStart) < 1e-3, "\(preset) D=\(D) start")
+                        #expect(abs(edit.end - legacyEnd) < 1e-3, "\(preset) D=\(D) end")
+                    }
+                }
+            }
+        }
     }
 
     @Test("uncertain and speech regions are protected")

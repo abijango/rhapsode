@@ -875,14 +875,9 @@ final class LiveTrimProducer: @unchecked Sendable {
     }
 
     static func semanticEditPolicy(for settings: SmartSpeechSettings) -> SemanticEditPolicy {
-        SemanticEditPolicy(
-            minimumEditablePause: settings.minSilenceDuration,
-            shortPauseUpperBound: 0.40,
-            mediumPauseUpperBound: 1.20,
-            shortPauseTarget: min(0.18, settings.minKeptSilence),
-            mediumPauseTarget: max(settings.minKeptSilence, 0.18),
-            longPauseTarget: max(settings.minKeptSilence, 0.25)
-        )
+        // Reuse the tier's own silence settings so compressPause matches SilencePolicy /
+        // TrimRenderer.renderMapped exactly for the same input + tier.
+        SemanticEditPolicy(silenceSettings: settings)
     }
 
     private func recordDiagnosticLocked(mode: DiagnosticMode,

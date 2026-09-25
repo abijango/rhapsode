@@ -11,7 +11,7 @@ struct SmartSpeechEditCache: Sendable {
     /// Bump when the audio classifier's region semantics change.
     static let liveClassifierRevision = 1
     /// Bump when source-region-to-edit planning or live rendering policy changes.
-    static let livePolicyRevision = 1
+    static let livePolicyRevision = 2
 
     struct Source: Sendable {
         let url: URL

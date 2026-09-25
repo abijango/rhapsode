@@ -47,35 +47,23 @@ public struct AudioEdit: Equatable, Codable, Sendable {
 }
 
 public struct SemanticEditPolicy: Equatable, Codable, Sendable {
-    public var minimumEditablePause: TimeInterval
-    public var shortPauseUpperBound: TimeInterval
-    public var mediumPauseUpperBound: TimeInterval
-    public var shortPauseTarget: TimeInterval
-    public var mediumPauseTarget: TimeInterval
-    public var longPauseTarget: TimeInterval
+    /// Governs compressPause amount/placement — identical math to the legacy silence path
+    /// (`SilencePolicy.target`), so live semantic edits match `TrimRenderer.renderMapped` /
+    /// the `cadence` CLI oracle exactly for the same input + tier.
+    public var silenceSettings: SmartSpeechSettings
     public var minimumMusicDuration: TimeInterval
     public var musicLeadingHandle: TimeInterval
     public var musicTrailingHandle: TimeInterval
     public var minimumConfidence: Double
 
     public init(
-        minimumEditablePause: TimeInterval = 0.18,
-        shortPauseUpperBound: TimeInterval = 0.40,
-        mediumPauseUpperBound: TimeInterval = 1.20,
-        shortPauseTarget: TimeInterval = 0.16,
-        mediumPauseTarget: TimeInterval = 0.22,
-        longPauseTarget: TimeInterval = 0.30,
+        silenceSettings: SmartSpeechSettings = SmartSpeechSettings(),
         minimumMusicDuration: TimeInterval = 3.0,
         musicLeadingHandle: TimeInterval = 0.25,
         musicTrailingHandle: TimeInterval = 0.35,
         minimumConfidence: Double = 0.70
     ) {
-        self.minimumEditablePause = minimumEditablePause
-        self.shortPauseUpperBound = shortPauseUpperBound
-        self.mediumPauseUpperBound = mediumPauseUpperBound
-        self.shortPauseTarget = shortPauseTarget
-        self.mediumPauseTarget = mediumPauseTarget
-        self.longPauseTarget = longPauseTarget
+        self.silenceSettings = silenceSettings
         self.minimumMusicDuration = minimumMusicDuration
         self.musicLeadingHandle = musicLeadingHandle
         self.musicTrailingHandle = musicTrailingHandle
@@ -101,18 +89,12 @@ public struct SemanticEditPlanner: Sendable {
         guard region.duration > 0, region.confidence >= policy.minimumConfidence else { return nil }
         switch region.kind {
         case .silence, .roomTone:
-            guard region.duration >= policy.minimumEditablePause else { return nil }
-            let target: TimeInterval
-            if region.duration <= policy.shortPauseUpperBound {
-                target = policy.shortPauseTarget
-            } else if region.duration <= policy.mediumPauseUpperBound {
-                target = policy.mediumPauseTarget
-            } else {
-                target = policy.longPauseTarget
-            }
-            let removable = region.duration - min(target, region.duration)
+            // Same D→target mapping and the same kept-silence placement (leading, trailing
+            // tail removed) as `TrimRenderer.plan`, so this never drifts from the CLI oracle.
+            let target = SilencePolicy.target(forSilenceDuration: region.duration, settings: policy.silenceSettings)
+            let removable = region.duration - target
             guard removable > 0 else { return nil }
-            let start = region.start + (region.duration - removable) / 2
+            let start = region.start + target
             return AudioEdit(start: start, end: start + removable, kind: .compressPause)
 
         case .musicOnly:

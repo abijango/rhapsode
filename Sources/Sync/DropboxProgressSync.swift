@@ -32,20 +32,24 @@ struct DropboxProgressSync: ProgressSync {
     }
 
     func pullAll() async throws -> [PlaybackProgress] {
-        // The sync folder may not exist yet (first device, before any push). A
-        // missing folder lists as path/not_found → treat as "no progress yet".
+        // The sync folder may not exist yet (first device, before any push) —
+        // that's "no progress yet", not a failure. Any other error (real network/
+        // auth failure) must still throw so `SyncManager` records `progressLastError`
+        // and retries.
         let entries: [RemoteEntry]
         do {
             entries = try await source.listFolder(Self.folder)
-        } catch {
+        } catch LibrarySourceError.notFound {
             return []
         }
         var result: [PlaybackProgress] = []
         for entry in entries where !entry.isFolder && entry.name.hasSuffix(".json") {
-            if let data = try? await source.readFile(at: entry.path),
-               let p = try? PlaybackProgress.decoder.decode(PlaybackProgress.self, from: data) {
-                result.append(p)
+            guard let data = try await source.readFile(at: entry.path) else { continue }
+            guard let p = try? PlaybackProgress.decoder.decode(PlaybackProgress.self, from: data) else {
+                DiagnosticLog.info("pullAll: undecodable progress at \(entry.path) — skipped", category: .sync)
+                continue
             }
+            result.append(p)
         }
         return result
     }
@@ -109,17 +113,21 @@ struct DropboxProgressSync: ProgressSync {
         let devices: [RemoteEntry]
         do {
             devices = try await source.listFolder("\(Self.folder)/devices")
-        } catch {
-            if case LibrarySourceError.network(let detail) = error,
-               detail.contains("path/not_found") { return [] }
-            throw error
+        } catch LibrarySourceError.notFound {
+            return []
         }
         var result: [DeviceStatsRecord] = []
         for entry in devices where entry.isFolder {
-            guard let data = try await source.readFile(at: "\(entry.path)/stats.json") else {
-                throw LibrarySourceError.notFound(path: "\(entry.path)/stats.json")
+            // A device folder legitimately holds only `books/` (per-book
+            // contributions, see `bookContributionPath`) before that device has
+            // ever pushed its own stats.json — skip it, don't fail the whole pull.
+            guard let data = try await source.readFile(at: "\(entry.path)/stats.json") else { continue }
+            guard let record = try? PlaybackProgress.decoder.decode(DeviceStatsRecord.self, from: data) else {
+                DiagnosticLog.info("pullAllDeviceStats: undecodable stats.json at \(entry.path) — skipped",
+                                    category: .sync)
+                continue
             }
-            result.append(try PlaybackProgress.decoder.decode(DeviceStatsRecord.self, from: data))
+            result.append(record)
         }
         return result
     }
@@ -157,7 +165,7 @@ struct DropboxProgressSync: ProgressSync {
         let devices: [RemoteEntry]
         do {
             devices = try await source.listFolder("\(Self.folder)/devices")
-        } catch {
+        } catch LibrarySourceError.notFound {
             return []
         }
         var result: [DeviceBookContribution] = []
@@ -165,14 +173,19 @@ struct DropboxProgressSync: ProgressSync {
             let books: [RemoteEntry]
             do {
                 books = try await source.listFolder("\(device.path)/books")
-            } catch {
+            } catch LibrarySourceError.notFound {
+                // This device hasn't pushed any book contributions yet — skip it,
+                // don't fail the whole pull.
                 continue
             }
             for entry in books where !entry.isFolder && entry.name.hasSuffix(".json") {
-                if let data = try? await source.readFile(at: entry.path),
-                   let c = try? PlaybackProgress.decoder.decode(DeviceBookContribution.self, from: data) {
-                    result.append(c)
+                guard let data = try await source.readFile(at: entry.path) else { continue }
+                guard let c = try? PlaybackProgress.decoder.decode(DeviceBookContribution.self, from: data) else {
+                    DiagnosticLog.info("pullAllBookContributions: undecodable \(entry.path) — skipped",
+                                        category: .sync)
+                    continue
                 }
+                result.append(c)
             }
         }
         return result

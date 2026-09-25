@@ -25,7 +25,15 @@ actor DropboxSource: LibrarySource {
 
     func listFolder(_ path: String) async throws -> [RemoteEntry] {
         let body = ListFolderArg(path: Self.apiPath(path), recursive: false)
-        var page: ListFolderResult = try await rpc("/files/list_folder", body)
+        var page: ListFolderResult
+        do {
+            page = try await rpc("/files/list_folder", body)
+        } catch let LibrarySourceError.network(underlying) where underlying.contains("path/not_found") {
+            // A never-created folder (e.g. before any device has pushed to it) is not
+            // a real failure — give callers a proper not-found signal instead of a
+            // generic network error, so they can tell "empty" apart from "broken".
+            throw LibrarySourceError.notFound(path: path)
+        }
         var entries = page.entries
         while page.has_more {
             page = try await rpc("/files/list_folder/continue", ContinueArg(cursor: page.cursor))

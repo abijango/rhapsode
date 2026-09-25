@@ -175,6 +175,95 @@ private final class PrescanDiagnosticReporter: @unchecked Sendable {
     }
 }
 
+/// Decides whether an AVAudioSession interruption `.ended` should resume playback. Armed only
+/// when we were actually playing when `.began` fired; disarmed by ANY other pause in between
+/// (explicit user/system pause) or by the output route disappearing mid-interruption (AirPods
+/// pulled during a call) — see `AudiobookPlayer.handleInterruption` / `handleRouteChange`, which
+/// call `pause()` (and therefore `disarm()`) BEFORE re-arming, so the re-arm always wins over a
+/// stale disarm from the same `.began`.
+struct InterruptionResumeGate {
+    private(set) var armed = false
+    private var active = false
+
+    /// Call after `pause()` (if `wasPlaying`) so this re-arm is the last word for this `.began`.
+    mutating func began(wasPlaying: Bool) {
+        active = true
+        armed = wasPlaying
+    }
+
+    /// Every pause path funnels through here, interruption's own included — see above for why
+    /// that is not a bug.
+    mutating func disarm() {
+        armed = false
+    }
+
+    /// The route vanishing mid-interruption means resuming would either hit a route that is
+    /// gone or one that changed underneath the user without their say — never auto-resume into it.
+    mutating func routeLost() {
+        guard active else { return }
+        armed = false
+    }
+
+    /// Consumes the gate for this interruption; returns whether `play()` should run.
+    mutating func ended(shouldResume: Bool) -> Bool {
+        defer { active = false; armed = false }
+        return armed && shouldResume
+    }
+}
+
+/// One-shot decision: is this play attempt the spurious accessory auto-play that iOS/the
+/// accessory itself issues right after a route removal or reconnect, not a deliberate user
+/// command? `arm` starts the window; `consumeShouldSuppress` always disarms (whether or not it
+/// suppresses) so a second attempt — deliberate or not — is never blocked by the same event.
+/// Pure/`Date`-parameterized so it is testable without touching AVAudioSession.
+struct AccessoryPlaySuppressionWindow {
+    private var armed = false
+    private var deadline = Date.distantPast
+
+    mutating func arm(now: Date, window: TimeInterval) {
+        armed = true
+        deadline = now.addingTimeInterval(window)
+    }
+
+    mutating func consumeShouldSuppress(now: Date) -> Bool {
+        defer { armed = false }
+        return armed && now < deadline
+    }
+
+    mutating func clear() {
+        armed = false
+    }
+}
+
+/// Thread-safe wrapper around `AccessoryPlaySuppressionWindow`. `configureRemoteCommands()`'s
+/// `playCommand` target is invoked by MediaPlayer off the main thread and must return
+/// `.success`/`.commandFailed` SYNCHRONOUSLY, so there is no time to hop to the main actor first
+/// (see the comment there) — this stays `nonisolated` and lock-guarded for that one read/write.
+/// The actual `play()` call still hops via `Task { @MainActor in }` like every other
+/// AVAudioSession/remote-command entry point.
+private final class AccessoryPlaySuppressionGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var window = AccessoryPlaySuppressionWindow()
+
+    func arm(window: TimeInterval) {
+        lock.lock()
+        self.window.arm(now: Date(), window: window)
+        lock.unlock()
+    }
+
+    func consumeShouldSuppress() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return window.consumeShouldSuppress(now: Date())
+    }
+
+    func clear() {
+        lock.lock()
+        window.clear()
+        lock.unlock()
+    }
+}
+
 /// Plays an `Audiobook`, handling both formats behind one `(trackIndex, offset)`
 /// model, plus background audio, lock-screen/Control-Center controls, and resume.
 ///
@@ -259,8 +348,19 @@ final class AudiobookPlayer {
     // backend does not, so the player owns interruption + route-change reactions.
     private var interruptionObserver: NSObjectProtocol?
     private var routeChangeObserver: NSObjectProtocol?
-    private var suppressAccessoryPlayUntil = Date.distantPast
+    /// Whether `.ended` (with `.shouldResume`) should call `play()` — see `InterruptionResumeGate`.
+    private var interruptionGate = InterruptionResumeGate()
+    /// Set while waiting for a route to replace one that just vanished (`.oldDeviceUnavailable`);
+    /// cleared on `.newDeviceAvailable`. Used both to gate re-arming accessory-play suppression
+    /// and to tell `interruptionGate` the route died mid-interruption.
     private var awaitingRouteReplacement = false
+    /// Guards `configureRemoteCommands()`'s `playCommand` against the spurious auto-play an
+    /// accessory/iOS issues right after a route removal or reconnect — see `AccessoryPlaySuppressionGate`.
+    private nonisolated let accessoryPlaySuppression = AccessoryPlaySuppressionGate()
+    /// The auto-play iOS/an accessory issues after a route transition arrives within about a
+    /// second; this bounds the one-shot suppression comfortably above that without blocking a
+    /// deliberate lock-screen/Control-Center tap seconds later (was a flat 10s that swallowed them).
+    private static let accessoryPlaySuppressionWindow: TimeInterval = 2
 
     /// Cached lock-screen artwork for the current cover path (avoid reloading on every tick).
     private var nowPlayingCoverPath: String?
@@ -338,6 +438,7 @@ final class AudiobookPlayer {
             self.settlePlaybackSpeedSavings()
             self.speedSavingsAccumulator.reset()
             self.isPlaying = false
+            self.interruptionGate.disarm()   // a failed backend must not auto-resume on `.ended`
             self.persist(force: true)
             self.updateNowPlaying()
         }
@@ -774,7 +875,7 @@ final class AudiobookPlayer {
 
     func play() {
         guard !isPlaying else { return }
-        suppressAccessoryPlayUntil = .distantPast
+        accessoryPlaySuppression.clear()
         materialize()   // a launch-restored book has no session/asset yet
         // WP8 — smart resume: nudge position back before playing, but only when the flag was armed
         // (initial load or pause). Deliberate seeks clear the flag so scrub-then-play isn't yanked back.
@@ -805,6 +906,11 @@ final class AudiobookPlayer {
         speedSavingsAccumulator.reset()
         isPlaying = false
         backend.pause()
+        // Every pause funnels through here, including the interruption handler's own — see
+        // `InterruptionResumeGate`. Any OTHER pause in between `.began` and `.ended` (user tap,
+        // sleep timer, etc.) must cancel the auto-resume; the interruption handler re-arms after
+        // this call returns, so its own pause disarming here is not a bug.
+        interruptionGate.disarm()
         DiagnosticLog.info("pause “\(book?.title ?? "?")”"
                            + (endedNaturally ? " (end of book)" : ""), category: .playback)
         pendingResumeNudge = true   // WP8: arm so next play() nudges
@@ -1073,9 +1179,16 @@ final class AudiobookPlayer {
         DiagnosticLog.info("audio interruption type=\(typeRaw) options=\(optionsRaw)", category: .playback)
         switch type {
         case .began:
-            if isPlaying { pause() }
+            let wasPlaying = isPlaying
+            if wasPlaying { pause() }
+            // Re-arm AFTER pause() so this is the last word for this `.began` — see
+            // `InterruptionResumeGate.disarm()`'s comment on `pause()`.
+            interruptionGate.began(wasPlaying: wasPlaying)
         case .ended:
-            break
+            let options = AVAudioSession.InterruptionOptions(rawValue: optionsRaw)
+            if interruptionGate.ended(shouldResume: options.contains(.shouldResume)) {
+                play()
+            }
         @unknown default:
             break
         }
@@ -1088,11 +1201,14 @@ final class AudiobookPlayer {
         // Headphones/route unplugged mid-play: pause rather than blast audio out the speaker.
         if reason == .oldDeviceUnavailable {
             awaitingRouteReplacement = true
-            suppressAccessoryPlayUntil = Date().addingTimeInterval(10)
+            accessoryPlaySuppression.arm(window: Self.accessoryPlaySuppressionWindow)
+            // The route vanished while a call/Siri had us paused: never let `.ended` auto-resume
+            // into a route that may be gone, or may have changed, without the user asking.
+            interruptionGate.routeLost()
             if isPlaying { pause() }
         } else if reason == .newDeviceAvailable, awaitingRouteReplacement {
             awaitingRouteReplacement = false
-            suppressAccessoryPlayUntil = Date().addingTimeInterval(10)
+            accessoryPlaySuppression.arm(window: Self.accessoryPlaySuppressionWindow)
         }
     }
 
@@ -1262,12 +1378,14 @@ final class AudiobookPlayer {
         // main actor (the player is @MainActor) rather than calling directly —
         // calling main-actor methods off-main trips a dispatch-queue assertion.
         c.playCommand.addTarget { [weak self] _ in
+            guard let self else { return .commandFailed }
+            // Must decide `.success`/`.commandFailed` synchronously, before any main-actor hop —
+            // `accessoryPlaySuppression` is `nonisolated`/lock-guarded for exactly this read.
+            if self.accessoryPlaySuppression.consumeShouldSuppress() {
+                DiagnosticLog.info("remote play suppressed after route removal", category: .playback)
+                return .commandFailed   // keep lock-screen/Control-Center state accurate
+            }
             Task { @MainActor in
-                guard let self else { return }
-                if Date() < self.suppressAccessoryPlayUntil {
-                    DiagnosticLog.info("remote play suppressed after route removal", category: .playback)
-                    return
-                }
                 DiagnosticLog.info("remote play command", category: .playback)
                 self.play()
             }

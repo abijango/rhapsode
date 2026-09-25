@@ -137,10 +137,27 @@ public struct TrimRenderer {
         }
 
         let channelCount = Int(left.format.channelCount)
+
+        // Snap the seam to nearby zero crossings, same window as `renderMapped`. `left` and
+        // `right` are separately decoded handles with no audio beyond their own edges, so unlike
+        // `renderMapped` (one continuous buffer) each side can only snap back into itself.
+        let snapWindow = max(1, Int((Self.snapWindowMs / 1000.0
+                                     * left.format.sampleRate).rounded()))
+        let leftRef = AudioIO.downmixToMono(left)
+        let rightRef = AudioIO.downmixToMono(right)
+        let leftKeep = Self.snapZeroCrossing(leftRef, around: leftFrames,
+                                             lo: leftFrames - snapWindow, hi: leftFrames - 1,
+                                             window: snapWindow, total: leftFrames)
+        let rightDrop = Self.snapZeroCrossing(rightRef, around: 0,
+                                              lo: -snapWindow, hi: rightFrames - 1,
+                                              window: snapWindow, total: rightFrames)
+        let effectiveLeftFrames = leftKeep
+        let effectiveRightFrames = rightFrames - rightDrop
+
         let crossfadeFrames = max(1, Int((settings.crossfadeMs / 1000.0
                                           * left.format.sampleRate).rounded()))
-        let crossfade = min(crossfadeFrames, leftFrames, rightFrames)
-        let outputFrames = leftFrames + rightFrames - crossfade
+        let crossfade = min(crossfadeFrames, effectiveLeftFrames, effectiveRightFrames)
+        let outputFrames = effectiveLeftFrames + effectiveRightFrames - crossfade
         guard let output = AVAudioPCMBuffer(
             pcmFormat: left.format,
             frameCapacity: AVAudioFrameCount(outputFrames)
@@ -150,31 +167,34 @@ public struct TrimRenderer {
         output.frameLength = AVAudioFrameCount(outputFrames)
         let gains = Self.equalPowerLUT(length: crossfade)
         for channel in 0..<channelCount {
-            outputData[channel].update(from: leftData[channel], count: leftFrames)
+            outputData[channel].update(from: leftData[channel], count: effectiveLeftFrames)
             for frame in 0..<crossfade {
                 let gain = gains[frame]
-                let outputIndex = leftFrames - crossfade + frame
+                let outputIndex = effectiveLeftFrames - crossfade + frame
                 let mixed = outputData[channel][outputIndex] * gain.out
-                    + rightData[channel][frame] * gain.incoming
+                    + rightData[channel][rightDrop + frame] * gain.incoming
                 outputData[channel][outputIndex] = min(1, max(-1, mixed))
             }
-            if rightFrames > crossfade {
-                outputData[channel].advanced(by: leftFrames)
-                    .update(from: rightData[channel].advanced(by: crossfade),
-                            count: rightFrames - crossfade)
+            if effectiveRightFrames > crossfade {
+                outputData[channel].advanced(by: effectiveLeftFrames)
+                    .update(from: rightData[channel].advanced(by: rightDrop + crossfade),
+                            count: effectiveRightFrames - crossfade)
             }
         }
 
+        // Virtual coordinates stay anchored to the *original* leftFrames (the caller derives
+        // `virtualRightStart` the same way from the untrimmed buffer length), so frames the snap
+        // drops just shrink the segment ranges rather than shifting the contract.
         let virtualRightStart = leftFrames + 1
         var segments = [
-            RenderSegment(sourceStart: 0, sourceEnd: leftFrames,
-                          trimmedStart: 0, trimmedEnd: leftFrames)
+            RenderSegment(sourceStart: 0, sourceEnd: effectiveLeftFrames,
+                          trimmedStart: 0, trimmedEnd: effectiveLeftFrames)
         ]
-        if rightFrames > crossfade {
+        if effectiveRightFrames > crossfade {
             segments.append(
-                RenderSegment(sourceStart: virtualRightStart + crossfade,
+                RenderSegment(sourceStart: virtualRightStart + rightDrop + crossfade,
                               sourceEnd: virtualRightStart + rightFrames,
-                              trimmedStart: leftFrames,
+                              trimmedStart: effectiveLeftFrames,
                               trimmedEnd: outputFrames)
             )
         }

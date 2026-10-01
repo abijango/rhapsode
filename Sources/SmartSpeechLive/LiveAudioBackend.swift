@@ -134,6 +134,7 @@ final class LiveAudioBackend {
             connectedFormat = format
         }
 
+        allowLockScreenIOSlice()
         let r = max(0.5, min(rate, 3.0))
         timePitch.rate = r
         timePitch.bypass = (r == 1.0)
@@ -251,8 +252,19 @@ final class LiveAudioBackend {
 
     /// Foreground uses 4 Hz Now Playing ticks; background uses 1 Hz. The producer keeps its
     /// single bounded live-analysis fallback active when the whole-file prescan is paused.
+    ///
+    /// Locking the screen stops `AVAudioEngine` (the hardware IO buffer jumps, and iOS will
+    /// suspend a silent engine). Re-activate the session and restart from the last source
+    /// position while we still have execution time, so playback continues on the lock screen
+    /// and in the app switcher.
     func setAppForegrounded(_ foreground: Bool) {
         displayIntervalMs = foreground ? 250 : 1000
+        guard isPlaying else { return }
+        if foreground {
+            if !engine.isRunning { sustainPlayback(context: "foreground") }
+        } else {
+            sustainPlayback(context: "background")
+        }
     }
 
     func stop() {
@@ -336,9 +348,14 @@ final class LiveAudioBackend {
             configObserver = NotificationCenter.default.addObserver(
                 forName: .AVAudioEngineConfigurationChange,
                 object: engine,
-                queue: nil
+                queue: .main
             ) { [weak self] _ in
-                Task { @MainActor in self?.handleEngineConfigurationChange() }
+                // Synchronous on the main queue. A `Task` hop is deferred across
+                // suspension, so a lock-screen configuration change never restarts
+                // the engine before iOS freezes the process.
+                MainActor.assumeIsolated {
+                    self?.handleEngineConfigurationChange()
+                }
             }
         }
         if mediaResetObserver == nil {
@@ -350,6 +367,52 @@ final class LiveAudioBackend {
                 Task { @MainActor in self?.handleMediaServicesReset() }
             }
         }
+    }
+
+    /// Screen lock asks the output unit for 4096-frame slices. The default maximum
+    /// is smaller, the render callback fails, and playback goes silent. Must be
+    /// set before `engine.prepare()` allocates render resources.
+    private func allowLockScreenIOSlice() {
+        let frames: AUAudioFrameCount = 4096
+        for node in [engine.outputNode, engine.mainMixerNode, playerNode, timePitch] {
+            node.auAudioUnit.maximumFramesToRender = frames
+        }
+    }
+
+    /// Keep an in-progress listen alive across lock and background. If the engine
+    /// was stopped, rebuild the session from the last source position.
+    private func sustainPlayback(context: String) {
+        guard producer != nil, !isHandlingConfigChange else { return }
+        try? AVAudioSession.sharedInstance().setActive(true)
+        if engine.isRunning {
+            producer?.keepNodePlaying()
+            DiagnosticLog.info("playback \(context) engine=running", category: .playback)
+            return
+        }
+
+        let src = lastKnownSource
+        DiagnosticLog.info(
+            "playback \(context) engine=stopped — restarting src=\(String(format: "%.1f", src))",
+            category: .playback
+        )
+        isHandlingConfigChange = true
+        do {
+            try engine.start()
+        } catch {
+            DiagnosticLog.error(
+                "background engine start failed: \(error.localizedDescription)",
+                category: .playback
+            )
+            releaseConfigChangeGuard()
+            return
+        }
+        sessionSourceStart = src
+        resetOutputClocks()
+        reachedEndFired = false
+        awaitedSession = producer?.beginSession(fromSource: src, resumePlaying: true) ?? awaitedSession
+        isPlaying = true
+        startDisplayLoop()
+        releaseConfigChangeGuard()
     }
 
     private func cancelAdaptiveAnalysis(fromSource source: TimeInterval) {
@@ -433,7 +496,7 @@ final class LiveAudioBackend {
                 resetOutputClocks()
                 awaitedSession = producer?.beginSession(fromSource: src, resumePlaying: wasPlaying) ?? awaitedSession
             } else if wasPlaying {
-                producer?.resume()
+                producer?.keepNodePlaying()
             }
             releaseConfigChangeGuard()
             return
@@ -441,6 +504,7 @@ final class LiveAudioBackend {
 
         engine.connect(playerNode, to: timePitch, format: format)
         engine.connect(timePitch, to: engine.mainMixerNode, format: format)
+        allowLockScreenIOSlice()
         engine.prepare()
         sessionSourceStart = src
 

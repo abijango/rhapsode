@@ -471,7 +471,12 @@ private struct PlayerTransport: View {
                     .contentShape(Rectangle())
             }
             .hoverEffect(.highlight)
+            // Bare space on iOS is delivered for media-remote and focus restoration, so locking
+            // or backgrounding the phone pauses through this button with no remote-command log.
+            // Catalyst keeps the shortcut; the phone uses the on-screen control and Now Playing.
+            #if targetEnvironment(macCatalyst)
             .keyboardShortcut(.space, modifiers: [])
+            #endif
             .accessibilityLabel(player.isPlaying ? "Pause" : "Play")
 
             Button { player.skip(30) } label: {

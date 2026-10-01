@@ -895,13 +895,14 @@ final class AudiobookPlayer {
         updateNowPlaying()
     }
 
-    func pause() {
-        pause(endedNaturally: false)
+    func pause(reason: String = "ui") {
+        pause(endedNaturally: false, reason: reason)
     }
 
     /// `endedNaturally` is set only by `handleItemEnd()` on the last track, so a listener can
-    /// tell "reached the end" from "user stopped".
-    private func pause(endedNaturally: Bool) {
+    /// tell "reached the end" from "user stopped". `reason` is the diagnostic source
+    /// (`ui`, `remote`, `sleep`, `interruption`, `route`, `end`).
+    private func pause(endedNaturally: Bool, reason: String) {
         settlePlaybackSpeedSavings()
         speedSavingsAccumulator.reset()
         isPlaying = false
@@ -911,7 +912,7 @@ final class AudiobookPlayer {
         // sleep timer, etc.) must cancel the auto-resume; the interruption handler re-arms after
         // this call returns, so its own pause disarming here is not a bug.
         interruptionGate.disarm()
-        DiagnosticLog.info("pause “\(book?.title ?? "?")”"
+        DiagnosticLog.info("pause “\(book?.title ?? "?")” reason=\(reason)"
                            + (endedNaturally ? " (end of book)" : ""), category: .playback)
         pendingResumeNudge = true   // WP8: arm so next play() nudges
         flushPlaybackSavingsDiagnostic()
@@ -935,7 +936,7 @@ final class AudiobookPlayer {
                 guard let self, self.sleepTimerEnd == end else { return }
                 self.sleepTimerEnd = nil
                 self.sleepTimerTask = nil
-                if self.isPlaying { self.pause() }
+                if self.isPlaying { self.pause(reason: "sleep") }
             }
         }
     }
@@ -1180,7 +1181,7 @@ final class AudiobookPlayer {
         switch type {
         case .began:
             let wasPlaying = isPlaying
-            if wasPlaying { pause() }
+            if wasPlaying { pause(reason: "interruption") }
             // Re-arm AFTER pause() so this is the last word for this `.began` — see
             // `InterruptionResumeGate.disarm()`'s comment on `pause()`.
             interruptionGate.began(wasPlaying: wasPlaying)
@@ -1205,7 +1206,7 @@ final class AudiobookPlayer {
             // The route vanished while a call/Siri had us paused: never let `.ended` auto-resume
             // into a route that may be gone, or may have changed, without the user asking.
             interruptionGate.routeLost()
-            if isPlaying { pause() }
+            if isPlaying { pause(reason: "route") }
         } else if reason == .newDeviceAvailable, awaitingRouteReplacement {
             awaitingRouteReplacement = false
             accessoryPlaySuppression.arm(window: Self.accessoryPlaySuppressionWindow)
@@ -1258,7 +1259,7 @@ final class AudiobookPlayer {
         if !isSingleFile && currentIndex + 1 < tracks.count {
             jump(toTrack: currentIndex + 1)
         } else {
-            pause(endedNaturally: true)   // reached the end of the book, not a user stop
+            pause(endedNaturally: true, reason: "end")
         }
     }
 
@@ -1373,6 +1374,7 @@ final class AudiobookPlayer {
         // book switch would add another (leaking) set of command handlers.
         guard !didConfigureRemoteCommands else { return }
         didConfigureRemoteCommands = true
+        UIApplication.shared.beginReceivingRemoteControlEvents()
         let c = MPRemoteCommandCenter.shared()
         // MediaPlayer invokes these handlers on a non-main thread, so hop to the
         // main actor (the player is @MainActor) rather than calling directly —
@@ -1394,7 +1396,19 @@ final class AudiobookPlayer {
         c.pauseCommand.addTarget { [weak self] _ in
             Task { @MainActor in
                 DiagnosticLog.info("remote pause command", category: .playback)
-                self?.pause()
+                self?.pause(reason: "remote")
+            }
+            return .success
+        }
+        c.togglePlayPauseCommand.addTarget { [weak self] _ in
+            Task { @MainActor in
+                DiagnosticLog.info("remote toggle command", category: .playback)
+                guard let self else { return }
+                if self.isPlaying {
+                    self.pause(reason: "remote")
+                } else {
+                    self.play()
+                }
             }
             return .success
         }

@@ -225,6 +225,19 @@ final class LiveTrimProducer: @unchecked Sendable {
         }
     }
 
+    /// The engine is still running but the node may have been paused by a route or
+    /// lock-screen configuration change. Does not start a second pump.
+    func keepNodePlaying() {
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.lock.lock()
+            let allowed = self.allowRefill && self.graphLive
+            self.lock.unlock()
+            guard allowed else { return }
+            self.playerNode.play()
+        }
+    }
+
     /// Pause (node keeps its schedule and timeline; `beginSession` is the only reset path).
     func pause() {
         queue.async { [weak self] in

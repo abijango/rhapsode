@@ -295,7 +295,7 @@ struct RootTabView: View {
     // MARK: Compact (iPhone)
 
     private var compactTabs: some View {
-        accessoryAttachedTabs
+        compactTabView
             .sheet(isPresented: $settingsPresented) {
                 SettingsView(showsCloseButton: true)
             }
@@ -306,32 +306,32 @@ struct RootTabView: View {
             }
     }
 
-    @ViewBuilder
-    private var accessoryAttachedTabs: some View {
-        if #available(iOS 26.1, *) {
-            compactTabView.tabViewBottomAccessory(isEnabled: showsMiniPlayer) {
+    /// The now-playing bar lives in the tab content's bottom safe area, not in
+    /// `tabViewBottomAccessory`. That accessory is a short capsule and clips anything taller,
+    /// which was cutting off the cover, the play button, and the progress track.
+    private func withMiniPlayer<Content: View>(_ content: Content) -> some View {
+        content.safeAreaInset(edge: .bottom, spacing: 8) {
+            if showsMiniPlayer {
                 miniPlayerAccessory
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 8)
             }
-        } else if showsMiniPlayer {
-            compactTabView.tabViewBottomAccessory { miniPlayerAccessory }
-        } else {
-            compactTabView
         }
     }
 
     private var compactTabView: some View {
         TabView(selection: $tabSelection) {
-            AudiobooksShelfView()
+            withMiniPlayer(AudiobooksShelfView())
                 .tabItem { Label("Audiobooks", systemImage: "headphones") }
                 .badge(sync.newRemoteCount(kind: .audiobooks))
                 .tag(CompactRootTab.audiobooks)
 
-            BooksShelfView()
+            withMiniPlayer(BooksShelfView())
                 .tabItem { Label("E-books", systemImage: "books.vertical") }
                 .badge(sync.newRemoteCount(kind: .books))
                 .tag(CompactRootTab.ebooks)
 
-            NerdStatsView()
+            withMiniPlayer(NerdStatsView())
                 .tabItem { Label("Nerd Stats", systemImage: "chart.bar") }
                 .tag(CompactRootTab.stats)
         }
